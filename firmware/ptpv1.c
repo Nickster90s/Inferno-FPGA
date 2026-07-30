@@ -146,15 +146,32 @@ static void servo_update(int64_t offset_ns)
     g_ptpv1.offset_ns = offset_ns;
     g_ptpv1.servo_updates++;
 
-    // A large offset is a time jump, not a frequency error. Step, then let the
-    // loop settle rather than winding the integrator up chasing it.
+    // A large offset is a time jump, not a frequency error.
+    //
+    // Use an ABSOLUTE step, not a relative correction. At cold boot our TSU
+    // counts from 0 while the Dante Leader is at ~6171 s, so the first offset is
+    // ~-6.1e12 ns. Feeding that to gptp_adjust_offset() as a relative nudge does
+    // not converge, and the servo then re-steps on every Sync forever without
+    // ever reaching the frequency-control path -- observed as a frequency offset
+    // pinned at exactly 0 ppb in the heartbeat across 24 consecutive reports.
+    //
+    // Setting the clock directly to master time + path delay is what gptp.c does
+    // for the same situation, and it converges in one Sync.
     if (offset_ns > SERVO_STEP_NS || offset_ns < -SERVO_STEP_NS) {
-        gptp_adjust_offset(-offset_ns);
+        ptp_timestamp_t target = t1;
+        int64_t add_ns = g_ptpv1.mean_path_delay_ns;
+        int64_t ns = (int64_t)target.nanoseconds + add_ns;
+        while (ns >= 1000000000LL) { ns -= 1000000000LL; target.seconds++; }
+        target.nanoseconds = (uint32_t)ns;
+        gptp_step_time(target);
+
         freq_integral = 0;
         lock_streak   = 0;
         g_ptpv1.locked = 0;
         median_count = 0; median_pos = 0;
-        printf("[ptpv1] step %lld ns\n", (long long)offset_ns);
+        printf("[ptpv1] step to %llu.%09lu (was off %lld ns)\n",
+               (unsigned long long)target.seconds,
+               (unsigned long)target.nanoseconds, (long long)offset_ns);
         return;
     }
 

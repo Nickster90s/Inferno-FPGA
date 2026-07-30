@@ -25,6 +25,7 @@
 #include "dante_info.h"
 #include "dante_dev.h"
 #include "gptp.h"
+#include "ptpv1.h"
 #include "net.h"
 #include <string.h>
 #include <stdio.h>
@@ -114,10 +115,13 @@ static void send_heartbeat(void)
     // 0x8001: frequency offset in ppb. Derived from how far the PTP servo has
     // pulled the TSU addend away from nominal -- the same number DC plots in
     // its clock histogram.
+    // Report the PTPv1 servo's pull, not gPTP's -- PTPv1 owns the clock now,
+    // and reporting a servo that no longer steers anything would put a
+    // permanently flat line in Dante Controller's clock histogram.
     int32_t ppb = 0;
-    if (s_gptp && s_gptp->base_addend_full) {
-        int64_t base = (int64_t)s_gptp->base_addend_full;
-        int64_t cur  = (int64_t)s_gptp->current_addend_full;
+    if (g_ptpv1.base_addend_full) {
+        int64_t base = (int64_t)g_ptpv1.base_addend_full;
+        int64_t cur  = (int64_t)g_ptpv1.current_addend_full;
         ppb = (int32_t)(((cur - base) * 1000000000LL) / base);
     }
 

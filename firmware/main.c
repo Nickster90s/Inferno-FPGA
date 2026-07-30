@@ -239,14 +239,18 @@ static void dispatch_rx(void)
         // and it is worth knowing.
         switch (ethertype) {
             case PTP_ETHERTYPE:
-                // 802.1AS gPTP (L2). Kept working through Phase 0-3 as the
-                // reference servo; Phase 4 adds ptpv1.c (UDP 319/320) and
-                // refactors the shared PI servo out into ptp_servo.c. Dante
-                // needs PTPv1, so this branch eventually goes quiet -- but
-                // keeping it lets us A/B the servo against a known-good
-                // 802.1AS master while PTPv1 is brought up.
+                // 802.1AS gPTP (L2). COUNTED BUT NO LONGER PROCESSED.
+                //
+                // Phase 4 gave PTPv1 the clock. Both servos call
+                // gptp_set_addend_full(), so leaving gPTP running meant two
+                // control loops steering the SAME 52-bit TSU addend from
+                // different masters -- gPTP from the 802.1AS grandmaster on the
+                // bench, PTPv1 from the Dante Leader. Neither can converge, and
+                // Dante Controller correctly showed Sync red.
+                //
+                // Dante uses PTPv1, so gPTP has no role here beyond having been
+                // a useful reference servo during bring-up.
                 rx_ptp++;
-                gptp_process_rx(&gptp, frame, len);
                 break;
             case ARP_ETHERTYPE:      // 0x0806 — ARP
             case IPV4_ETHERTYPE:     // 0x0800 — IPv4/UDP/ICMP/IGMP
@@ -852,7 +856,9 @@ int main(void)
     while (1) {
         bench_tick();
         dispatch_rx();
-        gptp_poll(&gptp);
+        // gptp_poll() is NOT called: it would transmit Pdelay and run the gPTP
+        // servo against the TSU addend that ptpv1.c now owns. gptp.c is still
+        // linked for its TSU accessors, uptime and servo helpers.
         net_poll();
         mdns_poll();
         dante_info_poll();
@@ -870,11 +876,12 @@ int main(void)
         // Enable the gateware talker only once the clock is locked. Emitting
         // before lock stamps timestamps a receiver cannot align to, which
         // presents as broadband noise rather than as an obvious failure.
-        // Phase 4 swaps gptp.servo_locked for the PTPv1 lock flag; Phase 5
-        // keeps the gate exactly as-is.
+        // Gated on PTPv1 lock: our audio timestamps must sit on the same
+        // timebase the receivers derive from the Dante Leader, or they cannot
+        // align our packets and will drop them.
         {
             static uint8_t talker_on = 0;
-            uint8_t clock_ok = gptp.servo_locked;
+            uint8_t clock_ok = g_ptpv1.locked;
             if (aaf_gw_enabled && clock_ok) {
                 if (!talker_on) {
                     aaf_pkt_enable_write(1);
