@@ -99,13 +99,46 @@ Inferno emits **two empty TXT strings** on the CMC record, flagged "really
 needed?". The real device shows none. Either they are unnecessary, or avahi
 suppresses them — do not assume they are required.
 
+## A transmitter arrived: RedNet A16R — and it corrects several assumptions
+
+Second device: **RedNet A16R** (`RN-A16R2-2d4a18.local`, 169.254.60.249,
+MAC `00:1d:c1:2d:4a:18`), a 16×16 analogue interface, so it has inputs and
+advertises transmit channels. 18 `_netaudio-chan` records captured in
+`netaudio_chan_A16R.txt`. A representative one:
+
+```
+instance 01@RedNetA16R   host RN-A16R2-2d4a18.local   port 4455
+  txtvers=2  dbcp=0x1004  dbcp1=0x1200  id=1  rate=48000
+  pcm=3 4  enc=24  en=24  latency_ns=500000
+  fpp=8,2  nchan=64  at2
+```
+
+**Port 4455 confirmed** — the flow-control port, not 4440, exactly as
+`mdns_server.rs:110` has it.
+
+### Corrections to earlier assumptions
+
+| Assumption | Reality | Consequence |
+|---|---|---|
+| `MAX_CHANNELS_IN_FLOW = 8`, "Dante's max is also 8, mapping perfectly onto our 6×8" | **`nchan=64`** | **Wrong.** 8 is *inferno's own* limit, not a protocol limit. Our 6×8=48 is still legal (8 ≤ 64) but the justification was bogus — and larger flows are possible. |
+| Phase 5 plan uses **`fpp = 16`** | Device advertises **`fpp=8,2`** (max 8, min 2) | **Design input.** 16 exceeds what this hardware accepts. Phase 5 should use fpp=8: payload 8×8×3 = 192 B, frame 51+192 = **243 B**, 6000 pps/flow. |
+| `dbcp1=0x1102` (inferno forces this as the request `start_code`) | **`dbcp1=0x1200`** | Potential interop issue — real devices advertise a newer protocol version. Worth honouring the advertised value rather than forcing inferno's. |
+| `channels=0x6000004d` is "a constant, not a per-device field" | AM2 `0x6000004d`, A16R **`0x6000017f`** | **Wrong** — it *is* per-device. My earlier note in this file said otherwise; disregard that. |
+| inferno emits a `default` TXT key | Not present on either device | Probably optional. |
+| — | **`at2`** | A TXT key inferno does not emit at all. Meaning unknown. |
+
+`latency_ns=500000` (0.5 ms) here versus inferno's 10 ms default is also worth
+noting — real hardware runs much tighter latencies than inferno's conservative
+default.
+
 ## Still unconfirmed: `b.N=` multicast bundles (plan risk #1)
 
-No `_netaudio-chan` or `_netaudio-bund` records appeared, because the RedNet AM2
-is a **receive-only** device (a 2-channel output amp) and therefore advertises no
-transmit channels.
+**No `b.N=` keys appear on any of the 18 chan records, and `_netaudio-bund` is
+empty** — because no multicast flow has been configured yet. Unicast
+subscriptions do not produce these keys.
 
-Confirming the `b.<bundle>=<pos+1>` TXT key — which the whole Phase 5 gateware
-design leans on — needs a Dante **transmitter** with a multicast flow configured
-from the controller. That remains the highest-value outstanding measurement, and
-it is the Phase 3 exit gate.
+To close this, create a **multicast flow** on the A16R from Dante Controller
+(Device View → Transmit tab → "Create Multicast Flow", add channels). Then
+re-browse `_netaudio-chan` and `_netaudio-bund`. This is the Phase 3 exit gate
+and it decides whether Phase 5 can rely on pre-created multicast bundles as
+designed, or must also implement the unicast flow server (Phase 7).

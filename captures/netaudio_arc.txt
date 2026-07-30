@@ -1,0 +1,2 @@
+=;ens5;IPv4;RedNetA16R;_netaudio-arc._udp;local;RN-A16R2-2d4a18.local;169.254.60.249;4440;"router_debug=Build :800" "model=_000000000000001b" "mf=Focusrit" "router_info=Audinate DCM" "router_vers=4.4.0" "arcp_min=0.2.4" "arcp_vers=2.8.12"
+=;ens5;IPv4;RF04-RedNetAM2-RFtech;_netaudio-arc._udp;local;RN-AM2-a1723c.local;169.254.61.114;4440;"model=_0000000000000003" "mf=Focusrit" "router_info=ULTIMOX2" "router_vers=4.3.0" "arcp_min=0.2.4" "arcp_vers=2.8.9"

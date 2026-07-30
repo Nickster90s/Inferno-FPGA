@@ -1,0 +1,2 @@
+=;ens5;IPv4;RedNetA16R;_netaudio-cmc._udp;local;RN-A16R2-2d4a18.local;169.254.60.249;8800;"model=_000000000000001b" "mf=Focusrit" "channels=0x6000017f" "server_vers=4.1.0" "cmcp_min=1.0.0" "cmcp_vers=1.2.0" "process=0" "id=001dc1fffe2d4a18"
+=;ens5;IPv4;RF04-RedNetAM2-RFtech;_netaudio-cmc._udp;local;RN-AM2-a1723c.local;169.254.61.114;8800;"model=_0000000000000003" "mf=Focusrit" "channels=0x6000004d" "server_vers=4.0.5" "cmcp_min=1.0.0" "cmcp_vers=1.2.0" "process=0" "id=001dc1fffea1723c"
