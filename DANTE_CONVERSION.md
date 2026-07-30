@@ -112,6 +112,165 @@ multicast flood ever swamps the dispatcher, reintroduce filtering as
 
 ---
 
+## Phase 0.5 — decouple firmware from the bitstream
+
+**The problem.** Every firmware change alters the BRAM ROM contents, which are
+part of the bitstream, which re-rolls nextpnr's placement. Cost per firmware
+edit: a 6–10 min P&R, a seed sweep, and a USB hardware re-test. The remaining
+work is thousands of lines of new C against an undocumented protocol — 100+
+iterations, not 5 — so iteration cost would have dominated the whole schedule.
+Phase 0 demonstrated this immediately: shrinking `.text` by 31 KB invalidated
+the pinned seed and dropped `eth_rx_clk` from 133.28 to 117.90 MHz.
+
+**The fix.** Split the image.
+
+| Region | Size | Contents | Changes when |
+|---|---|---|---|
+| `rom` | 12 KB | frozen loader | ~never |
+| `sram` | 64 KB | `.data`/`.bss`/stack | — |
+| `coderam` | 96 KB | firmware `.text`/`.rodata` | every firmware build, **no P&R** |
+
+`coderam` is added in `AVBSoC.__init__` via `add_ram(..., mode="rwx")` at
+`0x20000000`. Deliberately *not* named `main_ram` — LiteDRAM claims that name in
+Phase 1.
+
+**Loader** (`firmware/loader/loader.c`, 7068 bytes = 57% of 12 KB). Tries two
+sources in order:
+
+1. **Netload** — a ~400 ms window at each reset listening for raw Ethernet
+   frames (ethertype `0x88B5`, IEEE 802 local experimental 1). Stop-and-wait
+   with an ACK carrying the next expected offset, so a dropped or duplicated
+   chunk self-corrects. This is the development path: edit C → `make` →
+   `tools/netload.py` → running, in seconds, with no P&R, no seed roulette and
+   no USB risk. It also avoids `/dev/ttyACM0` entirely, which matters because
+   that port belongs to the interactive console.
+2. **SPI flash** — image at `0x300000` behind a 12-byte header
+   (magic `INFN`, length, crc32), so the board boots standalone. Written with
+   the existing openocd/bscan path via `tools/mkimage.py`; no new flashing
+   infrastructure.
+
+If both fail the loader prints and halts rather than jumping into garbage.
+
+**Reuse over reimplementation.** The loader links `firmware/cfgflash.c`
+unchanged rather than re-deriving SPI access. That driver encodes two things
+that are easy to get subtly wrong: the STARTUPE2 warm-up (7-series masks the
+first `USRCCLKO` edges, so the very first transaction is swallowed and JEDEC
+reads `0xFFFFFF`) and the 40-bit top-aligned MOSI convention with one
+self-contained auto-CS transfer per byte (manual-CS multi-transfer is flaky on
+this SPIMaster). The loader carries no `printf` — libbase's `vfprintf` alone is
+~1.7 KB, a seventh of the ROM — using a hand-rolled `puts`/hex instead.
+
+**Escape hatch retained.** `avb_soc.py --bake-firmware` restores the legacy
+single-image map (96 KB ROM, firmware baked, no coderam) for a standalone
+shippable bitstream, or for recovery if the loader boot path ever breaks.
+
+### Problems found and fixed during implementation
+
+- **`VPATH` resolves targets, not just prerequisites.** The loader Makefile
+  reuses `crt0.o` and `cfgflash.o` from `../`, and make found the *already-built*
+  copies there, declared the targets satisfied, and passed bare filenames to the
+  linker — which then couldn't find them. Fixed by linking with `$^` (VPATH-
+  resolved paths) instead of `$(OBJECTS)`.
+- **The 12 KB ROM cannot hold the LiteX BIOS.** `builder.py:396-401` skips BIOS
+  compilation when the ROM is already initialized, which happens automatically
+  once `--firmware` supplies an image — but not for `--soft-only`, which supplies
+  none. Now asserts `soc.integrated_rom_initialized = True` explicitly in split
+  mode.
+- **LiteX `memusage` reported "ROM usage 261%".** It assumes `.text` lives in
+  `rom`; the firmware now links into `coderam`. Replaced with a check that reads
+  both region sizes out of the generated `regions.ld`, so the budget cannot drift
+  from the SoC definition. Same approach for the loader's ROM budget.
+- **8 KB was too tight.** The loader measured 7068 bytes = 86% of 8 KB, leaving
+  no room to fix a bug in an artifact that is supposed to be frozen. Raised to
+  12 KB (~1 extra RAMB36) → 57%.
+- **`mem.h` already defines `CODERAM_BASE`/`CODERAM_SIZE`.** Removed the
+  hardcoded duplicates in `loader.c` so the two cannot drift.
+- **The loader never programmed the PHY.** The B50612D's RGMII internal-delay
+  shadow registers must be written or our frames are mis-clocked and never reach
+  the wire, and they do **not** survive a power cycle. The loader was relying on
+  `main.c` having done it — but on a cold boot `main.c` hasn't run yet. Netload
+  would have received DATA frames and then hung forever, because its ACKs never
+  left the FPGA. `phy_init()` now runs before netload, mirroring `main.c:709-716`.
+- **Ethernet minimum-frame padding would have corrupted the image tail.** DATA
+  payload length was derived from the MAC's reported frame length. LiteEth's CRC
+  checker does strip the FCS (`mac/crc.py:364-382`: *"Packet data without CRC"*),
+  so that part was fine — but Ethernet pads every frame to 60 bytes, so any final
+  chunk shorter than 32 bytes arrives with an inflated length. The loader would
+  write up to 24 bytes of padding into the image and advance the offset past the
+  end. DATA now carries its payload length **explicitly** in `arg1`, with the
+  frame length kept only as an upper bound. (`firmware.bin`'s 32136 bytes gives a
+  392-byte final chunk, so this would not have bitten today — it was waiting for
+  a different image size.)
+- **ACK frames leaked stale bytes.** `eth_send` pads to 60 bytes; the loader now
+  zeroes the frame first rather than transmitting whatever the previous frame left
+  in the TX slot.
+
+### Verified
+
+- Loader builds and fits: 7068 / 12288 bytes (57%).
+- Firmware links into `coderam` at the right addresses: `_ftext = 0x20000000`,
+  `_fdata_rom = 0x20007d64` (in coderam, so `crt0` copies `.data` initialisers
+  out of the loaded image and not out of the loader's ROM), `_fdata = 0x10000000`,
+  `_fstack = 0x10010000`.
+- Firmware budget: coderam 32100 / 98304 (32%), sram 22432 / 65536 (34%),
+  43104 bytes of stack.
+- **The loader's hand-rolled CRC-32 matches `binascii.crc32`** on `b"a"`,
+  `b"123456789"` (canonical check value `0xcbf43926`) and the real
+  `firmware.bin` (`0x2144df1c`). A mismatch here would have NAKed every load.
+- `tools/mkimage.py` header round-trips: magic, length and CRC all verify.
+- **`tools/test_netload_protocol.py` — 17/17 pass.** The loader's receive path is
+  RISC-V code talking to LiteEth CSRs and cannot be unit-tested on the host, so
+  this is a faithful Python model of that state machine driven by frames built by
+  the *real* sender. It covers 13 image sizes (including the 8- and 20-byte
+  remainders that trigger the padding trap, and the real `firmware.bin`), plus
+  dropped-chunk, duplicated-chunk and combined perturbations to exercise the
+  ACK-based resync.
+
+  The test was **mutation-checked**: reintroducing the frame-length-derived
+  payload length makes it fail immediately with "transfer failed to converge" —
+  which is exactly the hardware symptom (a hang, with no corruption to hint at
+  the cause). A test that cannot fail is worthless; this one can.
+
+### Seed selection — and the `eth_rx` failure from Phase 0, resolved
+
+Swept with the frozen loader (`md5 ea4daf5e977dc14548a0a497eb4471bb`), 3 builds
+in parallel on 4 cores. Chosen on **worst-case margin across all four clocks**,
+not on any single headline figure:
+
+| Seed | sys (≥55) | usb (≥60) | eth_tx (≥125) | eth_rx (≥125) | worst | verdict |
+|---|---|---|---|---|---|---|
+| 1 | 61.36 | 91.68 | 135.32 | 125.20 | +0.2% | thin on eth_rx |
+| 2 | 53.40 | 93.01 | 153.89 | 141.96 | — | **reject**, sys < 55 |
+| 3 | — | — | — | — | — | **HeAP stall** |
+| 4 | 57.66 | 96.04 | 167.39 | 128.02 | +2.4% | runner-up |
+| **5** | **60.90** | **82.45** | **135.32** | **172.18** | **+8.3%** | **PINNED** |
+
+Seed 5 is now the `--seed` default in `avb_soc.py`. This closes the Phase 0
+`eth_rx_clk` failure (117.90 MHz against a 125 MHz requirement): 172.18 MHz here,
++38%.
+
+Because Phase 0.5 took firmware out of the bitstream, this pin is **stable** — it
+needs re-sweeping only when the gateware or the loader changes, not on every
+firmware edit. Global Fmax still does not predict USB quality, so it must be
+confirmed on hardware.
+
+**Seed 3 HeAP-stalls**, and this cost 14 minutes of wall clock before being
+noticed: nextpnr printed `Running main analytical placer`, never printed
+`HeAP Placer Time`, and sat at 95% CPU producing no output. `seed_sweep.sh` now
+carries a watchdog — if a build's log stops growing for `STALL_SECS` (default
+240) while HeAP has not completed, it kills that build, records `HEAP-STALL` and
+moves on. The failure mode is a property of the seed, not the machine.
+
+### Not yet verified
+
+Everything on hardware. Specifically untested in silicon: LiteEth RX/TX from
+inside the loader, the 400 ms reset window, the jump to `coderam`, the flash
+fallback path, and `phy_init()` actually being sufficient on a cold boot. The
+seed-5 bitstream is preserved at
+`bitstreams/phase0.5_seed5_loader-coderam.bit` (gitignored) for that test.
+
+---
+
 ## Side finding: plan risk #2 (mDNS Dante quirks) is smaller than feared
 
 `inferno`'s submodules are now checked out, so `searchfire` — the

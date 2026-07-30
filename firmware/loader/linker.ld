@@ -1,16 +1,12 @@
-/* Application firmware link map.
+/* Loader link map — Dante Phase 0.5
  *
- * DANTE PHASE 0.5: .text/.rodata moved from `rom` to `coderam` (0x20000000).
- * The BRAM ROM now holds only the frozen loader; this image is delivered at
- * runtime over Ethernet or from SPI flash, so firmware changes no longer alter
- * bitstream contents and no longer re-roll nextpnr placement.
+ * The loader is baked into the 8 KB BRAM ROM and runs from the CPU reset
+ * vector. Its .text/.rodata live in rom; .data has its load address in rom and
+ * is copied to sram by crt0; .bss and the stack are in sram.
  *
- * .data keeps its VMA in sram but its LOAD address is now in coderam as well --
- * crt0 copies initialisers from _fdata_rom, and that must point into the image
- * we loaded, not into the loader's ROM.
- *
- * For a legacy baked build (avb_soc.py --bake-firmware) revert the three
- * `coderam` references here to `rom`.
+ * The loader's sram usage is transient: it jumps to the application and never
+ * returns, and the application's own crt0 re-initialises .data/.bss. So the two
+ * overlapping in sram is harmless by construction.
  */
 
 INCLUDE generated/output_format.ld
@@ -30,7 +26,7 @@ SECTIONS
 
 		*(.text .stub .text.* .gnu.linkonce.t.*)
 		_etext = .;
-	} > coderam
+	} > rom
 
 	.rodata :
 	{
@@ -44,7 +40,7 @@ SECTIONS
 		FILL(0);
 		. = ALIGN(8);
 		_erodata = .;
-	} > coderam
+	} > rom
 
 	.data :
 	{
@@ -57,7 +53,7 @@ SECTIONS
 		FILL(0);
 		. = ALIGN(8);
 		_edata = .;
-	} > sram AT > coderam
+	} > sram AT > rom
 
 	.bss :
 	{

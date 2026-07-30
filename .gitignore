@@ -28,3 +28,14 @@ blinky/blinky.bit
 blinky/blinky.fasm
 blinky/blinky.frames
 blinky/blinky.json
+
+# Phase 0.5 tooling artifacts
+firmware/loader/*.o
+firmware/loader/*.d
+firmware/loader/loader.elf
+firmware/loader/loader.elf.map
+firmware/loader/loader.bin
+firmware/*.img
+build_seed*/
+tools/seed_sweep_logs/
+tools/seed_sweep_results.txt

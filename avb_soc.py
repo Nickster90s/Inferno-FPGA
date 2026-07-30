@@ -345,6 +345,9 @@ class AVBSoC(SoCCore):
         return super().add_csr_bridge(name=name, origin=origin, register=True)
 
     def __init__(self, sys_clk_freq=int(50e6), **kwargs):
+        # Pop our own kwarg before SoCCore sees it (it rejects unknown kwargs).
+        bake_firmware = kwargs.pop("bake_firmware", False)
+
         platform = colorlight_i9plus.Platform(toolchain="openxc7")
 
         # UART via CH347 on Ext-Board (TXD1/RXD1 routed to FPGA).
@@ -372,10 +375,34 @@ class AVBSoC(SoCCore):
 
         # SoCCore (VexRiscv + SRAM).
         SoCCore.__init__(self, platform, sys_clk_freq,
-            ident         = "AVB-AES3 SoC on Colorlight i9+",
+            ident         = "Inferno-FPGA USB->Dante SoC on Colorlight i9+",
             ident_version = True,
             **kwargs
         )
+
+        # ---- Executable RAM for runtime-loaded firmware (Dante Phase 0.5) ----
+        #
+        # WHY: every firmware change alters the BRAM ROM contents, which re-rolls
+        # nextpnr's placement. That costs a 6-10 min P&R, a seed sweep, and a USB
+        # hardware re-test PER FIRMWARE EDIT -- fatal for a project whose
+        # remaining work is thousands of lines of new C against an undocumented
+        # protocol (100+ iterations, not 5).
+        #
+        # FIX: the BRAM ROM now holds only a small, permanently-FROZEN loader.
+        # Firmware lives here in `coderam` and is delivered at runtime over raw
+        # Ethernet (fast: seconds) or from SPI flash (persistent). The bitstream
+        # then never changes when firmware does.
+        #
+        # Must NOT be called "main_ram" -- LiteDRAM claims that name in Phase 1.
+        # mode="rwx": the CPU fetches instructions from here, and the firmware's
+        # crt0 also copies .data out of it, so it needs read+write+execute.
+        #
+        # Set --bake-firmware to skip this and use the legacy single-image map
+        # (96 KB ROM, firmware baked, no coderam) for a standalone shippable
+        # bitstream. Keep that path working: it is the fallback if the loader
+        # ever bricks the boot sequence.
+        if not bake_firmware:
+            self.add_ram("coderam", origin=0x20000000, size=0x18000, mode="rwx")
 
         # ---- Config SPI flash (NV storage for cs= + CRF binding persistence) ----
         # Runtime read/write of the boot SPI flash via STARTUPE2 (CCLK) + the
@@ -907,16 +934,22 @@ def main():
     parser.add_argument("--build",        action="store_true", help="Build bitstream.")
     parser.add_argument("--soft-only",    action="store_true", help="Generate software headers only (no P&R).")
     parser.add_argument("--load",         action="store_true", help="Load bitstream.")
-    parser.add_argument("--seed", default=7, type=int, help="nextpnr P&R seed. "
-        "PINNED to 7 (2026-07-30): with PYTHONHASHSEED=0 (forced at the top of this "
-        "file so the build is REPRODUCIBLE) seed 7 both PLACES (HeAP doesn't stall) "
-        "and gives a clean USB datapath for the current firmware. NOTE: a FIRMWARE "
-        "change (ROM contents) re-rolls placement, so a pinned seed is only good for "
-        "the current firmware — after a firmware change, sweep seeds for one that "
-        "(a) places without a HeAP stall AND (b) gives good USB (global sys Fmax does "
-        "NOT predict USB quality — the seed shuffles the intra-region USB placement, "
-        "so it must be tested on HW), then re-pin here. History: seed 3 (57.57MHz) and "
-        "seed 6 (57.27MHz) placed but seed 6's USB was marginal; seed 7 is verified good.")
+    parser.add_argument("--seed", default=5, type=int, help="nextpnr P&R seed. "
+        "PINNED to 5 (Dante Phase 0.5, tools/seed_sweep.sh with the frozen loader "
+        "md5 ea4daf5e977dc14548a0a497eb4471bb). Chosen on WORST-CASE margin across "
+        "all four clocks, not on any single figure: "
+        "sys 60.90 (need >=55), usb 82.45 (>=60), eth_tx 135.32 (>=125), "
+        "eth_rx 172.18 (>=125) -- worst margin +8.3%. "
+        "Runners-up: seed 4 (57.66/96.04/167.39/128.02, worst +2.4%); seed 1 "
+        "(61.36/91.68/135.32/125.20) is razor-thin on eth_rx at +0.2%; seed 2 "
+        "REJECTED on sys 53.40 < 55; seed 3 HEAP-STALLS (nextpnr sat at 'Running "
+        "main analytical placer' for 14 min at 95% CPU with no 'HeAP Placer Time' "
+        "-- do not use it). "
+        "NOTE: since Phase 0.5 a FIRMWARE change no longer re-rolls placement "
+        "(firmware lives in coderam, delivered at runtime), so this pin is stable. "
+        "It must be re-swept only when the GATEWARE or the LOADER changes. And "
+        "global Fmax does NOT predict USB quality -- the seed shuffles intra-region "
+        "USB placement, so any new pin must still be tested on hardware.")
     parser.add_argument("--no-floorplan", action="store_true",
         help="Disable the USB-near-ULPI proximity floorplan (floorplan_usb.py "
              "constrains USB cells to X<=30, Y=10-70 — close to the ULPI pins "
@@ -927,7 +960,16 @@ def main():
              "deterministically pins USB near the pins. Only pass --no-floorplan "
              "for debugging.")
     parser.add_argument("--sys-clk-freq", default=50e6, type=float, help="System clock frequency.")
-    parser.add_argument("--firmware",     default=None,        help="Custom firmware .bin to embed in ROM (replaces BIOS).")
+    parser.add_argument("--firmware",     default=None,
+        help="Image to embed in the BRAM ROM (replaces the LiteX BIOS). In the "
+             "default split-image mode this is the LOADER (firmware/loader/"
+             "loader.bin); with --bake-firmware it is the full firmware.")
+    parser.add_argument("--bake-firmware", action="store_true",
+        help="LEGACY single-image map: 96 KB ROM with the full firmware baked in, "
+             "no coderam. Every firmware change then re-rolls P&R placement (the "
+             "seed-roulette tax Phase 0.5 exists to remove), so this is only for "
+             "shipping a standalone bitstream or for recovering if the loader "
+             "boot path breaks.")
     builder_args = parser.add_argument_group("builder")
     builder_args.add_argument("--output-dir", default=None, help="Output directory.")
     args = parser.parse_args()
@@ -941,7 +983,19 @@ def main():
         # play. Use SRAM rather than a separate main_ram region so all
         # firmware data lives in the proven-bootable scratchpad.
         integrated_sram_size     = 0x10000,  # 64 KB SRAM (RW data + stack)
-        integrated_rom_size      = 0x18000,  # 96 KB ROM
+        # ROM size depends on the image map (Dante Phase 0.5):
+        #   split (default)   -> 12 KB, holds only the frozen loader
+        #   --bake-firmware   -> 96 KB, holds the whole firmware (legacy)
+        #
+        # 12 KB not 8: the loader measures 7068 bytes, which is 86% of 8 KB and
+        # leaves no room to fix a bug in an artifact that is supposed to be
+        # frozen. It will also plausibly grow a flash-WRITE path so netload can
+        # persist an image in one step. 12 KB costs ~1 extra RAMB36.
+        #
+        # In split mode firmware .text/.rodata live in the 96 KB coderam added
+        # in AVBSoC.__init__, so BRAM for CPU memory goes 96 -> 108 KB
+        # (+12 KB, ~3 RAMB36 of the ~17 free). Milestone 1 needs no more BRAM.
+        integrated_rom_size      = 0x18000 if args.bake_firmware else 0x3000,
         uart_name                = "serial",
         # 1 Mbaud + 64-byte HW FIFO. 115200/16 was the LiteX default and
         # at that rate periodic prints (gPTP dump + SRP poll + AVDECC etc)
@@ -958,20 +1012,41 @@ def main():
                                            # gating (g_verbose default 0) removes
                                            # the print flood, so 64 is plenty.
     )
+    soc_kwargs["bake_firmware"] = args.bake_firmware
+
     if args.firmware:
-        # Pre-load the firmware ourselves so SoCCore doesn't shrink the ROM
-        # region down to the firmware size (which causes regions.ld to report
-        # a tiny ROM on the next firmware-only build, masking real headroom).
+        # Pre-load the image ourselves so SoCCore doesn't shrink the ROM region
+        # down to the image size (which causes regions.ld to report a tiny ROM
+        # on the next software-only build, masking real headroom).
         # Passing a list keeps the configured integrated_rom_size intact.
         from litex.soc.integration.common import get_mem_data
-        soc_kwargs["integrated_rom_init"] = get_mem_data(
-            args.firmware, endianness="little", data_width=32)
+        rom_init = get_mem_data(args.firmware, endianness="little", data_width=32)
+        rom_bytes = len(rom_init) * 4
+        rom_size  = 0x18000 if args.bake_firmware else 0x2000
+        if rom_bytes > rom_size:
+            raise SystemExit(
+                "ROM image {} is {} bytes but the ROM is only {} bytes.\n"
+                "  split mode expects the LOADER here (firmware/loader/loader.bin),\n"
+                "  not the full firmware. For a baked full-firmware build pass\n"
+                "  --bake-firmware.".format(args.firmware, rom_bytes, rom_size))
+        print("[soc] ROM image {}: {} / {} bytes ({:.0f}% of {} KB {})".format(
+            args.firmware, rom_bytes, rom_size, 100.0 * rom_bytes / rom_size,
+            rom_size // 1024, "baked firmware" if args.bake_firmware else "loader"))
+        soc_kwargs["integrated_rom_init"] = rom_init
 
     soc = AVBSoC(**soc_kwargs)
 
     builder_kwargs = {}
     if args.output_dir:
         builder_kwargs["output_dir"] = args.output_dir
+
+    # In split-image mode the ROM is 12 KB and holds the loader, so the ~33 KB
+    # LiteX BIOS cannot fit and must not be built. Builder skips it when the ROM
+    # is already initialized (builder.py:396-401), which is automatic once
+    # --firmware supplies an image. Assert it explicitly for the --soft-only
+    # case, which supplies no image but only wants the generated headers.
+    if not args.bake_firmware and not args.firmware:
+        soc.integrated_rom_initialized = True
 
     builder = Builder(soc, **builder_kwargs)
     if args.soft_only:

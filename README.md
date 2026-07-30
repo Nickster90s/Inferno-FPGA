@@ -114,7 +114,7 @@ Two properties are load-bearing and must survive every future change:
 | # | Phase | Exit signal | State |
 |---|---|---|---|
 | 0 | Fork `avb-aes3`, strip the AVB stack | boots, clock locks, USB enumerates | **code complete**, HW check pending |
-| 0.5 | Frozen loader ROM + `coderam` + netload | firmware edit → running in seconds | next |
+| 0.5 | Frozen loader ROM + `coderam` + netload | firmware edit → running in seconds | **code complete**, HW check pending |
 | 1 | LiteDRAM on the 8 MB SDRAM (`--with-sdram`) | 8 MB memtest passes | planned |
 | 2 | `net.c` — IPv4 / UDP / ICMP / IGMP / ARP | **FPGA answers `ping`** | planned |
 | 3 | Dante discovery (mDNS + ARC + CMC + info) | **device appears in Dante Controller** | planned |
@@ -135,33 +135,70 @@ carried a sample in this lineage and is out of scope until the TX path is solid.
 
 ## Quickstart
 
+The bitstream and the firmware are **separate artifacts**. The BRAM ROM holds
+only a small frozen loader; application firmware is delivered at runtime. So a
+firmware change costs seconds, not a 6–10 minute place-and-route.
+
 ```sh
 # Toolchain environment (openXC7 + LiteX/migen)
 export CHIPDB=/home/lisp/FPGA/demo-projects/chipdb
 export PRJXRAY_DB_DIR=/home/lisp/openxc7/openxc7/opt/nextpnr-xilinx/external/prjxray-db
 
-# Firmware FIRST — the bitstream bakes it into the BRAM ROM
-cd firmware && make && cd ..
-
-# Then gateware (~6-10 min)
-./build.sh --seed 7
-
-# Flash to SRAM (volatile) and open the console
+# --- once per gateware change (~6-10 min) --------------------------------
+make -C firmware/loader          # the frozen loader -> baked into the ROM
+./build.sh --seed 7              # bitstream
 sudo /home/lisp/openocd/src/openocd -s /home/lisp/openocd/tcl \
   -f /home/lisp/FPGA/Colorlight-FPGA-Projects/tools/ch347.cfg \
   -c "init; pld load 0 build/colorlight_i9plus/gateware/colorlight_i9plus.bit; exit"
-sudo picocom -b 1000000 /dev/ttyACM0     # Ctrl-A Ctrl-X to exit
+
+# --- every firmware iteration (seconds, no P&R) --------------------------
+make -C firmware
+sudo ./tools/netload.py ens5 firmware/firmware.bin    # then reset the board
 ```
+
+`netload.py` repeats its START frame until the loader answers, so start it and
+then reset the board — `r` on the console, a power cycle, or a JTAG reconfigure.
+The loader opens a ~400 ms window at every reset.
+
+For standalone boot with no host attached, put the firmware in SPI flash:
+
+```sh
+./tools/mkimage.py firmware/firmware.bin firmware/firmware.img
+TOOLS=/home/lisp/FPGA/Colorlight-FPGA-Projects/tools
+sudo /home/lisp/openocd/src/openocd -s /home/lisp/openocd/tcl -f $TOOLS/ch347.cfg -c "
+  init; pld load 0 $TOOLS/bscan_spi_xc7a50t.bit; reset halt
+  flash probe 0; flash protect 0 0 50 off
+  flash write_image erase firmware/firmware.img 0x300000 bin
+" -c exit
+```
+
+That writes only the firmware image at 3 MB — it does not touch the bitstream at
+`0x0` or the config sector at the top of flash.
+
+Console: `sudo picocom -b 1000000 /dev/ttyACM0` (Ctrl-A Ctrl-X to exit). openocd
+and picocom cannot both hold `/dev/ttyACM0` — close picocom before flashing.
+
+### Things that will bite you
 
 `build.sh` sets `PYTHONHASHSEED=0` and runs under `setarch -R` (ASLR off).
 **Both are required** for reproducible placement — without them the same
 `--seed` scatters Fmax across ~52–65 MHz run to run.
 
-Build firmware **before** gateware. If you `--build` without `--firmware`, the
-ROM bakes the LiteX BIOS and you get a `litex>` prompt instead of the
-`[DANTE-USB]` banner. And always `make clean && make` after touching CSRs: a
-link failure leaves the *previous* `firmware.bin` embedded against the *new*
-CSR layout, so every register access silently lands at the wrong address.
+Always `make clean && make` in `firmware/` after touching CSRs. A link failure
+otherwise leaves the *previous* `firmware.bin` in place against the *new* CSR
+layout, so every register access silently lands at the wrong address.
+
+`./build.sh --bake-firmware --firmware firmware/firmware.bin` restores the legacy
+single-image map (96 KB ROM, no loader) for a standalone shippable bitstream, or
+for recovery if the loader boot path breaks. In that mode firmware changes *do*
+re-roll placement again.
+
+After any gateware or loader change, sweep seeds and **test USB on hardware** —
+global Fmax does not predict USB quality:
+
+```sh
+JOBS=3 tools/seed_sweep.sh 1 9      # builds each seed, tabulates Fmax per clock
+```
 
 ### Persistent flashing (SPI — survives power cycle)
 
@@ -274,7 +311,18 @@ aaf_packetizer.py       gateware packetizer: 6×8ch rings → frame builder →
 floorplan_usb.py        --pre-place region constraint for the USB block
 build.sh                deterministic build wrapper (PYTHONHASHSEED + setarch -R)
 
+tools/
+  netload.py            push firmware into coderam over raw Ethernet (dev loop)
+  mkimage.py            wrap firmware in the loader's header for SPI flash
+  seed_sweep.sh         build N seeds, tabulate Fmax per clock
+  test_netload_protocol.py
+                        host-side conformance test: a model of the loader's
+                        receive state machine driven by the real sender
+
 firmware/
+  loader/               FROZEN boot loader baked into the 12 KB ROM. Loads an
+                        image into coderam from Ethernet or SPI flash and jumps.
+                        Changing it re-rolls placement -- avoid.
   main.c                boot, RX dispatcher, UART CLI, main polling loop
   gptp.c                802.1AS gPTP slave + PI servo on the 52-bit TSU addend.
                         Phase 4 factors the servo out for reuse by ptpv1.c
