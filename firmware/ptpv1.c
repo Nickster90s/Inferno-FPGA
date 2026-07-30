@@ -37,6 +37,7 @@
 #include "net.h"
 #include "dante_dev.h"
 #include <generated/soc.h>
+#include <generated/csr.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -101,6 +102,11 @@ static uint8_t  median_count, median_pos;
 
 static int64_t  freq_integral;
 static uint32_t lock_streak;
+
+// Raw (t2-t1) from the most recent resolved Sync pair, kept for the path-delay
+// calculation. Must stay RAW -- see the note in the DelayResp handler.
+static int64_t  last_t2_t1;
+static uint8_t  have_t2_t1;
 
 // ---- TEMPORARY DIAGNOSTIC -- remove once RX timestamping is characterised ---
 //
@@ -272,6 +278,8 @@ static void try_compute_offset(void)
     dbg_w = (uint8_t)((dbg_w + 1) % DBG_N);
 
     int64_t t2_t1 = gptp_ts_diff_ns(t2, t1);
+    last_t2_t1 = t2_t1;
+    have_t2_t1 = 1;
     servo_update(t2_t1 - g_ptpv1.mean_path_delay_ns);
     have_t1 = have_t2 = 0;
 }
@@ -404,8 +412,17 @@ static void ptpv1_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
 
         // mean_path_delay = ((t2-t1) + (t4-t3)) / 2, using the most recent
         // Sync pair we resolved.
+        //
+        // Use the RAW (t2-t1), not g_ptpv1.offset_ns. offset_ns is already
+        // (t2-t1) - mean_path_delay, so feeding it back here made the estimate
+        // recursive: d_new = d_true - d_old/2, whose fixed point is (2/3)d_true.
+        // That left a permanent ~1/3 error in the path delay, and since the
+        // offset is corrected by exactly this term, an equal permanent error in
+        // the offset -- microseconds of it, far above the 500 ns lock threshold,
+        // so the servo could converge beautifully and still never lock.
         int64_t t4_t3 = gptp_ts_diff_ns(t4, t3);
-        int64_t d = (g_ptpv1.offset_ns + t4_t3) / 2;
+        if (!have_t2_t1) return;              // no Sync pair resolved yet
+        int64_t d = (last_t2_t1 + t4_t3) / 2;
         if (d < 0) d = 0;                     // negative delay is nonsense
         if (d < 10000000LL)                   // ignore absurd (>10 ms) outliers
             g_ptpv1.mean_path_delay_ns = d;
@@ -438,6 +455,22 @@ void ptpv1_poll(void)
             int k = (dbg_w + i) % DBG_N;   // oldest first
             const uint32_t v[4] = { dbg_ring[k].t1s, dbg_ring[k].t1n,
                                     dbg_ring[k].t2s, dbg_ring[k].t2n };
+            for (int j = 0; j < 4; j++) {
+                p[n++] = (uint8_t)(v[j] >> 24); p[n++] = (uint8_t)(v[j] >> 16);
+                p[n++] = (uint8_t)(v[j] >> 8);  p[n++] = (uint8_t)v[j];
+            }
+        }
+        // Ring health, appended to the (t1,t2) dump. If commits and pops ever
+        // diverge, the ring is misaligned and every popped timestamp belongs to
+        // some OTHER frame -- on this network almost always a flooded audio
+        // frame, which arrives on the sender's 3 kHz media-clock grid. That is
+        // the shape of the 333.35 us quantisation we measured.
+        {
+            extern uint32_t rx_ts_resyncs, g_lvl_pre, g_lvl_post;
+            const uint32_t v[4] = { g_lvl_pre,
+                                    g_lvl_post,
+                                    main_rx_ts_commit_count_read(),
+                                    rx_ts_resyncs };
             for (int j = 0; j < 4; j++) {
                 p[n++] = (uint8_t)(v[j] >> 24); p[n++] = (uint8_t)(v[j] >> 16);
                 p[n++] = (uint8_t)(v[j] >> 8);  p[n++] = (uint8_t)v[j];

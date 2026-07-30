@@ -47,6 +47,9 @@ static mcr_state_t    mcr;
 // RX EtherType counters for link-debug
 static uint32_t rx_total, rx_ptp, rx_avtp, rx_msrp, rx_other;
 static uint32_t rx_filtered;         // frames early-dropped by the MAC allow-list
+uint32_t rx_pops;                    // TEMPORARY: total ts-ring pops issued by firmware
+uint32_t rx_ts_resyncs;              // TEMPORARY: stale ts-ring entries dropped
+uint32_t g_lvl_pre, g_lvl_post;      // TEMPORARY: ts-ring level around the resync
 static uint16_t rx_last_ethertype;
 static uint8_t  rx_last_dst[6];
 static uint8_t  rx_last_src[6];
@@ -96,6 +99,42 @@ static bench_t bench;
 
 static void dispatch_rx(void)
 {
+    // Resynchronise the RX timestamp ring before draining slots.
+    //
+    // The ring is pushed by gateware on every COMMITTED frame and popped here
+    // once per slot processed. Nothing pops it before this firmware starts, so
+    // on a busy network the loader's netload window is more than long enough to
+    // fill all 8 entries. After that push and pop rates are identical (both are
+    // exactly once per committed frame), so the backlog NEVER drains: every
+    // timestamp we read stays 7-8 frames stale for the rest of the run.
+    //
+    // MEASURED before this fix: level pinned at 7-8 of 8 with commits and pops
+    // both at 3007/s. The stale entries belong to flooded Dante audio, which
+    // arrives on the SENDER's 48000/16 = 3000 Hz media clock -- and that is
+    // exactly the 333.35 us (2999.84 Hz) quantisation that showed up in the PTP
+    // offsets, locked to a clock that was never ours. It cost PTPv1 any hope of
+    // locking, since the noise was 300x the 500 ns lock threshold.
+    //
+    // The invariant that fixes it: level can never legitimately exceed the
+    // number of committed-but-unprocessed frames, and stat_fifo is nslots deep,
+    // so anything above 2 is backlog by definition. Dropping the excess here is
+    // self-healing -- it recovers from boot and from any future desync (a lost
+    // push on overflow, a slot serviced without a pop) without a special init
+    // path, and costs two CSR reads per dispatch when healthy.
+    {
+        uint32_t lvl = main_rx_ts_level_read();
+        g_lvl_pre = lvl;
+        while (lvl > 2) {
+            main_rx_ts_pop_write(1);
+            rx_ts_resyncs++;
+            lvl--;
+        }
+        // Re-read from the CSR rather than trusting the local counter. If the
+        // level does not actually fall after the pops, the pop path itself is
+        // not advancing the FIFO and no amount of draining will realign it.
+        g_lvl_post = main_rx_ts_level_read();
+    }
+
     // Drain pending RX slots in one dispatcher call (bounded). nrxslots=2
     // is pinned (>2 silently breaks TX — see avb_soc.py:537); under MSRP /
     // AVDECC / CRF bursts the writer overruns within microseconds if we
@@ -172,7 +211,7 @@ static void dispatch_rx(void)
             }
             if (!keep) {
                 rx_filtered++;
-                main_rx_ts_pop_write(1);         // keep the ts ring in lock-step
+                main_rx_ts_pop_write(1); rx_pops++;         // keep the ts ring in lock-step
                 ethmac_sram_writer_ev_pending_write(ETHMAC_EV_SRAM_WRITER);
                 continue;
             }
@@ -184,7 +223,7 @@ static void dispatch_rx(void)
     cap_record(0, slot_ptr, len);
 
     // Advance the RX-timestamp ring in lock-step with slot consumption.
-    main_rx_ts_pop_write(1);
+    main_rx_ts_pop_write(1); rx_pops++;
 
     // VLAN-strip into a scratch buffer.
     //
