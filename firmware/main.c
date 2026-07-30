@@ -24,6 +24,8 @@
 #include "net.h"
 #include "dante_dev.h"
 #include "mdns.h"
+#include "dante_arc.h"
+#include "dante_cmc.h"
 
 // MAC address — locally administered, unique per device.
 // TODO: read from SPI flash or EEPROM in production.
@@ -814,6 +816,8 @@ int main(void)
     // Dante identity + discovery (Phase 3).
     dante_dev_init(mac_addr);
     mdns_init();
+    dante_arc_init();
+    dante_cmc_init();
     mcr_init(&mcr, CONFIG_CLOCK_FREQUENCY, 48000);
     // Give MCR the gPTP handle so the free-running (cs=0) NCO is disciplined to
     // the network media rate (exactly 48000 gPTP-Hz) instead of the raw crystal.
