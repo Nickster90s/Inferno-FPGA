@@ -102,6 +102,55 @@ static uint8_t  median_count, median_pos;
 static int64_t  freq_integral;
 static uint32_t lock_streak;
 
+// ---- TEMPORARY DIAGNOSTIC -- remove once RX timestamping is characterised ---
+//
+// The heartbeat showed the frequency servo converging cleanly (52813 -> -4340
+// ppb) while the raw offset refused to settle, bouncing 9..191 us at random.
+// That is not a servo failing to converge, it is noise on the measurement, and
+// its spread is suspiciously close to one main-loop period.
+//
+// (t1, t2) is dumped for every offset computation to 224.0.0.233:9999. The
+// master's Sync period is exactly 250 ms, so successive t1 deltas are a fixed
+// ruler; any jitter in the matching t2 deltas is OUR receive timestamping
+// error, measured without needing the UART or a reference clock on the host.
+static const uint8_t dbg_group[4] = {224, 0, 0, 233};
+#define DBG_N 8
+static struct { uint32_t t1s, t1n, t2s, t2n; } dbg_ring[DBG_N];
+static uint8_t  dbg_w;
+static uint32_t next_dbg_ms;
+
+// Second diagnostic: a controlled-stimulus probe of the RX timestamp path.
+//
+// Aligning our t2 against the host capture showed our Sync arrival deltas
+// snapping to multiples of 250.3333 ms with only +/-3.5 us spread, while the
+// master's real inter-Sync jitter is +/-100 us and the host sees it plainly.
+// An arrival timestamp cannot smooth away jitter that is really on the wire,
+// so the capture is not tracking arrival -- but PTP is a poor instrument for
+// proving that, because we do not control when the master transmits.
+//
+// So: the host sends UDP to port 7777 at deliberately IRREGULAR intervals with
+// a sequence number in the payload, and we report the RX timestamp we captured
+// for each. Even spacing under uneven stimulus is proof the capture path is
+// broken, independent of anything PTP does.
+#define PROBE_PORT 7777
+#define PROBE_N 16
+static struct { uint32_t seq, ts_s, ts_n; } probe_ring[PROBE_N];
+static uint8_t probe_w;
+
+static inline uint32_t rd32(const uint8_t *p);
+
+static void probe_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
+                     uint16_t src_port, const uint8_t *payload, uint32_t len)
+{
+    (void)src_ip; (void)dst_ip; (void)src_port;
+    if (len < 4) return;
+    ptp_timestamp_t ts = gptp_read_rx_timestamp();
+    probe_ring[probe_w].seq  = rd32(payload);
+    probe_ring[probe_w].ts_s = (uint32_t)ts.seconds;
+    probe_ring[probe_w].ts_n = ts.nanoseconds;
+    probe_w = (uint8_t)((probe_w + 1) % PROBE_N);
+}
+
 // ---------------------------------------------------------------------------
 
 static inline uint16_t rd16(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]); }
@@ -217,6 +266,11 @@ static void servo_update(int64_t offset_ns)
 static void try_compute_offset(void)
 {
     if (!have_t1 || !have_t2) return;
+
+    dbg_ring[dbg_w].t1s = (uint32_t)t1.seconds; dbg_ring[dbg_w].t1n = t1.nanoseconds;
+    dbg_ring[dbg_w].t2s = (uint32_t)t2.seconds; dbg_ring[dbg_w].t2n = t2.nanoseconds;
+    dbg_w = (uint8_t)((dbg_w + 1) % DBG_N);
+
     int64_t t2_t1 = gptp_ts_diff_ns(t2, t1);
     servo_update(t2_t1 - g_ptpv1.mean_path_delay_ns);
     have_t1 = have_t2 = 0;
@@ -374,6 +428,37 @@ void ptpv1_poll(void)
         if (g_ptpv1.have_master) send_delay_req();
         next_delay_req_ms = now + DELAY_REQ_MS;
     }
+
+    // TEMPORARY: dump the (t1,t2) ring. See the note at dbg_ring.
+    if (!next_dbg_ms || (int32_t)(now - next_dbg_ms) >= 0) {
+        next_dbg_ms = now + 1000;
+        uint8_t *p = net_udp_payload_buf();
+        uint32_t n = 0;
+        for (int i = 0; i < DBG_N; i++) {
+            int k = (dbg_w + i) % DBG_N;   // oldest first
+            const uint32_t v[4] = { dbg_ring[k].t1s, dbg_ring[k].t1n,
+                                    dbg_ring[k].t2s, dbg_ring[k].t2n };
+            for (int j = 0; j < 4; j++) {
+                p[n++] = (uint8_t)(v[j] >> 24); p[n++] = (uint8_t)(v[j] >> 16);
+                p[n++] = (uint8_t)(v[j] >> 8);  p[n++] = (uint8_t)v[j];
+            }
+        }
+        net_udp_commit(dbg_group, 9999, 9999, n, NET_TOS_BEST_EFFORT);
+
+        // Probe ring -> :9998, oldest first.
+        p = net_udp_payload_buf();
+        n = 0;
+        for (int i = 0; i < PROBE_N; i++) {
+            int k = (probe_w + i) % PROBE_N;
+            const uint32_t v[3] = { probe_ring[k].seq, probe_ring[k].ts_s,
+                                    probe_ring[k].ts_n };
+            for (int j = 0; j < 3; j++) {
+                p[n++] = (uint8_t)(v[j] >> 24); p[n++] = (uint8_t)(v[j] >> 16);
+                p[n++] = (uint8_t)(v[j] >> 8);  p[n++] = (uint8_t)v[j];
+            }
+        }
+        net_udp_commit(dbg_group, 9998, 9998, n, NET_TOS_BEST_EFFORT);
+    }
 }
 
 void ptpv1_init(const uint8_t mac[6])
@@ -388,6 +473,7 @@ void ptpv1_init(const uint8_t mac[6])
 
     net_udp_bind(PTP_EVENT_PORT,   ptpv1_rx);
     net_udp_bind(PTP_GENERAL_PORT, ptpv1_rx);
+    net_udp_bind(PROBE_PORT,       probe_rx);   // TEMPORARY diagnostic
     net_igmp_join(ptp_group);
 
     printf("[ptpv1] slave on 224.0.1.129:%u/%u, uuid %02x%02x%02x%02x%02x%02x\n",

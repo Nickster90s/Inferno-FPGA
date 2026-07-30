@@ -99,10 +99,27 @@ static inline void put_u32(uint8_t *p, uint32_t at, uint32_t v)
 // ---------------------------------------------------------------------------
 // Heartbeat
 //
-// Content is a sequence of sub-records. We send only 0x8001, the clock/frequency
-// record -- that is what drives Dante Controller's clock display. The AM2 also
-// emits 0x8002 (signal peaks), 0x8003 (per-flow latency) and 0x8004; those are
-// reporting rather than identity and can wait.
+// Content is a sequence of sub-records, each:
+//
+//    0  2  record length (including this 12-byte header)
+//    2  2  type
+//    4  2  0x0004 (constant on every record from every device seen)
+//    6  2  content length
+//    8  2  seqnum / uptime
+//   10  2  0
+//   12  .. content
+//
+// We send 0x8001 (frequency offset) and 0x8000 (clock sync quality). Real
+// devices also emit 0x8002 (per-channel signal peaks), 0x8003 (sample rate +
+// per-flow words) and 0x8004; those are reporting rather than clock state.
+//
+// 0x8002/0x8003/0x8004 are deliberately NOT sent. Their leading u16 is a count
+// that scales the record (2 on the A16R, 32 on the other device on the bench),
+// and nothing observed so far pins down what it counts -- tx channels, rx
+// channels and flows are all consistent with the two samples we have. Emitting
+// a guessed count is worse than emitting nothing: a receiver that trusts it
+// would mis-parse every following record in the same datagram, since these are
+// length-delimited and parsed in sequence.
 // ---------------------------------------------------------------------------
 
 static void send_heartbeat(void)
@@ -132,6 +149,43 @@ static void send_heartbeat(void)
     put_u16(p, n, seqnum);  n += 2;
     put_u16(p, n, 0);       n += 2;
     put_u32(p, n, (uint32_t)ppb); n += 4;
+
+    // 0x8000: clock sync quality -- one 16-byte item holding the two live PTP
+    // measurements. This is what Dante Controller's Sync indicator reads; with
+    // the record absent it has nothing to judge us on and shows red, which is
+    // exactly what we were seeing while the servo itself was healthy.
+    //
+    // The four leading u16s are byte-identical on both Dante devices on the
+    // bench (count=1, item size=0x10), so they are structure, not device state.
+    // The two words that follow jitter per-second on real hardware -- 218..998
+    // and 1232..3072 on the A16R -- which is offset-from-master and mean path
+    // delay in nanoseconds, not counters.
+    //
+    // Reported honestly: while the servo is far out these are large, and DC
+    // should show red. Green has to be earned by the servo, not by the report.
+    int64_t off = g_ptpv1.offset_ns;
+    if (off < 0) off = -off;
+    if (off > 0xFFFFFFFFLL) off = 0xFFFFFFFFLL;
+    int64_t pd = g_ptpv1.mean_path_delay_ns;
+    if (pd < 0) pd = 0;
+    if (pd > 0xFFFFFFFFLL) pd = 0xFFFFFFFFLL;
+
+    put_u16(p, n, 36);      n += 2;      // length of this sub-record
+    put_u16(p, n, 0x8000);  n += 2;      // type
+    put_u16(p, n, 4);       n += 2;
+    put_u16(p, n, 4);       n += 2;      // content length (4 even though 24
+                                         // bytes follow -- both real devices
+                                         // send exactly this)
+    put_u16(p, n, seqnum);  n += 2;
+    put_u16(p, n, 0);       n += 2;
+    put_u16(p, n, 0x0010);  n += 2;      // item size
+    put_u16(p, n, 0);       n += 2;
+    put_u16(p, n, 1);       n += 2;      // item count
+    put_u16(p, n, 0x0010);  n += 2;
+    put_u32(p, n, (uint32_t)off); n += 4;
+    put_u32(p, n, (uint32_t)pd);  n += 4;
+    put_u32(p, n, 0);       n += 4;
+    put_u32(p, n, 0);       n += 4;
 
     put_u16(p, 2, (uint16_t)n);          // total_length
 
