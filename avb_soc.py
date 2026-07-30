@@ -184,8 +184,26 @@ class TSUWithCSRs(LiteXModule):
         # liteeth/core/ptp.py to use a shift-add tree instead of the `*`
         # operator (the natural form makes yosys infer a DSP48 cascade
         # that nextpnr-xilinx fails to route on XC7A50T).
-        self._addend      = CSRStorage(32, description="TSU addend integer part.")
-        self._addend_frac = CSRStorage(20, description="TSU addend fractional part (20-bit).")
+        #
+        # RESET VALUES MATTER (Dante Phase 0.5 hardware finding). These used to
+        # reset to 0, which meant the TSU counter did not advance AT ALL until
+        # firmware wrote an addend. Anything running before firmware -- notably
+        # the boot loader -- then had a frozen timebase. Symptom found on
+        # hardware: the loader's netload window never expired, so a board with
+        # no netload host waited forever and never fell through to SPI flash.
+        #
+        # A timestamp unit should free-run at nominal rate from configuration.
+        # gptp_init() still overwrites these with the identical value, so this
+        # changes no firmware behaviour -- it just removes the dead window
+        # between configuration and firmware start.
+        #
+        # Same formula as gptp.c:918 -- nominal 52-bit addend, rounded:
+        #     (2^52 + clk/2) / clk, split as (addend << 20) | addend_frac
+        _base_addend_full = ((1 << 52) + clk_freq // 2) // clk_freq
+        self._addend      = CSRStorage(32, reset=(_base_addend_full >> 20),
+            description="TSU addend integer part (resets to nominal for clk_freq).")
+        self._addend_frac = CSRStorage(20, reset=(_base_addend_full & 0xFFFFF),
+            description="TSU addend fractional part (20-bit, resets to nominal).")
         self.comb += [
             tsu.addend.eq(self._addend.storage),
             tsu.addend_frac.eq(self._addend_frac.storage),
@@ -935,21 +953,28 @@ def main():
     parser.add_argument("--soft-only",    action="store_true", help="Generate software headers only (no P&R).")
     parser.add_argument("--load",         action="store_true", help="Load bitstream.")
     parser.add_argument("--seed", default=5, type=int, help="nextpnr P&R seed. "
-        "PINNED to 5 (Dante Phase 0.5, tools/seed_sweep.sh with the frozen loader "
-        "md5 ea4daf5e977dc14548a0a497eb4471bb). Chosen on WORST-CASE margin across "
-        "all four clocks, not on any single figure: "
-        "sys 60.90 (need >=55), usb 82.45 (>=60), eth_tx 135.32 (>=125), "
-        "eth_rx 172.18 (>=125) -- worst margin +8.3%. "
-        "Runners-up: seed 4 (57.66/96.04/167.39/128.02, worst +2.4%); seed 1 "
-        "(61.36/91.68/135.32/125.20) is razor-thin on eth_rx at +0.2%; seed 2 "
-        "REJECTED on sys 53.40 < 55; seed 3 HEAP-STALLS (nextpnr sat at 'Running "
-        "main analytical placer' for 14 min at 95% CPU with no 'HeAP Placer Time' "
-        "-- do not use it). "
-        "NOTE: since Phase 0.5 a FIRMWARE change no longer re-rolls placement "
-        "(firmware lives in coderam, delivered at runtime), so this pin is stable. "
-        "It must be re-swept only when the GATEWARE or the LOADER changes. And "
-        "global Fmax does NOT predict USB quality -- the seed shuffles intra-region "
-        "USB placement, so any new pin must still be tested on hardware.")
+        "PINNED to 5 for the CURRENT netlist (Phase 0.5 loader with phy_wait_link, "
+        "loader.bin 8268 B). Chosen on WORST-CASE margin against the real "
+        "requirements (sys>=50 with a >=55 build-reject floor, usb>=60, "
+        "eth_tx>=125, eth_rx>=125), not on any single headline figure: "
+        "sys 59.21, usb 89.86, eth_tx 143.10, eth_rx 163.48 -- worst margin +14.5%. "
+        "Runners-up: seed 7 (+7.7%), seed 6 (+3.9%), seed 9 (+2.6%), seed 1 (+0.9%). "
+        "REJECTED: seed 8 has the 2nd-best sys (61.39) but eth_rx 109.90 FAILS the "
+        "125 MHz gigabit requirement; seed 4 has the BEST sys (66.12) and still "
+        "fails on eth_rx 122.06 -- picking on sys alone would ship a broken RX "
+        "datapath. Seeds 2 and 3 fall below the sys floor. "
+        "A SEED PIN IS A PROPERTY OF THE (seed, netlist) PAIR, NOT THE SEED. "
+        "Since Phase 0.5 a FIRMWARE change no longer re-rolls placement (firmware "
+        "lives in coderam and is delivered at runtime), so this pin survives "
+        "firmware work -- but ANY gateware or LOADER change re-rolls it and needs "
+        "a fresh tools/seed_sweep.sh. The loader counts as gateware because it is "
+        "baked into the ROM; that is why it is meant to be frozen. "
+        "AND: HeAP stalls are NOT reliably reproducible. Seed 5 stalled for 43 min "
+        "on one run of this exact netlist and placed in 57.81s on another, so treat "
+        "a stall as 'retry once, then move on', not as a permanent property. "
+        "build.sh and seed_sweep.sh both carry a stall watchdog (STALL_SECS). "
+        "Finally, global Fmax does NOT predict USB quality -- the seed shuffles "
+        "intra-region USB placement, so any new pin must still be tested on HW.")
     parser.add_argument("--no-floorplan", action="store_true",
         help="Disable the USB-near-ULPI proximity floorplan (floorplan_usb.py "
              "constrains USB cells to X<=30, Y=10-70 — close to the ULPI pins "
@@ -1022,7 +1047,11 @@ def main():
         from litex.soc.integration.common import get_mem_data
         rom_init = get_mem_data(args.firmware, endianness="little", data_width=32)
         rom_bytes = len(rom_init) * 4
-        rom_size  = 0x18000 if args.bake_firmware else 0x2000
+        # MUST match integrated_rom_size in soc_kwargs below. Kept as a single
+        # expression rather than a repeated literal: these drifted apart once
+        # (check said 8 KB while the ROM was 12 KB), which would have falsely
+        # rejected any loader over 8192 bytes.
+        rom_size  = soc_kwargs["integrated_rom_size"]
         if rom_bytes > rom_size:
             raise SystemExit(
                 "ROM image {} is {} bytes but the ROM is only {} bytes.\n"

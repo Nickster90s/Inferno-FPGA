@@ -261,13 +261,88 @@ carries a watchdog — if a build's log stops growing for `STALL_SECS` (default
 240) while HeAP has not completed, it kills that build, records `HEAP-STALL` and
 moves on. The failure mode is a property of the seed, not the machine.
 
-### Not yet verified
+### Hardware verification — and three more bugs only silicon could find
 
-Everything on hardware. Specifically untested in silicon: LiteEth RX/TX from
-inside the loader, the 400 ms reset window, the jump to `coderam`, the flash
-fallback path, and `phy_init()` actually being sufficient on a cold boot. The
-seed-5 bitstream is preserved at
-`bitstreams/phase0.5_seed5_loader-coderam.bit` (gitignored) for that test.
+The host-side suite passed 17/17 and the first hardware run looked like a clean
+pass. It was not: netload succeeded **for the wrong reason**, and that masked
+three separate defects. The real verification is a *pair* of tests —
+
+- **A:** with no host present, the window must expire and the loader must fall
+  through to flash.
+- **B:** with a host present, netload must still land.
+
+Passing B alone proves nothing, because a loader that never stops listening
+passes B every time.
+
+| # | Bug | Why the host suite could not catch it |
+|---|---|---|
+| 1 | `tsu_addend` reset to 0, so the TSU never ticked before firmware ran | gateware reset value, no host equivalent |
+| 2 | `tsu_nanoseconds_read()` returns a **latched snapshot**, not a live counter — the latch fires on reading `_seconds_hi` | CSR semantics; `gptp_read_time()` gets this right, the loader did not |
+| 3 | Even latched, `tsu_nanoseconds` is a PTP nanoseconds field wrapping at **1e9**, not 2^32, so `(int32_t)(now - t0)` is invalid | arithmetic that is only wrong against real hardware semantics |
+| 4 | The window opened **before the link was up** | timing, invisible off-board |
+
+Bugs 1–3 all presented as "netload doesn't work". Fixing 2 turned *never
+expires* into *expires at a random point*, which looked like a different failure
+entirely.
+
+**Bug 4 is the instructive one.** Measured on hardware: **3.85 s** from
+end-of-reconfiguration to the loader being able to answer, almost all of it
+gigabit auto-negotiation after the PHY soft reset. The window was ~0.3 s, so it
+listened into a dead link.
+
+I first tested the "PHY reset drops the link" hypothesis by watching
+`/sys/class/net/ens5/carrier` and saw it stay up throughout — and wrongly
+discarded the idea. There is a switch on that segment (an external grandmaster
+is on it), so the host-side carrier never drops while the *FPGA's* PHY
+renegotiates. The test was measuring the wrong end of the link. Measuring the
+actual latency settled in one shot what three rounds of reasoning had not.
+
+The fix waits for link rather than guessing a larger constant:
+`phy_wait_link()` polls BMSR (twice — link status is latching-low) with a 10 s
+cap, and the netload window starts after it. That adapts to however long
+negotiation takes on any given switch; a hardcoded "10 s" would have worked on
+this bench and been fragile elsewhere.
+
+**Confirmed working on silicon** (`bitstreams/phase0.5_linkwait.bit`):
+
+- Test A: no host → window expires, loader falls through. ✅
+- Test B: host present → **32,136 bytes in 0.02 s**, CRC verified on-device,
+  jump taken. ✅
+- Firmware genuinely runs from `coderam`: the board answers ARP
+  (`169.254.9.200 → 02:00:00:00:00:42`, `REACHABLE`). That responder is in
+  `osc.c`, i.e. application firmware delivered at runtime; the loader has no
+  ARP. ICMP going unanswered is correct — `osc.c` has no ICMP until Phase 2. ✅
+
+### Still open
+
+- **The firmware transmits no gPTP.** Zero unsolicited frames in 15 s while ARP
+  works, so the main loop and firmware TX are fine. Not caused by bugs 1–3:
+  `gptp_read_time()` does the latch read correctly. Leading hypothesis is that
+  `gptp_uptime_ms()` is stuck in `[0,999]` because the TSU *seconds* field is not
+  incrementing, which would make the 1000 ms Pdelay interval unreachable.
+  Needs the UART (`s` command) to confirm. Does not block Phase 0.5; does matter
+  for Phase 5, whose talker gate is conditioned on `gptp.servo_locked`.
+- **USB is untestable from this host** — `lsusb` shows only the root hubs and the
+  CH347, so the FPGA's USB port is not cabled here.
+### Final seed pin
+
+Swept against the frozen link-wait loader (`loader.bin` 8268 B):
+
+| Seed | sys | usb | eth_tx | eth_rx | worst | |
+|---|---|---|---|---|---|---|
+| **5** | **59.21** | **89.86** | **143.10** | **163.48** | **+14.5%** | **PINNED** |
+| 7 | 64.75 | 80.13 | 140.86 | 134.57 | +7.7% | |
+| 6 | 56.93 | 82.64 | 151.81 | 129.89 | +3.9% | |
+| 4 | 66.12 | 89.07 | 146.22 | **122.06** | −2.4% | best sys, **fails eth_rx** |
+| 8 | 61.39 | 98.94 | 149.70 | **109.90** | −12.1% | 2nd-best sys, **fails eth_rx** |
+| 2, 3 | 48.17, 50.24 | | | | | below the sys floor |
+
+Seeds 4 and 8 are the argument for ranking on worst-case margin rather than any
+single clock: both have excellent `sys` and would fail gigabit RX on the wire.
+
+Re-verified on hardware with the pinned build
+(`bitstreams/phase0.5_FINAL_seed5.bit`): Test A expires, Test B transfers
+32,136 B in 0.02 s and the firmware boots and answers ARP.
 
 ---
 

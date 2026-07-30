@@ -44,10 +44,8 @@
 // bitstream and BELOW the config sector that config.c owns at the top.
 #define FLASH_IMAGE_ADDR    0x00300000u     // 3 MB
 
-// Netload window. Long enough that `tools/netload.py` (which repeats its START
-// frame every ~20 ms) is reliably caught after a reset, short enough not to be
-// an irritating boot delay when booting from flash.
-#define NETLOAD_WINDOW_MS   400u
+// Netload window is defined in poll iterations, not time -- see the long note
+// above NETLOAD_WINDOW_SPINS for why two attempts at a real timebase failed.
 
 // ---------------------------------------------------------------------------
 // Netload wire protocol (ethertype 0x88B5)
@@ -140,32 +138,53 @@ static uint32_t crc32(const uint8_t *p, uint32_t len)
 }
 
 // ---------------------------------------------------------------------------
-// Timebase from the TSU nanosecond counter.
-//
-// The TSU is already in the design for PTP hardware timestamps and its
-// nanoseconds field is a free-running 1 ns counter, so it gives a monotonic
-// timebase without instantiating a LiteX timer.
-//
-// It is 32-bit and wraps every ~4.29 s. Deltas are therefore taken in NANOSECONDS
-// with signed 32-bit arithmetic, which is correct across the wrap for any
-// interval under 2^31 ns (2.1 s) -- comfortably more than the 400 ms window.
-//
-// (An earlier version divided to milliseconds first. That wraps at 4295 rather
-// than 2^32, so unsigned subtraction across a wrap produced a huge value and the
-// window could stretch to ~4.3 s. Benign, but wrong.)
+// TSU startup
 // ---------------------------------------------------------------------------
 
-#define NETLOAD_WINDOW_NS   (NETLOAD_WINDOW_MS * 1000000u)
-
-static inline uint32_t now_ns(void)
+// Make the TSU tick.
+//
+// The addend CSRs now reset to nominal in the gateware, so this is belt and
+// braces -- but the loader must not silently depend on that, because if the
+// addend is 0 the counter never advances. The netload window no longer depends
+// on it, but firmware and the PTP servo do, and a TSU that only starts ticking
+// once firmware happens to write an addend is a footgun.
+//
+// Same nominal value as gptp.c:918; gptp_init() later rewrites it identically.
+static void tsu_start(void)
 {
-    return tsu_nanoseconds_read();
+    uint64_t base = (((uint64_t)1 << 52) + (CONFIG_CLOCK_FREQUENCY / 2))
+                    / CONFIG_CLOCK_FREQUENCY;
+    tsu_addend_write     ((uint32_t)(base >> 20));
+    tsu_addend_frac_write((uint32_t)(base & 0xFFFFFu));
 }
 
-static inline int elapsed_exceeds(uint32_t t0, uint32_t limit_ns)
-{
-    return (int32_t)(now_ns() - t0) > (int32_t)limit_ns;
-}
+// The netload window is counted in POLL ITERATIONS, not in time.
+//
+// Two failed attempts at a real timebase, both found on hardware, are why:
+//
+//   1. tsu_nanoseconds_read() returns a LATCHED snapshot, not a live counter --
+//      the latch fires on reading _seconds_hi (avb_soc.py, TSUWithCSRs). Reading
+//      nanoseconds alone returns the same stale value forever, so the window
+//      never expired and a hostless board would hang instead of booting from
+//      flash.
+//
+//   2. Even latched correctly, tsu_nanoseconds is a PTP nanoseconds field that
+//      wraps at 1e9, NOT a counter wrapping at 2^32. The usual
+//      (int32_t)(now - t0) delta trick is invalid for a 1e9 wrap, so the window
+//      expired at an effectively random point -- sometimes immediately, which
+//      made netload miss the window entirely.
+//
+// A loader needs "wait a moment for a host", not a calibrated interval. A spin
+// count is monotonic, cannot wrap within the window, and depends on no
+// peripheral that firmware is responsible for initialising. If the poll loop
+// ever gains work, retune this constant -- it is deliberately generous.
+//
+// The window now starts AFTER phy_wait_link(), so it only has to cover the
+// host's ~20 ms START cadence plus slack -- not link negotiation. ~4e6
+// iterations of a bounded CSR-read loop at 50 MHz is on the order of a second,
+// which is many START retries, while keeping the fall-through to SPI flash
+// prompt once the link is already up.
+#define NETLOAD_WINDOW_SPINS   4000000u
 
 // ---------------------------------------------------------------------------
 // PHY setup
@@ -179,15 +198,47 @@ static inline int elapsed_exceeds(uint32_t t0, uint32_t limit_ns)
 // Same sequence as firmware/main.c -- keep the two in step.
 // ---------------------------------------------------------------------------
 
+#define PHY_ADDR        1                // RJ45 jack = U9 = PHY1, MDIO addr 1
+#define PHY_BMSR        0x01             // basic mode status register
+#define PHY_BMSR_LINK   (1u << 2)        // link status (latching low)
+
 static void phy_init(void)
 {
-    const int a = 1;                     // RJ45 jack = U9 = PHY1, MDIO addr 1
-    mdio_write(a, 0x00, 0x9140);         // soft-reset + autoneg + 1G + FD
+    mdio_write(PHY_ADDR, 0x00, 0x9140);  // soft-reset + autoneg + 1G + FD
     busy_wait(200);
-    mdio_write(a, 0x18, 0xF1E7);         // shadow_07 bit 8 = 1 (RXC delay)
+    mdio_write(PHY_ADDR, 0x18, 0xF1E7);  // shadow_07 bit 8 = 1 (RXC delay)
     busy_wait(10);
-    mdio_write(a, 0x1C, 0x8E00);         // shadow_03 bit 9 = 1 (TXC delay)
+    mdio_write(PHY_ADDR, 0x1C, 0x8E00);  // shadow_03 bit 9 = 1 (TXC delay)
     busy_wait(10);
+}
+
+// Wait for the PHY to report link up, bounded.
+//
+// MEASURED ON HARDWARE: from end-of-reconfiguration to the loader being able to
+// answer a netload frame takes ~3.85 s, almost all of it gigabit
+// auto-negotiation after the soft-reset above. Opening the netload window
+// immediately therefore listened into a dead link and missed the host entirely.
+//
+// Waiting for link is much better than guessing a big enough window: it adapts
+// to however long negotiation actually takes, and the listening window that
+// follows can then be short. Do not skip the reset to avoid the wait -- the
+// RGMII delay registers do not survive a power cycle and are what make our TX
+// reach the wire at all.
+//
+// BMSR link status is latching-low: read twice and trust the second read.
+static void phy_wait_link(void)
+{
+    for (uint32_t i = 0; i < 200; i++) {   // ~10 s cap at 50 ms/poll
+        (void)mdio_read(PHY_ADDR, PHY_BMSR);
+        if (mdio_read(PHY_ADDR, PHY_BMSR) & PHY_BMSR_LINK) {
+            uputs("[ldr] link up after ");
+            uputdec(i * 50u);
+            uputs(" ms\n");
+            return;
+        }
+        busy_wait(50);
+    }
+    uputs("[ldr] link did not come up within 10 s -- continuing anyway\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -257,13 +308,13 @@ static int netload(void)
 {
     uint32_t img_len = 0, img_crc = 0, next_off = 0;
     int      started = 0;
-    uint32_t t0 = now_ns();
+    uint32_t spins   = 0;
 
     while (1) {
         // While idle, honour the window. Once a transfer has started, keep
         // going: the host is actively feeding us and the window no longer
-        // applies (a large image can outlast 400 ms).
-        if (!started && elapsed_exceeds(t0, NETLOAD_WINDOW_NS))
+        // applies (a large image can easily outlast it).
+        if (!started && ++spins > NETLOAD_WINDOW_SPINS)
             return 0;
 
         if (!(ethmac_sram_writer_ev_pending_read() & ETHMAC_EV_SRAM_WRITER))
@@ -426,9 +477,13 @@ int main(void)
     uputdec(CODERAM_SIZE / 1024);
     uputs(" KB)\n");
 
-    // Must precede netload: the PHY delay registers do not survive a power
-    // cycle, and without them our ACKs never reach the wire.
+    // Both must precede netload:
+    //   tsu_start() -- start the timestamp unit ticking for the firmware.
+    //   phy_init()  -- the PHY delay registers do not survive a power cycle,
+    //                  and without them our ACKs never reach the wire.
+    tsu_start();
     phy_init();
+    phy_wait_link();     // else the netload window listens into a dead link
 
     int ok = netload();
     if (!ok)

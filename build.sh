@@ -35,4 +35,48 @@ if [[ ! " $* " =~ " --firmware " ]]; then
     ROM_IMAGE_ARGS=(--firmware "$LOADER")
 fi
 
-exec setarch -R python3 "$HERE/avb_soc.py" --build "${ROM_IMAGE_ARGS[@]}" "$@"
+# HeAP stall watchdog.
+#
+# Some seeds make nextpnr's analytical placer hang: it prints "Running main
+# analytical placer", never prints "HeAP Placer Time", and sits at 100% CPU
+# forever. Observed on seed 3, and again on seed 5 after a gateware change --
+# that one burned 43 minutes before anyone looked. It is a property of the
+# (seed, netlist) pair, so it reappears whenever the gateware or loader changes.
+#
+# Fail fast instead of hanging. Set STALL_SECS=0 to disable.
+#   NOTE: after ANY gateware or loader change, re-sweep with tools/seed_sweep.sh
+#   rather than trusting the pinned --seed. The pin is only valid for the
+#   netlist it was measured on.
+STALL_SECS="${STALL_SECS:-300}"
+
+if [[ "$STALL_SECS" == "0" ]]; then
+    exec setarch -R python3 "$HERE/avb_soc.py" --build "${ROM_IMAGE_ARGS[@]}" "$@"
+fi
+
+BUILD_LOG="$(mktemp -t infernobuild.XXXXXX.log)"
+echo "build log: $BUILD_LOG  (stall watchdog ${STALL_SECS}s)"
+setarch -R python3 "$HERE/avb_soc.py" --build "${ROM_IMAGE_ARGS[@]}" "$@" \
+    2>&1 | tee "$BUILD_LOG" &
+BPID=$!
+
+( while kill -0 "$BPID" 2>/dev/null; do
+      sleep 15
+      [[ -f "$BUILD_LOG" ]] || continue
+      grep -aq "HeAP Placer Time" "$BUILD_LOG" && exit 0   # past the risky phase
+      idle=$(( $(date +%s) - $(stat -c %Y "$BUILD_LOG") ))
+      if (( idle > STALL_SECS )); then
+          echo ""
+          echo "*** HeAP STALL: no build output for ${idle}s and HeAP never finished."
+          echo "*** This seed does not place on this netlist. Killing."
+          echo "*** Try another seed, or run: tools/seed_sweep.sh"
+          pkill -9 -f nextpnr-xilinx 2>/dev/null
+          kill -9 "$BPID" 2>/dev/null
+          exit 1
+      fi
+  done ) &
+WDOG=$!
+
+wait "$BPID" 2>/dev/null
+RC=$?
+kill "$WDOG" 2>/dev/null
+exit $RC
