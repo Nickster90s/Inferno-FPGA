@@ -16,7 +16,7 @@ include $(SOC_DIRECTORY)/software/common.mak
 # Dante Phase 0 dropped srp.o (MSRP), avdecc.o (1722.1) and aaf.o (AVB audio
 # format) -- 31,936 B of .text (57%) and the 32,852 B aaf BSS block.
 # Parked in _avb_reference/firmware/.
-OBJECTS = crt0.o main.o gptp.o mcr.o cfgflash.o config.o cap.o net.o dante_dev.o dante_msg.o mdns.o dante_arc.o dante_cmc.o
+OBJECTS = crt0.o main.o gptp.o mcr.o cfgflash.o config.o cap.o net.o dante_dev.o dante_msg.o mdns.o dante_arc.o dante_cmc.o dante_info.o
 
 # Add our source directory to includes
 CFLAGS += -I.
