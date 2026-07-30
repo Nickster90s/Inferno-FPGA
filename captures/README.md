@@ -131,14 +131,78 @@ instance 01@RedNetA16R   host RN-A16R2-2d4a18.local   port 4455
 noting — real hardware runs much tighter latencies than inferno's conservative
 default.
 
-## Still unconfirmed: `b.N=` multicast bundles (plan risk #1)
+## RESOLVED — plan risk #1: `b.N=` multicast bundles are REAL
 
-**No `b.N=` keys appear on any of the 18 chan records, and `_netaudio-bund` is
-empty** — because no multicast flow has been configured yet. Unicast
-subscriptions do not produce these keys.
+A multicast flow was created on the A16R from Dante Controller. Both halves of
+the mechanism inferno documents at `mdns_client.rs:240-270` appeared immediately.
 
-To close this, create a **multicast flow** on the A16R from Dante Controller
-(Device View → Transmit tab → "Create Multicast Flow", add channels). Then
-re-browse `_netaudio-chan` and `_netaudio-bund`. This is the Phase 3 exit gate
-and it decides whether Phase 5 can rely on pre-created multicast bundles as
-designed, or must also implement the unicast flow server (Phase 7).
+**Bundle record** (`netaudio_bund.txt`):
+
+```
+instance 32@RedNetA16R   host RN-A16R2-2d4a18.local   port 4321
+  txtvers=1  id=32  nchan=8  fpp=16  rate=48000  enc=24
+  latency_ns=1000000  a.0=239.255.201.92  p.0=4321  at2
+```
+
+**Chan records** gained exactly the expected keys: `b.32=1` … `b.32=8` — bundle
+id 32, channel positions 1 through 8, one per channel in the bundle.
+
+So a receiver resolves a channel → reads `b.<bundle>=<pos>` → looks up
+`<bundle>@<host>._netaudio-bund._udp.local` → reads `a.0`/`p.0` → joins the
+group. **The transmitter is never contacted.** That is precisely the scope
+reduction Phase 5's design depends on, and it is confirmed on real hardware.
+
+Field-for-field this matches inferno's `mdns_server.rs:170-210` bundle TXT set
+(`txtvers=1`, `id=`, `nchan=8`, `latency_ns=`, `fpp=16`, `rate=48000`, `enc=24`,
+`a.0=`, `p.0=`), including `nchan=8` and `fpp=16`.
+
+## Audio data plane (Phase 5) — CONFIRMED, every parameter
+
+`dante_audio_multicast.pcap` (400-packet sample; 29,760 were captured in 10 s
+≈ 2976 pps ≈ 48000/16).
+
+```
+IP   45 b8 ...  TOS 0xb8 (DSCP 46 EF)   ID 0000   TTL 32   proto 17
+     src 169.254.60.249  dst 239.255.201.92
+UDP  sport 61471  dport 4321  len 401  cksum 0x0000
+payload (393 B):
+     [0]      02                  constant
+     [1..5]   00 00 03 ad         seconds        = 941
+     [5..9]   00 00 9a 4c         subsec_samples = 39500
+     [9..]    384 B               16 samples x 8 ch x 3 B, signed 24-bit BE
+```
+
+Timestamps advance by **exactly 16** per packet
+(45207548 → 45207564 → 45207580 …), i.e. `sec*48000 + subsec` in units of
+samples, incrementing by `fpp`.
+
+Every value the plan specified for Phase 5 is confirmed:
+
+| Plan | Hardware |
+|---|---|
+| byte[0] = `0x02` | ✅ |
+| seconds u32 BE, subsec_samples u32 BE | ✅ |
+| timestamp advances by `fpp` per packet | ✅ exactly +16 |
+| 24-bit, big-endian, MSB-justified | ✅ signed 24-bit BE |
+| `fpp = 16`, 8 ch/flow | ✅ |
+| multicast `239.255.x.y:4321` | ✅ 239.255.201.92:4321 |
+| IP TOS `0xB8` (DSCP EF) | ✅ |
+| IP ID = 0 | ✅ |
+| UDP checksum transmitted as `0x0000` | ✅ |
+| frame = 14+20+8+9+384 = **435 B** | ✅ 435 B on the wire |
+
+### Retraction: the `fpp=8` "correction" was wrong
+
+The previous section corrected the plan's `fpp=16` down to 8, on the strength of
+`fpp=8,2` in the **chan** records. That was a misreading. Those two values are
+different things:
+
+- **chan record `fpp=8,2`** — the min/max range this device will negotiate for a
+  **unicast** flow.
+- **bundle record `fpp=16`** — the fpp actually used by a **multicast** bundle.
+
+Real Dante multicast uses **fpp=16**, so the plan's original figure was correct
+and the 435-byte frame geometry stands unchanged. Phase 5 needs no change here.
+
+Similarly, `nchan=64` on chan records is the unicast ceiling; multicast bundles
+here carry `nchan=8`, which is what the 6×8 = 48 structure targets.

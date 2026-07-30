@@ -1,0 +1,1 @@
+=;ens5;IPv4;32\064RedNetA16R;_netaudio-bund._udp;local;RN-A16R2-2d4a18.local;169.254.60.249;4321;"p.0=4321" "a.0=239.255.201.92" "at2" "enc=24" "rate=48000" "fpp=16" "latency_ns=1000000" "nchan=8" "id=32" "txtvers=1"
