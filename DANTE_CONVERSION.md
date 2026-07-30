@@ -371,3 +371,44 @@ A-record reservation. That is cheap to implement and cheap to omit initially.
 The wire is still the authoritative reference — capture a real device — but the
 risk is downgraded from "unknown unknowns in a forked mDNS stack" to one
 documented record form.
+
+---
+
+## Phase 3 — the "it's alive" gate, MET
+
+`InfernoFPGA-000042` appears in Dante Controller alongside the two Focusrite
+RedNets. Screenshot: `docs/milestones/phase3_dante_controller_clock_status.png`.
+
+| | InfernoFPGA-000042 | RedNetA16R | RF04-RedNetAM2 |
+|---|---|---|---|
+| Sync | **red** | green | green |
+| Clock Source | Dante | Dante | Dante |
+| Primary v1 Multicast | **N/A** | **Leader** | Follower |
+
+The red sync is correct, not a defect: we do not speak PTPv1 yet, so we are not
+participating in the clock. The A16R is the v1 grandmaster. Phase 4 turns this
+green, and this row is the exact statement of what it has to achieve.
+
+### What the diagnosis was actually worth
+
+The order things were built in was wrong, and only measurement caught it. mDNS,
+ARC and CMC were all implemented and verified working against the board -- and
+Dante Controller still showed nothing. A 20-second capture of all traffic to and
+from the FPGA explained why: **3 packets, all mDNS from us. DC was sending us
+nothing at all.**
+
+Dante Controller does not poll a device it has merely seen in mDNS. Real devices
+announce themselves on the info/heartbeat multicast and DC populates from that.
+So ARC -- the module built specifically to make the Routing tab work -- was never
+being asked anything. The missing 1 Hz heartbeat was gating everything
+downstream of it.
+
+Lesson worth keeping: for a reverse-engineered protocol, "implement the servers
+and wait to be asked" is the wrong default. Check who initiates first.
+
+### Open question
+
+DC shows us **PTPv2 Domain 0, Priority 0/0** while both RedNets show `N/A`. We
+are evidently reporting a clock capability they do not. Likely a field left zero
+in the device-info block that DC reads as "PTPv2 capable". Harmless today but
+untrue, so it should be compared against the AM2's info block during Phase 4.
