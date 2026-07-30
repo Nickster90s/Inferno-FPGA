@@ -21,7 +21,7 @@
 #include "avtp_const.h"
 #include "mcr.h"
 #include "pkt_geom.h"
-#include "osc.h"
+#include "net.h"
 
 // MAC address — locally administered, unique per device.
 // TODO: read from SPI flash or EEPROM in production.
@@ -40,6 +40,7 @@ static mcr_state_t    mcr;
 
 // RX EtherType counters for link-debug
 static uint32_t rx_total, rx_ptp, rx_avtp, rx_msrp, rx_other;
+static uint32_t rx_filtered;         // frames early-dropped by the MAC allow-list
 static uint16_t rx_last_ethertype;
 static uint8_t  rx_last_dst[6];
 static uint8_t  rx_last_src[6];
@@ -113,8 +114,67 @@ static void dispatch_rx(void)
     uint8_t *slot_ptr = (uint8_t *)(ETHMAC_BASE + ETHMAC_SLOT_SIZE * slot);
     uint32_t len = ethmac_sram_writer_length_read();
 
-    // Record every RX control frame (AVDECC/MSRP) into the boot capture ring
-    // (RAM only, no printf — must NOT slow this drain path). See 'R' command.
+    // ---- EARLY DROP: peek the destination MAC before doing any real work ----
+    //
+    // MEASURED on the bench with real Dante hardware: 3588 pps on the wire, of
+    // which 17794/17941 = 99.2% is multicast audio on port 4321 destined for
+    // OTHER devices. The switch floods it to every port, so we receive all of
+    // it. Classifying that in software costs a ~435-byte Wishbone memcpy per
+    // frame and starves everything else -- ICMP replies were being lost at up
+    // to 46%.
+    //
+    // This is the failure mode the plan flagged as risk #8 ("CPU swamped by
+    // flooded Dante multicast"), and Phase 0 made it worse by removing the old
+    // AVTP peek-before-memcpy path in favour of always copying.
+    //
+    // Six byte reads from slot SRAM instead of a 435-byte copy: accept our own
+    // unicast, broadcast, and only the multicast groups we actually use. Note
+    // this is a MAC-level allow-list, deliberately NOT a protocol parser -- the
+    // gateware rx_gate.py in the plan is the same idea one level down, and is
+    // still the right answer if software proves insufficient.
+    {
+        uint8_t d0 = slot_ptr[0];
+        if (d0 & 0x01) {                         // any group address
+            uint8_t d1 = slot_ptr[1], d2 = slot_ptr[2];
+            uint8_t d3 = slot_ptr[3], d4 = slot_ptr[4], d5 = slot_ptr[5];
+            int keep = 0;
+            if (d0 == 0xFF && d1 == 0xFF && d2 == 0xFF) {
+                keep = 1;                        // broadcast (ARP)
+            } else if (d0 == 0x01 && d1 == 0x00 && d2 == 0x5E) {
+                // IPv4 multicast; the low 23 bits carry the group.
+                //
+                // Accept ALL of 224.0.0.0/24 (MAC 01:00:5e:00:00:xx), the
+                // link-local control scope. That is mDNS (.251), Dante
+                // device-info (.231) and heartbeat (.233) -- and critically
+                // IGMP queries, which arrive on all-hosts 224.0.0.1 and on the
+                // group address for group-specific queries.
+                //
+                // An earlier version enumerated only the three Dante groups and
+                // silently swallowed IGMP queries. Nothing breaks immediately,
+                // which is what makes it nasty: memberships just age out and
+                // the switch quietly stops forwarding our groups.
+                //
+                // The whole /24 is link-local control traffic and low-rate, so
+                // there is no reason to be more selective. What we are excluding
+                // is the audio range (239.x), which is the actual flood.
+                if (d3 == 0x00 && d4 == 0x00)
+                    keep = 1;                    // 224.0.0.0/24 link-local
+                else if (d3 == 0x00 && d4 == 0x01 && d5 == 0x81)
+                    keep = 1;                    // 224.0.1.129 PTPv1
+            } else if (d0 == 0x01 && d1 == 0x80 && d2 == 0xC2) {
+                keep = 1;                        // 802.1 reserved (gPTP)
+            }
+            if (!keep) {
+                rx_filtered++;
+                main_rx_ts_pop_write(1);         // keep the ts ring in lock-step
+                ethmac_sram_writer_ev_pending_write(ETHMAC_EV_SRAM_WRITER);
+                continue;
+            }
+        }
+    }
+
+    // Record every RX control frame into the boot capture ring (RAM only, no
+    // printf — must NOT slow this drain path). See 'R' command.
     cap_record(0, slot_ptr, len);
 
     // Advance the RX-timestamp ring in lock-step with slot consumption.
@@ -182,10 +242,9 @@ static void dispatch_rx(void)
                 rx_ptp++;
                 gptp_process_rx(&gptp, frame, len);
                 break;
-            case ARP_ETHERTYPE:      // 0x0806 — ARP responder
-            case IPV4_ETHERTYPE:     // 0x0800 — IPv4/UDP
-                // Phase 2 replaces osc_rx_frame() with net_rx_frame().
-                osc_rx_frame(frame, len);
+            case ARP_ETHERTYPE:      // 0x0806 — ARP
+            case IPV4_ETHERTYPE:     // 0x0800 — IPv4/UDP/ICMP/IGMP
+                net_rx_frame(frame, len);
                 break;
             default:
                 rx_other++;
@@ -730,12 +789,24 @@ int main(void)
 
     // Init protocol stacks
     gptp_init(&gptp, mac_addr);
-    osc_set_mac(mac_addr);           // our MAC for ARP replies (Phase 2: net_init)
-    if ((g_cfg.osc_prefix == 16 || g_cfg.osc_prefix == 24) && g_cfg.osc_ip[0]) {
-        for (int i = 0; i < 4; i++) g_osc_ip[i] = g_cfg.osc_ip[i];   // restore persisted OSC IP
-        g_osc_prefix = g_cfg.osc_prefix;
-        printf("[CFG] OSC IP restored: %u.%u.%u.%u/%u\n",
-               g_osc_ip[0], g_osc_ip[1], g_osc_ip[2], g_osc_ip[3], g_osc_prefix);
+    // IP stack. The persisted address is reused from the old OSC config slot --
+    // same field, and config.h's reserved[] still has room for Dante settings.
+    {
+        const uint8_t *ip = NULL;
+        uint8_t prefix = 0;
+        if ((g_cfg.osc_prefix == 16 || g_cfg.osc_prefix == 24) && g_cfg.osc_ip[0]) {
+            ip = g_cfg.osc_ip;
+            prefix = g_cfg.osc_prefix;
+        }
+        net_init(mac_addr, ip, prefix);
+    }
+
+    // PTPv1 lives on 224.0.1.129. Joining is what makes a snooping switch
+    // forward it to our port; the Dante control groups are all in 224.0.0.0/24
+    // (link-local scope) and are never pruned, so they need no join.
+    {
+        static const uint8_t ptp_group[4] = {224, 0, 1, 129};
+        net_igmp_join(ptp_group);
     }
     mcr_init(&mcr, CONFIG_CLOCK_FREQUENCY, 48000);
     // Give MCR the gPTP handle so the free-running (cs=0) NCO is disciplined to
