@@ -44,20 +44,26 @@ dante_info_stats_t g_info_stats;
 static uint16_t seqnum;
 static uint32_t next_heartbeat_ms;
 
-// Boot announcements are REPEATED from the poll loop, not sent once from init.
+// Device info is announced CONTINUOUSLY, not as a burst at boot.
 //
-// main() does a PHY soft reset (mdio 0x00 <- 0x9140) at startup, and the loader
-// measured that costs ~3.85 s of link-down while gigabit auto-negotiation
-// completes. Anything transmitted during init therefore goes into a dead link
-// and is silently lost -- which is exactly what happened: the 1 Hz heartbeat
-// (sent later, from the main loop) always appeared on the wire while the three
-// init-time announcements never did.
+// Two separate findings forced this shape:
 //
-// Repeating also matches real devices, which re-announce periodically rather
-// than relying on a single packet a controller might miss.
-#define INFO_ANNOUNCE_COUNT   4
-#define INFO_ANNOUNCE_GAP_MS  2000
-static uint8_t  info_announce_left = INFO_ANNOUNCE_COUNT;
+// 1. Init-time transmissions are lost. main() does a PHY soft reset
+//    (mdio 0x00 <- 0x9140) at startup, which the loader measured as ~3.85 s of
+//    link-down while gigabit auto-negotiation completes. Anything sent from
+//    *_init() goes into a dead link. The tell: the 1 Hz heartbeat, sent later
+//    from the main loop, always reached the wire while the three init-time
+//    announcements never did.
+//
+// 2. A burst is not enough. MEASURED on the bench: both RedNets transmit to
+//    224.0.0.231 continuously, ~22 and ~20 packets per 45 s, i.e. roughly every
+//    2 s, forever. Dante Controller builds its device list from these
+//    announcements rather than by polling -- during a full Refresh it sent no
+//    unicast to ANY device, only mDNS queries. So a device that stops
+//    announcing simply ceases to exist the next time DC rebuilds its list.
+//    That is exactly what happened: the device appeared with full Routing and
+//    Device Info, then vanished on Refresh.
+#define INFO_ANNOUNCE_MS      3000
 static uint32_t info_announce_next_ms;
 static const gptp_t *s_gptp;      // for the clock sub-record; may be NULL
 
@@ -303,14 +309,13 @@ void dante_info_poll(void)
 {
     uint32_t now = gptp_uptime_ms();
 
-    // Repeated boot announcements, once the link is actually up.
-    if (info_announce_left &&
-        (!info_announce_next_ms || (int32_t)(now - info_announce_next_ms) >= 0)) {
+    // Periodic device-info announcement, forever. Stopping makes us disappear
+    // from Dante Controller on its next refresh -- see INFO_ANNOUNCE_MS.
+    if (!info_announce_next_ms || (int32_t)(now - info_announce_next_ms) >= 0) {
         send_device_info (grp_devinfo, DANTE_PORT_INFO);
         send_product_info(grp_devinfo, DANTE_PORT_INFO);
         send_network_info(grp_devinfo, DANTE_PORT_INFO);
-        info_announce_left--;
-        info_announce_next_ms = now + INFO_ANNOUNCE_GAP_MS;
+        info_announce_next_ms = now + INFO_ANNOUNCE_MS;
         return;                          // don't also heartbeat this pass
     }
 
@@ -326,9 +331,8 @@ void dante_info_init(void)
     net_igmp_join(grp_devinfo);
     next_heartbeat_ms = 0;                       // fire on the next poll
 
-    // Announcements are driven from dante_info_poll(), not sent here -- see the
-    // note on INFO_ANNOUNCE_COUNT. The link is still down at this point.
-    info_announce_left    = INFO_ANNOUNCE_COUNT;
+    // Announcements are driven from dante_info_poll(), not sent here -- the link
+    // is still down at this point. See the note on INFO_ANNOUNCE_MS.
     info_announce_next_ms = 0;
     printf("[info] heartbeat -> 224.0.0.233:%u, info -> 224.0.0.231:%u\n",
            DANTE_PORT_HEARTBEAT, DANTE_PORT_INFO);
