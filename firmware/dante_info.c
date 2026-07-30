@@ -43,6 +43,22 @@ dante_info_stats_t g_info_stats;
 
 static uint16_t seqnum;
 static uint32_t next_heartbeat_ms;
+
+// Boot announcements are REPEATED from the poll loop, not sent once from init.
+//
+// main() does a PHY soft reset (mdio 0x00 <- 0x9140) at startup, and the loader
+// measured that costs ~3.85 s of link-down while gigabit auto-negotiation
+// completes. Anything transmitted during init therefore goes into a dead link
+// and is silently lost -- which is exactly what happened: the 1 Hz heartbeat
+// (sent later, from the main loop) always appeared on the wire while the three
+// init-time announcements never did.
+//
+// Repeating also matches real devices, which re-announce periodically rather
+// than relying on a single packet a controller might miss.
+#define INFO_ANNOUNCE_COUNT   4
+#define INFO_ANNOUNCE_GAP_MS  2000
+static uint8_t  info_announce_left = INFO_ANNOUNCE_COUNT;
+static uint32_t info_announce_next_ms;
 static const gptp_t *s_gptp;      // for the clock sub-record; may be NULL
 
 void dante_info_set_gptp(const gptp_t *g) { s_gptp = g; }
@@ -165,6 +181,101 @@ static void send_device_info(const uint8_t *dst_ip, uint16_t dst_port)
 }
 
 // ---------------------------------------------------------------------------
+// Product info -- Model Name and Product Version in Dante Controller.
+//
+// Layout from inferno send_product_info (info_mcast_server.rs:139-156).
+// Strings are fixed-width fields, NOT NUL-terminated-and-packed:
+//   0x00  8   manufacturer
+//   0x08  8   board name
+//   0x1c  4   firmware version
+//   0x2c  16  manufacturer (again, longer field)
+//   0xac  16  model name
+// ---------------------------------------------------------------------------
+
+static void put_fixed(uint8_t *c, uint32_t at, uint32_t width, const char *s)
+{
+    uint32_t i = 0;
+    for (; s[i] && i < width; i++) c[at + i] = (uint8_t)s[i];
+    for (; i < width; i++)         c[at + i] = 0;
+}
+
+static void send_product_info(const uint8_t *dst_ip, uint16_t dst_port)
+{
+    static const uint8_t op[8] = {0x07, 0x2a, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00};
+
+    uint8_t *p = net_udp_payload_buf();
+    uint32_t n = put_hdr(p, 0xFFFF, op);
+    uint8_t *c = p + n;
+    memset(c, 0, 336);
+
+    put_fixed(c, 0x00, 8,  "Inferno");
+    put_fixed(c, 0x08, 8,  "InfrnFPG");
+    c[0x1c] = 0; c[0x1d] = 0; c[0x1e] = 0; c[0x1f] = 1;      // firmware 0.0.0.1
+    put_fixed(c, 0x2c, 16, "Inferno");
+    put_fixed(c, 0xac, 16, "InfernoFPGA 48ch");
+
+    n += 336;
+    put_u16(p, 2, (uint16_t)n);
+
+    if (net_udp_commit(dst_ip, dst_port, DANTE_PORT_INFO_REQ, n,
+                       NET_TOS_BEST_EFFORT) == 0)
+        g_info_stats.tx_info++;
+    seqnum++;
+}
+
+// ---------------------------------------------------------------------------
+// Network info -- Primary Address and Link Speed.
+//
+// THIS IS THE ONE THAT GATES ROUTING. Dante Controller showed our device with a
+// blank Primary Address, and without an address it cannot send us ARC requests,
+// so the Routing tab stayed empty no matter how correct the ARC server was.
+//
+// Layout from inferno send_network_info (info_mcast_server.rs:352-376).
+// Note the reply opcode is 0x0011 while the REQUEST is 0x0013 -- they are not
+// the same value, which is easy to miss.
+// ---------------------------------------------------------------------------
+
+static void send_network_info(const uint8_t *dst_ip, uint16_t dst_port)
+{
+    static const uint8_t op[8] = {0x07, 0x2a, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00};
+
+    uint8_t *p = net_udp_payload_buf();
+    uint32_t n = put_hdr(p, 0xFFFF, op);
+    uint8_t *c = p + n;
+    uint32_t o = 0;
+
+    static const uint8_t lead[6] = {0x00, 0x01, 0x00, 0x00, 0x00, 0x00};
+    memcpy(c + o, lead, 6); o += 6;
+
+    put_u16(c, o, 1000); o += 2;              // link speed, Mbps -> "1Gbps"
+    put_u16(c, o, 1);    o += 2;
+
+    memcpy(c + o, g_dante.mac, 6); o += 6;
+    memcpy(c + o, g_net_ip,    4); o += 4;
+
+    // Netmask from the prefix, then gateway (none) and DNS (same).
+    uint8_t mask[4] = {255, 255, 0, 0};
+    if (g_net_prefix == 24) { mask[2] = 255; }
+    memcpy(c + o, mask, 4); o += 4;
+    memset(c + o, 0, 4);    o += 4;           // gateway
+    memset(c + o, 0, 4);    o += 4;           // DNS
+
+    static const uint8_t tail[32] = {
+        0x00, 0x18, 0x00, 0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    };
+    memcpy(c + o, tail, 32); o += 32;
+
+    n += o;
+    put_u16(p, 2, (uint16_t)n);
+
+    if (net_udp_commit(dst_ip, dst_port, DANTE_PORT_INFO_REQ, n,
+                       NET_TOS_BEST_EFFORT) == 0)
+        g_info_stats.tx_info++;
+    seqnum++;
+}
+
+// ---------------------------------------------------------------------------
 // Requests arriving on 8700
 // ---------------------------------------------------------------------------
 
@@ -175,12 +286,15 @@ static void info_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     if (len < MCAST_HDR_LEN) return;
     g_info_stats.rx++;
 
-    // opcode[8] sits at offset 24; byte 3 selects the query.
+    // opcode[8] sits at offset 24; byte 3 selects the query. Dispatch matches
+    // inferno's run_server (info_mcast_server.rs:405-425).
     uint8_t q = req[24 + 3];
-    if (q == 0x61 || q == 0x60)
-        send_device_info(src_ip, src_port);
-    else
-        g_info_stats.rx_unknown++;
+    switch (q) {
+    case 0x60: case 0x61: send_device_info (src_ip, src_port); break;
+    case 0xc0: case 0xc1: send_product_info(src_ip, src_port); break;
+    case 0x13:            send_network_info(src_ip, src_port); break;
+    default:              g_info_stats.rx_unknown++;           break;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +302,18 @@ static void info_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
 void dante_info_poll(void)
 {
     uint32_t now = gptp_uptime_ms();
+
+    // Repeated boot announcements, once the link is actually up.
+    if (info_announce_left &&
+        (!info_announce_next_ms || (int32_t)(now - info_announce_next_ms) >= 0)) {
+        send_device_info (grp_devinfo, DANTE_PORT_INFO);
+        send_product_info(grp_devinfo, DANTE_PORT_INFO);
+        send_network_info(grp_devinfo, DANTE_PORT_INFO);
+        info_announce_left--;
+        info_announce_next_ms = now + INFO_ANNOUNCE_GAP_MS;
+        return;                          // don't also heartbeat this pass
+    }
+
     if (next_heartbeat_ms && (int32_t)(now - next_heartbeat_ms) < 0) return;
     next_heartbeat_ms = now + HEARTBEAT_MS;
     send_heartbeat();
@@ -200,7 +326,10 @@ void dante_info_init(void)
     net_igmp_join(grp_devinfo);
     next_heartbeat_ms = 0;                       // fire on the next poll
 
-    send_device_info(grp_devinfo, DANTE_PORT_INFO);
+    // Announcements are driven from dante_info_poll(), not sent here -- see the
+    // note on INFO_ANNOUNCE_COUNT. The link is still down at this point.
+    info_announce_left    = INFO_ANNOUNCE_COUNT;
+    info_announce_next_ms = 0;
     printf("[info] heartbeat -> 224.0.0.233:%u, info -> 224.0.0.231:%u\n",
            DANTE_PORT_HEARTBEAT, DANTE_PORT_INFO);
 }

@@ -93,6 +93,28 @@ static void eth_send(uint32_t len)
     ethmac_sram_reader_length_write(len);
     ethmac_sram_reader_start_write(1);
     txslot = (txslot + 1) % ETHMAC_TX_SLOTS;
+
+    // Wait for the queue to drain before returning.
+    //
+    // `ready` only means the command FIFO can accept another entry -- it does
+    // NOT mean the previous frame has been read out of its slot. With only
+    // ETHMAC_TX_SLOTS=2 buffers, a caller issuing several sends in a row wraps
+    // around and overwrites a slot whose frame is still in flight.
+    //
+    // MEASURED: dante_info_init() issues five sends back-to-back (two IGMP
+    // reports plus three boot announcements) and NONE of the announcements
+    // reached the wire, while the isolated 1 Hz heartbeat and the
+    // request/response ARC replies were always fine. That asymmetry -- bursts
+    // lost, isolated sends fine -- is the signature.
+    //
+    // Serialising TX is acceptable here: this path carries only control plane
+    // traffic at a few hundred pps worst case. The 48-channel audio stream is
+    // emitted by the gateware packetizer and never touches this function.
+    //
+    // Bounded so a wedged MAC cannot hang the main loop.
+    for (uint32_t guard = 0; guard < 100000; guard++) {
+        if (ethmac_sram_reader_level_read() == 0) break;
+    }
 }
 
 // ---------------------------------------------------------------------------
