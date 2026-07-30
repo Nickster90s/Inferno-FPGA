@@ -22,6 +22,8 @@
 #include "mcr.h"
 #include "pkt_geom.h"
 #include "net.h"
+#include "dante_dev.h"
+#include "mdns.h"
 
 // MAC address — locally administered, unique per device.
 // TODO: read from SPI flash or EEPROM in production.
@@ -808,6 +810,10 @@ int main(void)
         static const uint8_t ptp_group[4] = {224, 0, 1, 129};
         net_igmp_join(ptp_group);
     }
+
+    // Dante identity + discovery (Phase 3).
+    dante_dev_init(mac_addr);
+    mdns_init();
     mcr_init(&mcr, CONFIG_CLOCK_FREQUENCY, 48000);
     // Give MCR the gPTP handle so the free-running (cs=0) NCO is disciplined to
     // the network media rate (exactly 48000 gPTP-Hz) instead of the raw crystal.
@@ -838,6 +844,8 @@ int main(void)
         bench_tick();
         dispatch_rx();
         gptp_poll(&gptp);
+        net_poll();
+        mdns_poll();
 
         // Media clock servo. mcr_pump_hw() drained the gateware CRF timestamp
         // FIFO under AVB; with the CRF extractor gone it is a no-op, and the
