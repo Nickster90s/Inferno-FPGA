@@ -1,0 +1,271 @@
+// IEEE 802.1AS (gPTP) — Generalized Precision Time Protocol
+// Bare-metal implementation for LiteX SoC with LiteEthTSU
+//
+// Slave-only, peer-to-peer delay mechanism, Layer 2 transport.
+
+#ifndef GPTP_H
+#define GPTP_H
+
+#include <stdint.h>
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+#define PTP_ETHERTYPE       0x88F7
+
+// gPTP multicast destinations (Layer 2)
+// 01:80:C2:00:00:0E — used for all gPTP messages in 802.1AS
+#define GPTP_MCAST_ADDR     {0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E}
+
+// PTP message types (low nibble of first header byte)
+#define PTP_MSG_SYNC            0x0
+#define PTP_MSG_PDELAY_REQ      0x2
+#define PTP_MSG_PDELAY_RESP     0x3
+#define PTP_MSG_FOLLOW_UP       0x8
+#define PTP_MSG_PDELAY_RESP_FUP 0xA
+#define PTP_MSG_ANNOUNCE        0xB
+#define PTP_MSG_SIGNALING       0xC
+
+// PTP header flags. The 16-bit flags field is at offset 6 in the PTP header
+// and is transmitted big-endian: flags[0] = byte 6, flags[1] = byte 7.
+// twoStepFlag lives at bit 1 of byte 6 → 0x0200 in the 16-bit word.
+// ptpTimescale lives at bit 3 of byte 7 → 0x0008 in the 16-bit word.
+#define PTP_FLAG_TWO_STEP       0x0200
+#define PTP_FLAG_PTP_TIMESCALE  0x0008
+
+// Header sizes
+#define PTP_HEADER_LEN          34
+#define PTP_TIMESTAMP_LEN       10  // 6 bytes seconds + 4 bytes nanoseconds
+#define PTP_PDELAY_REQ_LEN      (PTP_HEADER_LEN + 20)
+#define PTP_PDELAY_RESP_LEN     (PTP_HEADER_LEN + 20)
+#define PTP_PDELAY_RESP_FUP_LEN (PTP_HEADER_LEN + 20)
+#define ETH_HEADER_LEN          14
+
+// Clock identity (8 bytes, derived from MAC address with FF:FE inserted)
+#define CLOCK_ID_LEN            8
+#define PORT_ID_LEN             10  // clock identity + 2-byte port number
+
+// gPTP domain
+#define GPTP_DOMAIN             0
+
+// Intervals (as log2 values, per 802.1AS)
+#define LOG_PDELAY_REQ_INTERVAL 0   // 1 second
+#define LOG_SYNC_INTERVAL      -3   // 125 ms (typical gPTP)
+#define LOG_ANNOUNCE_INTERVAL   0   // 1 second
+
+// Timeouts
+#define SYNC_RECEIPT_TIMEOUT_INTERVALS  3
+#define ANNOUNCE_RECEIPT_TIMEOUT        3  // intervals
+
+// Pdelay measurement
+#define PDELAY_LOST_RESPONSES_ALLOWED   3
+
+// PI servo gains for addend (frequency) control.
+// Each unit of full_addend changes the TSU rate by 1e9/2^52 ≈ 2.22e-7
+// ns/cycle, which at 50 MHz sysclk is ~11.1 ns/sec rate adjustment.
+// Per Sync interval (~125 ms): 1 addend unit = ~1.39 ns of phase change.
+//
+// Kp = 72/1000 ≈ 0.072 picks ~10% phase correction per Sync (gentle).
+// Ki = 72/1_000_000 = 100x slower — handles steady-state bias drift.
+// Both terms multiplied by the offset (in ns) to get addend delta.
+//
+// The integrator absorbs the constant LiteEth capture-point bias
+// (~145–290 µs depending on P&R) into a steady-state addend offset:
+// no static calibration constant needed; PI does it for free.
+#define SERVO_KP_NUM            72
+#define SERVO_KP_DEN            1000
+// Ki was 72/1000000 = 7.2e-5 — that took the integrator hours to absorb
+// the natural crystal-vs-master frequency bias (the slave used to crawl
+// from a few-µs Kp-residual to ±80 ns over 13+ hours). Bumping ~50x to
+// 3600/1000000 = 3.6e-3 lets it converge in ~10 s. The Kp/Ki ratio
+// (Ti = Kp/Ki = 20 control intervals = 2.5 s) is comfortably stable.
+#define SERVO_KI_NUM            3600
+#define SERVO_KI_DEN            1000000
+
+// Anti-windup: clamp |integral| at 100 ms — empirically the integrator
+// needs to settle around 50–80 ms-worth of "mass" to fully cancel the
+// LiteEth capture-point bias (the value depends on P&R variance). 10 ms
+// is too tight (saturates and leaves ~50 µs DC residual); 1 s is overkill
+// (lets the startup transient overshoot). 100 ms gives ~2x headroom over
+// the worst observed steady-state requirement.
+#define SERVO_INTEGRAL_CLAMP_NS 100000000LL
+
+// Anti-windup GATE: skip integrating any single offset whose magnitude exceeds
+// this (1 ms). Defends against a large transient (or a residual the accurate
+// step didn't catch) slamming the integral in one sample. Set well above the
+// real convergence offset range (peaks ~0.2 ms) so it never blocks normal
+// frequency convergence, and below the old ~4 ms step residual.
+#define SERVO_ANTIWINDUP_NS     1000000LL
+
+// ---------------------------------------------------------------------------
+// PTP timestamp (80-bit: 48-bit seconds + 32-bit nanoseconds)
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    uint64_t seconds;       // 48-bit (upper 16 bits unused)
+    uint32_t nanoseconds;
+} ptp_timestamp_t;
+
+// ---------------------------------------------------------------------------
+// gPTP state
+// ---------------------------------------------------------------------------
+
+typedef enum {
+    GPTP_STATE_INIT,
+    GPTP_STATE_LISTENING,
+    GPTP_STATE_SLAVE,
+} gptp_state_t;
+
+typedef struct {
+    gptp_state_t state;
+
+    // Our identity
+    uint8_t  our_mac[6];
+    uint8_t  clock_id[CLOCK_ID_LEN];
+    uint16_t port_number;
+
+    // Master identity (learned from Announce/Sync)
+    uint8_t  master_clock_id[CLOCK_ID_LEN];
+    uint16_t master_port_number;
+
+    // Grandmaster info (learned from Announce) — surfaced in ADP/AVB_INTERFACE
+    // so AVDECC controllers (e.g. Hive) show the actual GM ID and quality.
+    uint8_t  gm_clock_id[CLOCK_ID_LEN];
+    uint8_t  gm_priority1;
+    uint8_t  gm_clock_class;
+    uint8_t  gm_clock_accuracy;
+    uint16_t gm_offset_scaled_log_variance;
+    uint8_t  gm_priority2;
+    uint8_t  gm_valid;                  // 1 = at least one Announce seen
+
+    // Pdelay measurement
+    uint16_t pdelay_seq_id;
+    ptp_timestamp_t pdelay_t1;  // Our Pdelay_Req TX timestamp
+    ptp_timestamp_t pdelay_t2;  // Responder's Pdelay_Resp RX timestamp
+    ptp_timestamp_t pdelay_t3;  // Responder's Pdelay_Resp_Follow_Up TX timestamp
+    ptp_timestamp_t pdelay_t4;  // Our Pdelay_Resp RX timestamp
+    int64_t  mean_path_delay_ns;
+    int      pdelay_lost_count;
+    uint8_t  pdelay_resp_received;
+    uint8_t  pdelay_fup_received;
+
+    // Sync/Follow_Up
+    uint16_t sync_seq_id;
+    ptp_timestamp_t sync_rx_ts;       // Our RX timestamp of Sync
+    ptp_timestamp_t sync_origin_ts;   // Master's TX timestamp (from Follow_Up)
+    int64_t  sync_correction;         // Correction field from Sync (scaled ns)
+    uint8_t  sync_received;
+
+    // Clock servo
+    int64_t  offset_from_master_ns;
+    int64_t  freq_integral;           // Sum of past offsets (ns)
+    uint64_t base_addend_full;        // Nominal 52-bit addend = (addend<<20)|frac
+    uint64_t current_addend_full;
+    uint8_t  servo_locked;
+    uint32_t servo_step_count;
+
+    // Rolling 30-sec offset stats — accumulated every sync, snapshotted
+    // every 30000 ms into off_avg_*_last so the 's' UART command can
+    // print "avg off over last 30s = X ns" without doing math in the
+    // critical path. Replaces the periodic [gPTP] sync= line that used
+    // to flood UART TX and starve the input handler.
+    int64_t  off_sum_ns_win;       // signed sum of offsets in current window
+    int64_t  off_abs_sum_ns_win;   // sum of |offset| (gives jitter view)
+    uint32_t off_count_win;        // samples in current window
+    uint32_t off_win_start_ms;     // gptp_uptime_ms() at window start
+    int64_t  off_avg_ns_last;      // signed average of last completed window
+    int64_t  off_abs_avg_ns_last;  // jitter average of last completed window
+    uint32_t off_avg_count_last;   // sample count of last completed window
+
+    // neighborRateRatio tracking (802.1AS-2020 §11.2.19). After two
+    // successful PDelay_Resp/FUP exchanges, ratio_num/ratio_den expresses
+    // peer-clock-rate / our-clock-rate. Kept as ppb delta from 1.0 so a
+    // perfect-match link reads 0; ±100 ppb is typical for crystal pairs.
+    // Used to scale (t4-t1) into peer's time domain before computing mpd:
+    //   mpd = ((t4-t1) * nrr − (t3-t2)) / 2
+    int64_t  prev_t3_ns;
+    int64_t  prev_t4_ns;
+    int32_t  nrr_ppb;              // (peer_rate / our_rate − 1) × 1e9
+    uint32_t pdelay_pair_count;    // increments when both prev_t3 + curr seen
+    uint32_t pdelay_outlier_count; // PDelay sample rejected (delay > thresh)
+
+    // Median-of-5 filter for offset_from_master_ns (mirrors AES67
+    // ptpv2_servo_median.vhd:114 sample_buffer_t). A single noisy Sync at
+    // the boundary would otherwise flip the PI servo's output by tens of
+    // ppb; the median holds the line until the noise sample ages out.
+    int64_t  off_median_buf[5];
+    uint8_t  off_median_idx;       // circular write pointer
+    uint8_t  off_median_filled;    // 0..5 — count of samples written
+
+    // Timing
+    uint32_t last_pdelay_time_ms;
+    uint32_t last_sync_time_ms;
+    // Hysteresis counter for servo_locked. Increments toward 8 each Sync
+    // where |offset| < 500ns; locks when it hits 8. Reset to 0 if a sample
+    // exceeds the enter-lock threshold while still unlocked. See AES67
+    // ptpv2_servo_median.vhd:621 for the equivalent VHDL pattern.
+    uint8_t  lock_sample_count;
+    uint32_t pdelay_interval_ms;      // From logMessageInterval
+
+    // Statistics
+    uint32_t sync_count;
+    uint32_t pdelay_count;
+    uint32_t pdelay_timeout_count;
+    // RX message-type counters (debug)
+    uint32_t rx_sync_count;
+    uint32_t rx_followup_count;
+    uint32_t rx_pdelay_req_count;
+    uint32_t rx_pdelay_resp_count;
+    uint32_t rx_pdelay_resp_fup_count;
+    uint32_t rx_announce_count;
+    uint32_t rx_other_count;
+    uint32_t rx_wrong_domain_count;
+    uint8_t  rx_last_msg_type;
+    uint8_t  rx_last_domain;
+
+    // --- Convergence ring-log (instrumentation for fast-lock work) ---------
+    // One entry per servo update (Sync): the median offset (phase error) and
+    // the addend delta from base (frequency correction in effect). Lets one
+    // power-cycle capture the whole boot->lock curve (the console drops on
+    // reboot, so live capture is impossible). Freezes a few samples after the
+    // servo locks so a later `G` dump still shows the convergence, and records
+    // the boot->lock wall time. Pure observation — touches no control path.
+    struct {
+        int32_t offset_ns;     // median offset this Sync (saturated to ±2e9)
+        int32_t addend_delta;  // current_addend_full - base_addend_full (sat)
+        uint8_t locked;        // servo_locked at this Sync
+    } conv_log[400];
+    uint16_t conv_idx;         // circular write pointer
+    uint16_t conv_count;       // entries written (<= 400)
+    uint8_t  conv_postlock;    // samples logged since lock (freezes at 8)
+} gptp_t;
+
+// ---------------------------------------------------------------------------
+// API
+// ---------------------------------------------------------------------------
+
+void gptp_init(gptp_t *g, const uint8_t *mac_addr);
+void gptp_poll(gptp_t *g);
+// Dump the convergence ring-log over UART (console 'G'): boot->lock time +
+// per-Sync (offset_ns, addend_delta, locked). Diagnostic only.
+void gptp_dump_conv_log(const gptp_t *g);
+
+// Helpers called from main loop
+void gptp_process_rx(gptp_t *g, const uint8_t *frame, uint32_t len);
+void gptp_send_pdelay_req(gptp_t *g);
+void gptp_servo_update(gptp_t *g);
+
+// TSU access
+ptp_timestamp_t gptp_read_time(void);
+ptp_timestamp_t gptp_read_rx_timestamp(void);
+ptp_timestamp_t gptp_read_tx_timestamp(void);
+void gptp_set_addend_full(uint64_t addend_full);  // 52-bit: (addend<<20)|frac
+void gptp_step_time(ptp_timestamp_t t);
+void gptp_adjust_offset(int64_t offset_ns);
+
+// Utility
+uint32_t gptp_uptime_ms(void);
+int64_t  gptp_ts_diff_ns(ptp_timestamp_t a, ptp_timestamp_t b);
+
+#endif // GPTP_H

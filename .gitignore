@@ -1,0 +1,30 @@
+build/
+firmware/*.o
+firmware/*.d
+firmware/firmware.elf
+firmware/firmware.elf.map
+firmware/firmware.bin
+__pycache__/
+*.pyc
+*.vcd
+csr.csv
+analyzer.csv
+stream.cfg
+
+# Build-artifact snapshots (archive.sh) — large binaries, kept locally only
+bitstreams/*.bit
+bitstreams/*.info
+# editor/backup scratch
+*.bak
+*~
+
+# --- Dante fork: keep artifacts out of the Inferno-FPGA repo -----------------
+# These were TRACKED in avb-aes3 (added before the ignore rules existed), so
+# .gitignore alone did not exclude them. 159MB -> 3.9MB by dropping them from
+# the initial commit. All still present on disk and in the avb-aes3 history.
+sim/*.vcd
+sim/*.vvp
+blinky/blinky.bit
+blinky/blinky.fasm
+blinky/blinky.frames
+blinky/blinky.json
