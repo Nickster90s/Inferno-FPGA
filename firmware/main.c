@@ -27,6 +27,7 @@
 #include "dante_arc.h"
 #include "dante_cmc.h"
 #include "dante_info.h"
+#include "ptpv1.h"
 
 // MAC address — locally administered, unique per device.
 // TODO: read from SPI flash or EEPROM in production.
@@ -821,6 +822,7 @@ int main(void)
     dante_cmc_init();
     dante_info_set_gptp(&gptp);
     dante_info_init();
+    ptpv1_init(mac_addr);
     mcr_init(&mcr, CONFIG_CLOCK_FREQUENCY, 48000);
     // Give MCR the gPTP handle so the free-running (cs=0) NCO is disciplined to
     // the network media rate (exactly 48000 gPTP-Hz) instead of the raw crystal.
@@ -854,6 +856,7 @@ int main(void)
         net_poll();
         mdns_poll();
         dante_info_poll();
+        ptpv1_poll();
 
         // Media clock servo. mcr_pump_hw() drained the gateware CRF timestamp
         // FIFO under AVB; with the CRF extractor gone it is a no-op, and the
