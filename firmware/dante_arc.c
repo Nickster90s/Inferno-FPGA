@@ -339,22 +339,37 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         code = 0x30;
         break;
 
-    // 0x2204 and 0x4100 are the two opcodes Dante Controller asks us for when
-    // the Clock Status tab is refreshed (seen in the board console; DC's
-    // requests are unicast, so no host-side capture can show them).
+    // 0x2204 -- tx flow detail. MUST answer OK with an empty list, not an error.
     //
-    // Real hardware does NOT implement these either -- queried directly with
-    // tools/arc_query.py, both RedNets answer 0x2204 with code 0x0022 and
-    // 0x4100 with code 0x0030. What they do is ANSWER. We returned silence.
+    // This is what kept Dante Controller's Sync red. The on-device capture
+    // (tools/cap_fetch.py) shows DC looping at ~1 kHz on a refresh:
     //
-    // That distinction is the bug. An error reply says "asked and answered, not
-    // supported"; no reply at all leaves DC waiting on a request that never
-    // completes, and it falls back to defaults -- which is what put PTPv2
-    // Domain 0 / Priority 0/0 in our row while the RedNets showed v1
-    // Leader/Follower.
-    case 0x2204:
-        code = 0x22;
+    //   RX op=0x2200 tx flows        -> TX OK, zero flows
+    //   RX op=0x2204 tx flow detail  -> TX code=0x0022   <-- error
+    //   RX op=0x2200 ... and round again, thousands of times
+    //
+    // DC never completes the refresh, so it never populates the clock columns
+    // and falls back to defaults -- which is exactly the "PTPv2 Domain 0 /
+    // Priority 0/0, Primary v1 Multicast N/A" row we kept seeing.
+    //
+    // Replaying DC's exact request bytes at real hardware settles the format.
+    // The AM2 has no flows either and still answers OK with an empty list:
+    //
+    //   AM2   2801000c 3344 2204 0001 0000        OK, empty
+    //   A16R  28010014 3344 2204 0001 0400 ...    OK, with flow data
+    //   ours  2809000a 3344 2204 0022             ERROR
+    //
+    // An earlier commit made this return 0x22 rather than dropping the packet,
+    // on the strength of arc_query showing real devices returning 0x0022. That
+    // probe sent 0x2204 with EMPTY content; DC sends it with six bytes. Same
+    // opcode, different question, different answer -- and only the on-device
+    // capture could show which one DC actually asks.
+    case 0x2204: {
+        page_t pg;
+        page_begin(&m, &pg, 8, 0);
+        page_end(&m, &pg);
         break;
+    }
 
     case 0x4100:
         code = 0x30;

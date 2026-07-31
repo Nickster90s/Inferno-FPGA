@@ -75,9 +75,29 @@ static int cap_is_control(const uint8_t *f, uint32_t len)
         4455,   // flow control
         319, 320 // PTPv1 event/general
     };
+    int hit = 0;
     for (unsigned i = 0; i < sizeof(ports) / sizeof(ports[0]); i++)
-        if (sp == ports[i] || dp == ports[i]) return 1;
-    return 0;
+        if (sp == ports[i] || dp == ports[i]) { hit = 1; break; }
+    if (!hit) return 0;
+
+    // Drop ARC opcode 0x4100 from the capture.
+    //
+    // Refreshing the Clock Status tab makes Dante Controller emit THOUSANDS of
+    // these -- 7328 frames in one refresh, ~1 ms apart, with INCREMENTING
+    // sequence numbers, so they are distinct requests rather than retries of
+    // one. They filled the entire ring and hid every other exchange.
+    //
+    // Not a fault of ours: replaying DC's exact request bytes at both RedNets
+    // returns the same 0x0030 we return (2809000a112241000030, byte for byte),
+    // so real hardware rejects it too and DC evidently storms everyone with it.
+    // Excluding it here is a scope decision about the capture, not a change to
+    // what we answer on the wire.
+    if ((sp == 4440 || dp == 4440) && len >= u + 8 + 8) {
+        const uint8_t *pl = f + u + 8;
+        uint16_t op1 = (uint16_t)((pl[6] << 8) | pl[7]);
+        if (op1 == 0x4100) return 0;
+    }
+    return 1;
 }
 
 void cap_record(uint8_t dir, const uint8_t *frame, uint32_t len)
