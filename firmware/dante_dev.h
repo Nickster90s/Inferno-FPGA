@@ -19,21 +19,17 @@
 
 #define DANTE_MAX_NAME      32     // device/channel name buffer
 #define DANTE_TX_CHANNELS   48
-// BACK TO 0. Advertising 2 RX channels CRASHED Dante Controller.
+// 2 RX channels, so a real transmitter will run a unicast flow setup at us and
+// we can observe it -- the one part of the protocol we have no reference for.
 //
-// The idea was sound -- be a receiver, and watch a shipping transmitter drive a
-// unicast flow setup at us, which is the one part of the protocol we have no
-// reference for. The execution was not: the RX channel descriptor was built by
-// mirroring the TX one (put_common_descriptor + name offset), on the assumption
-// that both sides share a format. There is no evidence for that assumption, and
-// a receive descriptor almost certainly carries subscription fields a transmit
-// descriptor does not. DC parsing a malformed descriptor is a good way to crash
-// it.
-//
-// Doing this properly means reading a REAL device's 0x3000 reply first -- the
-// AM2 and DVS both have RX channels and both answer it -- and matching that,
-// rather than guessing from the transmit side.
-#define DANTE_RX_CHANNELS   0      // transmit-only until 0x3000 is verified
+// The first attempt at this CRASHED Dante Controller, because the receive
+// descriptor was built by mirroring the TRANSMIT one. They are not the same
+// shape: proto_arc.rs get_receive_channels::ChannelDescriptor is 20 bytes
+// (channel_id, unknown1_6, common_offset, tx_channel_name_offset,
+// tx_hostname_offset, friendly_name_offset, subscription_status:u32,
+// unknown2_0:u32) against the transmit side's 8. DC read 8 bytes per item where
+// it expected 20 and walked off the end of the array.
+#define DANTE_RX_CHANNELS   2
 
 // Ports, all confirmed on real hardware.
 #define DANTE_PORT_ARC      4440   // _netaudio-arc  control/routing

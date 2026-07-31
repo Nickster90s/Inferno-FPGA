@@ -109,6 +109,24 @@ void cap_record(uint8_t dir, const uint8_t *frame, uint32_t len)
     // explains the negotiation defeats the point of capturing. Multicast is
     // excluded below, so this cannot flood the ring; outbound still goes
     // through the control-plane port filter.
+    // Drop the 0x4100 storm FIRST, before any catch-all. Dante Controller emits
+    // thousands of these per refresh; the exclusion in cap_is_control was
+    // already there for exactly that reason, and the inbound-unicast catch-all
+    // below bypassed it and re-flooded the ring -- 7705 frames recorded in one
+    // patch attempt, burying the exchange we were trying to observe.
+    if (len >= 42 && frame[12] == 0x08 && frame[13] == 0x00 && frame[23] == 17) {
+        uint32_t ihl = (uint32_t)(frame[14] & 0x0F) * 4;
+        uint32_t u = 14 + ihl;
+        if (len >= u + 16) {
+            uint16_t sp = (uint16_t)((frame[u] << 8) | frame[u + 1]);
+            uint16_t dp = (uint16_t)((frame[u + 2] << 8) | frame[u + 3]);
+            if (sp == 4440 || dp == 4440) {
+                const uint8_t *pl = frame + u + 8;
+                if (((pl[6] << 8) | pl[7]) == 0x4100) return;
+            }
+        }
+    }
+
     int inbound_unicast = (!dir && len >= 34 && frame[30] < 224);
     if (!inbound_unicast && !cap_is_control(frame, len)) return;
 

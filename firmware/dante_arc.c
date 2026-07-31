@@ -304,12 +304,51 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     }
 
     case OP_GET_RX_CHANNELS: {
-        // Empty page, not an error. The 2-channel version of this crashed Dante
-        // Controller -- see dante_dev.h. Restore only after diffing a real
-        // device's 0x3000 reply.
+        // 20-BYTE items, per proto_arc.rs get_receive_channels. The transmit
+        // descriptor is 8 bytes and mirroring it here crashed DC -- it read 8
+        // where it expected 20 and ran off the end of the array.
+        //
+        //   0  channel_id
+        //   2  unknown1_6                (6 here; the transmit side uses 7)
+        //   4  common_descriptor_offset
+        //   6  tx_channel_name_offset    0 -- nothing subscribed yet
+        //   8  tx_hostname_offset        0
+        //  10  friendly_name_offset      our own label for the receive slot
+        //  12  subscription_status u32   0 = not subscribed. inferno notes
+        //                                0x01010009 subscribed, 0x00000001
+        //                                remembered/in progress
+        //  16  unknown2_0 u32
+        uint16_t start = (clen >= 4) ? dante_req_u16(content, 2) : 1;
+        if (start == 0) start = 1;
+
         page_t pg;
-        page_begin(&m, &pg, 8, 0);
+        page_begin(&m, &pg, 20, DANTE_RX_CHANNELS);
+
+        uint16_t common = 0;
+        uint16_t idx    = start;
+        for (; idx <= DANTE_RX_CHANNELS && pg.actual < pg.space; idx++) {
+            if (!common) common = put_common_descriptor(&m);
+            char nm[8];
+            nm[0] = 'R'; nm[1] = 'x';
+            nm[2] = (char)('0' + idx); nm[3] = 0;
+            uint16_t name_off = dante_msg_str(&m, nm);
+
+            uint8_t *slot = page_slot(&m, &pg);
+            put_u16_at(slot,  0, idx);
+            put_u16_at(slot,  2, 6);
+            put_u16_at(slot,  4, common);
+            put_u16_at(slot,  6, 0);          // no transmitter subscribed
+            put_u16_at(slot,  8, 0);
+            put_u16_at(slot, 10, name_off);
+            put_u16_at(slot, 12, 0);          // subscription_status hi
+            put_u16_at(slot, 14, 0);          // subscription_status lo
+            put_u16_at(slot, 16, 0);
+            put_u16_at(slot, 18, 0);
+            pg.actual++;
+            if (m.len >= PACKET_SIZE_SOFT_LIMIT) { idx++; break; }
+        }
         page_end(&m, &pg);
+        if (idx <= DANTE_RX_CHANNELS) code = DANTE_CODE_MORE;
         break;
     }
 
