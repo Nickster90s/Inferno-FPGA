@@ -384,6 +384,48 @@ static void send_product_info(const uint8_t *dst_ip, uint16_t dst_port)
 // Layout from inferno info_mcast_server.rs:327-341.
 // ---------------------------------------------------------------------------
 
+// Clock-stats payload, modelled byte for byte on the RF04-RedNetAM2 -- the
+// device Dante Controller labels "Follower", which is the role we want.
+//
+// Captured from real hardware once clock stats became multicast: their replies
+// go to 224.0.0.231 too, so making our own reply multicast is what finally made
+// theirs visible to the build host. Before that they were unicast to the
+// controller and unreachable from here.
+//
+// The two fields that matter, both wrong in the previous hand-built payload:
+//
+//  1. CLOCK IDs ARE MAC + 0x0000, NOT EUI-64. Real devices send
+//     001dc12d4a180000 at offsets 12/20/28; we were inserting FF FE to make
+//     001dc1fffe2d4a18. DC could not match our reported master against the
+//     actual leader. (The EUI-64 form IS used, but further in, at 152/160/168 --
+//     the payload carries both.)
+//
+//  2. OFFSET 40 IS THE PTP PORT STATE. The Follower sends 0x0009, the Leader
+//     0x0006 -- IEEE 1588 SLAVE and MASTER. That is the field behind DC's
+//     "Primary v1 Multicast" column, and we were sending zeros there.
+//
+// Everything else is carried over from the AM2 verbatim. Fields whose meaning
+// is not established are left exactly as a working Follower sends them rather
+// than guessed at.
+static const uint8_t clock_stats_tmpl[188] = {
+    0x00, 0x03, 0x00, 0x03, 0x00, 0x00, 0x00, 0x9b, 0xff, 0xff, 0xdc, 0x24,
+    0x00, 0x1d, 0xc1, 0xa1, 0x72, 0x3c, 0x00, 0x00, 0x00, 0x1d, 0xc1, 0x2d,
+    0x4a, 0x18, 0x00, 0x00, 0x00, 0x1d, 0xc1, 0x2d, 0x4a, 0x18, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x34, 0x00, 0x09, 0x00, 0x00, 0x02, 0x94, 0x00, 0x00,
+    0x00, 0x03, 0x0d, 0x40, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x60, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x0c,
+    0x00, 0x98, 0x00, 0x20, 0x00, 0x03, 0x00, 0x00, 0x00, 0x68, 0x10, 0x00,
+    0x00, 0x00, 0x00, 0x01, 0x01, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x09, 0x00, 0x07, 0x00, 0x01, 0x00, 0x02, 0x02, 0x02, 0x02, 0x00,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x03, 0x00, 0x03, 0x00, 0x01, 0x00, 0x03,
+    0x02, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x03, 0x00, 0x07,
+    0x00, 0x03, 0x00, 0x07, 0x00, 0xb8, 0x00, 0x04, 0x00, 0x1d, 0xc1, 0xff,
+    0xfe, 0xa1, 0x72, 0x3c, 0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x2d, 0x4a, 0x18,
+    0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x2d, 0x4a, 0x18, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+};
+
 static void send_clock_stats(const uint8_t *dst_ip, uint16_t dst_port,
                              const uint8_t *req)
 {
@@ -410,43 +452,37 @@ static void send_clock_stats(const uint8_t *dst_ip, uint16_t dst_port,
     uint8_t *p = net_udp_payload_buf();
     uint32_t n = put_hdr_seq(p, 0xFFFF, op, rseq);
     uint8_t *c = p + n;
-    uint32_t o = 0;
 
-    // Status. inferno hardcodes 0x0003/0x0003 and notes 0x01 = PLL not locked,
-    // so the second word tracks our actual servo state rather than a constant.
-    put_u16(c, o, 0x0003);                        o += 2;
-    put_u16(c, o, g_ptpv1.locked ? 0x0003 : 0x0001); o += 2;
-    put_u32(c, o, 0x0000009f);                    o += 4;
+    memcpy(c, clock_stats_tmpl, sizeof(clock_stats_tmpl));
 
-    // Frequency offset in ppb -- the same number the heartbeat's 0x8001 reports.
+    // Status word: 0x0003 locked, 0x0001 not (inferno: 0x01 = PLL not locked).
+    c[2] = 0x00; c[3] = g_ptpv1.locked ? 0x03 : 0x01;
+
     int32_t ppb = 0;
     if (g_ptpv1.base_addend_full) {
         int64_t base = (int64_t)g_ptpv1.base_addend_full;
         int64_t cur  = (int64_t)g_ptpv1.current_addend_full;
         ppb = (int32_t)(((cur - base) * 1000000000LL) / base);
     }
-    put_u32(c, o, (uint32_t)ppb); o += 4;
+    c[8]  = (uint8_t)(ppb >> 24); c[9]  = (uint8_t)(ppb >> 16);
+    c[10] = (uint8_t)(ppb >> 8);  c[11] = (uint8_t)ppb;
 
-    memcpy(c + o, g_dante.mac, 6); o += 6;
-    put_u16(c, o, 0);              o += 2;
+    // MAC + 0x0000 form, at 12 (us), 20 (grandmaster), 28 (parent).
+    memcpy(c + 12, g_dante.mac, 6);          c[18] = 0; c[19] = 0;
+    memcpy(c + 20, g_ptpv1.master_uuid, 6);  c[26] = 0; c[27] = 0;
+    memcpy(c + 28, g_ptpv1.master_uuid, 6);  c[34] = 0; c[35] = 0;
 
-    // Master clock id: EUI-64 of the Leader's PTPv1 uuid (which is its MAC),
-    // the same MAC->EUI-64 expansion dante_dev.c uses for our own device id.
-    uint8_t mc[8];
-    mc[0] = g_ptpv1.master_uuid[0];
-    mc[1] = g_ptpv1.master_uuid[1];
-    mc[2] = g_ptpv1.master_uuid[2];
-    mc[3] = 0xFF;
-    mc[4] = 0xFE;
-    mc[5] = g_ptpv1.master_uuid[3];
-    mc[6] = g_ptpv1.master_uuid[4];
-    mc[7] = g_ptpv1.master_uuid[5];
-    memcpy(c + o, mc, 8); o += 8;             // grandmaster
-    memcpy(c + o, mc, 8); o += 8;             // parent (same: we follow directly)
+    // EUI-64 form, at 152 (us), 160 and 168 (the leader).
+    uint8_t eui[8];
+    eui[0] = g_ptpv1.master_uuid[0]; eui[1] = g_ptpv1.master_uuid[1];
+    eui[2] = g_ptpv1.master_uuid[2]; eui[3] = 0xFF; eui[4] = 0xFE;
+    eui[5] = g_ptpv1.master_uuid[3]; eui[6] = g_ptpv1.master_uuid[4];
+    eui[7] = g_ptpv1.master_uuid[5];
+    memcpy(c + 152, g_dante.device_id, 8);
+    memcpy(c + 160, eui, 8);
+    memcpy(c + 168, eui, 8);
 
-    memset(c + o, 0, 76); o += 76;
-
-    n += o;
+    n += sizeof(clock_stats_tmpl);
     put_u16(p, 2, (uint16_t)n);
 
     if (net_udp_commit(dst_ip, dst_port, DANTE_PORT_INFO_REQ, n,
