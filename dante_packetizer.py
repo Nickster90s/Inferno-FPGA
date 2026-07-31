@@ -354,7 +354,23 @@ class DantePacketizer(LiteXModule):
         # new integral). CENTRE=64 is now true mid; un-cap to the full 0..128.
         _bl_max = SRING_DEPTH >> _bl_sh                # 128 = full ring (any depth)
         self.block_level = Signal(max=_bl_max + 1)
-        self.comb += If(level < 0,
+        _bl_centre = _bl_max >> 1                       # 64
+        # REPORT CENTRE WHILE THE TALKER IS OFF.
+        #
+        # Nothing drains the ring until `en` goes high, so the true level climbs
+        # to the full rail during the hold-off -- PTP lock plus, now, waiting for
+        # a receiver to request a flow, which can be a minute. Feeding that to the
+        # USB async-feedback servo tells the host to slow down for the whole
+        # window and then hands the talker a ring pinned at 128, which takes
+        # 10-15 s of dropped samples to walk back to centre. That is audible: the
+        # first seconds of every stream are mangled, then it cleans up.
+        #
+        # avb_soc.py:876-895 flags this same trap for the AVB talker. Reporting a
+        # steady centre keeps the host at nominal rate, so `en` starts from a ring
+        # that is already where the servo wants it.
+        self.comb += If(~self.enable.storage,
+            self.block_level.eq(_bl_centre),
+        ).Elif(level < 0,
             self.block_level.eq(0),
         ).Elif((level >> _bl_sh) > _bl_max,
             self.block_level.eq(_bl_max),
@@ -432,7 +448,14 @@ class DantePacketizer(LiteXModule):
         self.sync += [
             If(~en, started.eq(0)).Elif(samp_vld & first, started.eq(1)),
             If(samp_vld & first & (started | first), frame_base.eq(new_base)),
-            If(en & ~started & samp_vld & first, rd_anchor.eq(new_base)),
+            # While the talker is OFF the anchor TRACKS THE WRITER, so enabling
+            # starts the read from the current write point -- an empty ring that
+            # primes cleanly. Previously the anchor was captured once at the first
+            # sample after enable and `started` then latched high, so a ring that
+            # had filled to the rail during a long hold-off was read from far
+            # behind the writer: many seconds of stale audio before it caught up.
+            If(~en, rd_anchor.eq(new_base)
+            ).Elif(~started & samp_vld & first, rd_anchor.eq(new_base)),
         ]
 
         # =========================================================
