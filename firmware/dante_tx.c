@@ -239,7 +239,7 @@ void dante_tx_poll(void)
     // OK to keep the receiver's state machine moving, but until a flow is
     // actually built there is nothing to send, and enabling the talker would
     // put all six multicast bundles back on the wire for nobody.
-    uint8_t want = g_ptpv1.locked && (g_flows_stats.active > 0);
+    uint8_t want = g_ptpv1.locked && (dante_tx_active() > 0);
 
     // Re-anchor when the emitted seconds drifts from PTP by more than a second.
     // The media clock is rate-disciplined by mcr, so this should never fire in
@@ -320,18 +320,31 @@ typedef struct {
     uint8_t  in_use;
     uint8_t  peer[4];
     uint32_t last_ms;
+    uint32_t rebinds;      // times this context was re-bound from scratch
 } flow_slot_t;
 static flow_slot_t flows[N_FLOWS];
 
 // Keepalives arrive about every 5 s; flows_control.rs calls a lapsed flow
 // "stream expired (i.e. no keepalives)".
 //
+// 5 MINUTES. Once flows stopped being rejected, the receivers slowed their
+// keepalives dramatically -- measured ages of 16-38 s where they had been 5 s
+// while we were answering 0x0315 -- so 45 s still expired them mid-stream. Each
+// teardown writes nslots = 0 and silences the flow until the next refresh, and
+// it showed in the packet rate: 6944 pps against an expected 9000, with flow 1
+// dead for most of a 20 s window.
+//
+// The only thing this timeout buys is releasing one of six contexts when a
+// receiver leaves for good, and re-binding is keyed on peer IP so a returning
+// receiver reclaims its own slot anyway. Erring long is nearly free.
+//
+// Earlier note, kept because the reasoning still applies:
 // 45 s, not 16. At 16 s the expiry fired BETWEEN keepalives on real hardware --
 // every flow was torn down and rebuilt on each refresh, which disables the
 // context (nslots = 0) for the gap and would be audible. The only thing this
 // timeout does is release a context when a receiver goes away for good, so
 // erring long costs nothing and erring short costs audio.
-#define FLOW_TIMEOUT_MS  45000
+#define FLOW_TIMEOUT_MS  300000
 
 
 static void write_ctx(unsigned f, const uint8_t dst_ip[4], const uint8_t dmac[6],
@@ -402,8 +415,8 @@ int dante_tx_bind_unicast(const uint8_t peer_ip[4], const uint8_t dst_ip[4],
 
     if (!flows[f].in_use) {
         flows[f].in_use = 1;
+        flows[f].rebinds++;
         for (int i = 0; i < 4; i++) flows[f].peer[i] = peer_ip[i];
-        g_flows_stats.active++;
         printf("[dtx] flow %d -> %u.%u.%u.%u:%u, %u slots, fpp %u\n",
                f, dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3], dst_port, nslots, fpp);
     }
@@ -441,7 +454,6 @@ void dante_tx_expire(void)
         if (!flows[i].in_use) continue;
         if ((now - flows[i].last_ms) < FLOW_TIMEOUT_MS) continue;
         flows[i].in_use = 0;
-        if (g_flows_stats.active) g_flows_stats.active--;
         aaf_pkt_ctx_select_write(i);
         aaf_pkt_flow_cfg_write(0);          // nslots = 0 -> builder skips it
         printf("[dtx] flow %u expired (no keepalive)\n", i);
@@ -465,4 +477,25 @@ int dante_tx_bind_multicast(unsigned f)
     printf("[dtx] multicast bundle %u ON -> %u.%u.%u.%u\n",
            f, dip[0], dip[1], dip[2], dip[3]);
     return (int)f;
+}
+
+// Per-flow state for the UDP stats endpoint: is the context bound, and how long
+// since its last keepalive. Exposed because the console is not readable from
+// the build host, and "is context 1 cycling?" cannot be answered any other way.
+// active is DERIVED, not counted. It was incremented on bind and decremented on
+// expire, and the two got out of step -- reported 4 with two flows in use.
+unsigned dante_tx_active(void)
+{
+    unsigned n = 0;
+    for (unsigned i = 0; i < N_FLOWS; i++) if (flows[i].in_use) n++;
+    return n;
+}
+
+void dante_tx_flow_info(unsigned f, uint8_t *in_use, uint32_t *age_ms,
+                        uint32_t *rebinds)
+{
+    if (f >= N_FLOWS) { *in_use = 0; *age_ms = 0; *rebinds = 0; return; }
+    *in_use  = flows[f].in_use;
+    *age_ms  = flows[f].in_use ? (gptp_uptime_ms() - flows[f].last_ms) : 0;
+    *rebinds = flows[f].rebinds;
 }

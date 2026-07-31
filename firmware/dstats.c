@@ -11,6 +11,7 @@
 #include "dante_dev.h"
 #include "dante_tx.h"
 #include "ptpv1.h"
+#include "dante_flows.h"
 #include <generated/csr.h>
 #include <stdio.h>
 
@@ -44,6 +45,18 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     put32(p, n, (uint32_t)(int32_t)g_ptpv1.mean_path_delay_ns); n += 4; // 12
     put32(p, n, ethmac_sram_writer_errors_read());     n += 4;   // 13
     put32(p, n, ethmac_rx_datapath_crc_errors_read()); n += 4;   // 14
+
+    put32(p, n, dante_tx_active());                 n += 4;   // 15
+    put32(p, n, g_flows_stats.requests);               n += 4;   // 16
+    put32(p, n, g_flows_stats.rejected);               n += 4;   // 17
+    // Then 3 words per flow: in_use, age since last keepalive, rebind count.
+    for (unsigned f = 0; f < 6; f++) {
+        uint8_t iu; uint32_t age, rb;
+        dante_tx_flow_info(f, &iu, &age, &rb);
+        put32(p, n, iu);  n += 4;
+        put32(p, n, age); n += 4;
+        put32(p, n, rb);  n += 4;
+    }
 
     net_udp_commit(src_ip, src_port, STATS_PORT, n, NET_TOS_BEST_EFFORT);
 }
