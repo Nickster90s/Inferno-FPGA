@@ -188,6 +188,16 @@ void dante_tx_poll(void)
 
 uint8_t dante_tx_enabled(void) { return talker_on; }
 
+// mdns.c needs these to build the _netaudio-bund a.0= records: a receiver reads
+// b.<bundle>= off a channel record, resolves the bundle record, and joins the
+// group named there. The group must be the one we actually transmit to, so it
+// comes from here rather than being recomputed.
+const uint8_t *dante_tx_flow_ip(unsigned f)
+{
+    return flow_ip[f < N_FLOWS ? f : 0];
+}
+unsigned dante_tx_flows(void) { return N_FLOWS; }
+
 void dante_tx_report(void)
 {
     printf("[dtx] talker=%u packets=%lu underrun=%lu overrun=%lu level=%lu\n",

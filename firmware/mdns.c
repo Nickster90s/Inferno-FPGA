@@ -8,6 +8,7 @@
 #include "mdns.h"
 #include "net.h"
 #include "dante_dev.h"
+#include "dante_tx.h"
 #include "gptp.h"
 #include <string.h>
 #include <stdio.h>
@@ -107,6 +108,8 @@ static uint32_t name_encode(uint8_t *p, const char *name)
 static char n_host[DANTE_MAX_NAME + 8];     // "<host>.local"
 static char n_arc_svc[48];                  // "_netaudio-arc._udp.local"
 static char n_cmc_svc[48];
+static char n_chan_svc[48];                 // "_netaudio-chan._udp.local"
+static char n_bund_svc[48];                 // "_netaudio-bund._udp.local"
 static char n_arc_inst[DANTE_MAX_NAME + 48];
 static char n_cmc_inst[DANTE_MAX_NAME + 48];
 static const char n_services[] = "_services._dns-sd._udp.local";
@@ -240,6 +243,168 @@ static uint32_t put_txt(uint8_t *p, uint32_t n, const char *inst, int is_arc)
     return n + l;
 }
 
+
+// ---------------------------------------------------------------------------
+// Channel and bundle records
+//
+// THE SUBSCRIBE PATH. A receiver resolving one of our channels does:
+//   1. query <chname>@<host>._netaudio-chan._udp for TXT
+//   2. find a key starting "b." -- b.<bundle>=<position>
+//   3. query <bundle>@<host>._netaudio-bund._udp for TXT
+//   4. read a.0 / p.0 and JOIN that multicast group
+// It never contacts us. Everything above is mDNS, which is why the transmit
+// side needs no flow-control server at all.
+//
+// Format taken byte for byte from a RedNet A16R on this bench
+// (captures/netaudio_chan_A16R.txt, netaudio_bund.txt), not from the plan's
+// summary of it -- the two differ, e.g. the chan record advertises fpp=8,2
+// (the unicast range) while the BUNDLE advertises the fpp actually used, 16.
+//
+// Records are SYNTHESISED per query rather than stored: 48 channel records
+// differ only in instance name, id= and b.N=, so building them on demand costs
+// a scratch buffer instead of ~15 KB of blobs.
+// ---------------------------------------------------------------------------
+
+#define N_BUNDLES   (DANTE_TX_CHANNELS / 8)
+
+// Soft cap on one response. 48 channel PTRs would overflow a datagram, and an
+// mDNS response must not be fragmented.
+#define MDNS_SPLIT_BYTES  900
+
+// "<label>@<devicename>", the instance form real devices use ("08@RedNetA16R").
+static void inst_name(char *dst, int max, const char *label)
+{
+    int n = 0;
+    while (*label && n < max - 1) dst[n++] = *label++;
+    if (n < max - 1) dst[n++] = '@';
+    const char *d = g_dante.name;
+    while (*d && n < max - 1) dst[n++] = *d++;
+    dst[n] = 0;
+}
+
+static void chan_inst(char *dst, int max, unsigned ch1)   // ch1 = 1..48
+{
+    char label[DANTE_MAX_NAME];
+    dante_tx_channel_name((uint16_t)ch1, label, sizeof(label));
+    inst_name(dst, max, label);
+}
+
+static void bund_inst(char *dst, int max, unsigned b1)    // b1 = 1..6
+{
+    char label[8];
+    int n = 0;
+    if (b1 >= 10) label[n++] = (char)('0' + b1 / 10);
+    label[n++] = (char)('0' + b1 % 10);
+    label[n] = 0;
+    inst_name(dst, max, label);
+}
+
+static uint32_t txt_put_kv_u(uint8_t *p, uint32_t n, const char *k, uint32_t v)
+{
+    char buf[40]; int i = 0;
+    while (*k && i < 30) buf[i++] = *k++;
+    char num[12]; int j = 0;
+    if (!v) num[j++] = '0';
+    while (v) { num[j++] = (char)('0' + v % 10); v /= 10; }
+    while (j) buf[i++] = num[--j];
+    buf[i] = 0;
+    return txt_put(p, n, buf);
+}
+
+static uint32_t build_txt_chan(uint8_t *p, unsigned ch1)
+{
+    unsigned b1  = (ch1 - 1) / 8 + 1;          // bundle, 1-based
+    unsigned pos = (ch1 - 1) % 8 + 1;          // position within it, 1-based
+    uint32_t n = 0;
+    n = txt_put(p, n, "txtvers=2");
+    n = txt_put(p, n, "dbcp1=0x1200");
+    n = txt_put_kv_u(p, n, "id=", ch1);
+    n = txt_put(p, n, "dbcp=0x1004");
+    n = txt_put(p, n, "rate=48000");
+    n = txt_put(p, n, "en=24");
+    n = txt_put(p, n, "pcm=3 4");
+    n = txt_put(p, n, "enc=24");
+    n = txt_put(p, n, "latency_ns=500000");
+    n = txt_put(p, n, "fpp=8,2");
+    n = txt_put_kv_u(p, n, "nchan=", DANTE_TX_CHANNELS);
+    // THE KEY THAT MAKES MULTICAST SUBSCRIPTION WORK.
+    {
+        char kv[24]; int i = 0;
+        kv[i++] = 'b'; kv[i++] = '.';
+        if (b1 >= 10) kv[i++] = (char)('0' + b1 / 10);
+        kv[i++] = (char)('0' + b1 % 10);
+        kv[i++] = '=';
+        kv[i++] = (char)('0' + pos);
+        kv[i] = 0;
+        n = txt_put(p, n, kv);
+    }
+    n = txt_put(p, n, "at2");
+    return n;
+}
+
+static uint32_t build_txt_bund(uint8_t *p, unsigned b1)
+{
+    const uint8_t *ip = dante_tx_flow_ip(b1 - 1);
+    uint32_t n = 0;
+    n = txt_put(p, n, "txtvers=1");
+    n = txt_put_kv_u(p, n, "id=", b1);
+    n = txt_put(p, n, "nchan=8");
+    n = txt_put(p, n, "latency_ns=1000000");
+    n = txt_put(p, n, "fpp=16");
+    n = txt_put(p, n, "rate=48000");
+    n = txt_put(p, n, "enc=24");
+    n = txt_put(p, n, "at2");
+    {
+        char kv[32]; int i = 0;
+        const char *k = "a.0=";
+        while (*k) kv[i++] = *k++;
+        for (int o = 0; o < 4; o++) {
+            uint8_t v = ip[o];
+            if (v >= 100) kv[i++] = (char)('0' + v / 100);
+            if (v >= 10)  kv[i++] = (char)('0' + (v / 10) % 10);
+            kv[i++] = (char)('0' + v % 10);
+            if (o < 3) kv[i++] = '.';
+        }
+        kv[i] = 0;
+        n = txt_put(p, n, kv);
+    }
+    n = txt_put(p, n, "p.0=4321");
+    return n;
+}
+
+// Query names arrive lowercased by the sender's convention but our device name
+// keeps its original case, so compare case-insensitively -- the same reason the
+// arc/cmc instances keep separate lcq_* copies.
+static int ieq(const char *a, const char *b)
+{
+    while (*a && lc(*a) == lc(*b)) { a++; b++; }
+    return lc(*a) == lc(*b);
+}
+
+static int match_chan_inst(const char *q, unsigned *idx)
+{
+    char inst[DANTE_MAX_NAME + 48];
+    for (unsigned c = 1; c <= DANTE_TX_CHANNELS; c++) {
+        chan_inst(inst, sizeof(inst), c);
+        char full[DANTE_MAX_NAME + 64];
+        cat2(full, sizeof(full), inst, "._netaudio-chan._udp.local");
+        if (ieq(q, full)) { *idx = c; return 1; }
+    }
+    return 0;
+}
+
+static int match_bund_inst(const char *q, unsigned *idx)
+{
+    char inst[DANTE_MAX_NAME + 48];
+    for (unsigned b = 1; b <= N_BUNDLES; b++) {
+        bund_inst(inst, sizeof(inst), b);
+        char full[DANTE_MAX_NAME + 64];
+        cat2(full, sizeof(full), inst, "._netaudio-bund._udp.local");
+        if (ieq(q, full)) { *idx = b; return 1; }
+    }
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // Response assembly
 // ---------------------------------------------------------------------------
@@ -254,6 +419,12 @@ static uint32_t put_txt(uint8_t *p, uint32_t n, const char *inst, int is_arc)
 #define W_CMC_TXT   (1u << 5)
 #define W_A         (1u << 6)
 #define W_SERVICES  (1u << 7)
+#define W_CHAN_PTR  (1u << 8)      // all 48 channel PTRs
+#define W_BUND_PTR  (1u << 9)      // all 6 bundle PTRs
+// Single-instance answers carry their index alongside the mask.
+#define W_CHAN_ONE  (1u << 10)
+#define W_BUND_ONE  (1u << 11)
+static unsigned want_idx;          // 1-based channel or bundle for W_*_ONE
 
 static void send_response(uint32_t want)
 {
@@ -280,6 +451,47 @@ static void send_response(uint32_t want)
     if (want & W_CMC_SRV)  { n = put_srv(p, n, n_cmc_inst, DANTE_PORT_CMC); answers++; }
     if (want & W_CMC_TXT)  { n = put_txt(p, n, n_cmc_inst, 0); answers++; }
     if (want & W_A)        { n = put_a(p, n); answers++; }
+
+    // Channel / bundle records, synthesised on demand.
+    //
+    // PTR floods are SPLIT: 48 channel PTRs do not fit one datagram alongside
+    // anything else, and mDNS responses must not be fragmented. We answer a
+    // bounded batch per response and let the browser re-query; avahi and DC
+    // both do, and a truncated-but-valid response beats an oversized one.
+    if (want & W_CHAN_PTR) {
+        char inst[DANTE_MAX_NAME + 48];
+        for (unsigned c = 1; c <= DANTE_TX_CHANNELS && n < MDNS_SPLIT_BYTES; c++) {
+            chan_inst(inst, sizeof(inst), c);
+            n = put_ptr(p, n, n_chan_svc, inst); answers++;
+        }
+    }
+    if (want & W_BUND_PTR) {
+        char inst[DANTE_MAX_NAME + 48];
+        for (unsigned b = 1; b <= N_BUNDLES; b++) {
+            bund_inst(inst, sizeof(inst), b);
+            n = put_ptr(p, n, n_bund_svc, inst); answers++;
+        }
+    }
+    if (want & W_CHAN_ONE) {
+        char inst[DANTE_MAX_NAME + 48];
+        chan_inst(inst, sizeof(inst), want_idx);
+        n = put_srv(p, n, inst, DANTE_PORT_FLOWS); answers++;   // SRV port 4455
+        n = put_rr_head(p, n, inst, DNS_T_TXT, DNS_C_IN | DNS_CACHE_FLUSH, MDNS_TTL);
+        { uint32_t lp = n; n += 2;
+          uint32_t l = build_txt_chan(p + n, want_idx);
+          p[lp] = (uint8_t)(l >> 8); p[lp+1] = (uint8_t)l; n += l; }
+        answers++;
+    }
+    if (want & W_BUND_ONE) {
+        char inst[DANTE_MAX_NAME + 48];
+        bund_inst(inst, sizeof(inst), want_idx);
+        n = put_srv(p, n, inst, DANTE_PORT_MEDIA); answers++;   // SRV port 4321
+        n = put_rr_head(p, n, inst, DNS_T_TXT, DNS_C_IN | DNS_CACHE_FLUSH, MDNS_TTL);
+        { uint32_t lp = n; n += 2;
+          uint32_t l = build_txt_bund(p + n, want_idx);
+          p[lp] = (uint8_t)(l >> 8); p[lp+1] = (uint8_t)l; n += l; }
+        answers++;
+    }
 
     p[6] = (uint8_t)(answers >> 8); p[7] = (uint8_t)answers;
 
@@ -336,6 +548,16 @@ static void mdns_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         } else if (streq(qname, lcq_cmc_inst)) {
             if (any || qtype == DNS_T_SRV) want |= W_CMC_SRV | W_A;
             if (any || qtype == DNS_T_TXT) want |= W_CMC_TXT;
+        } else if (streq(qname, n_chan_svc)) {
+            if (any || qtype == DNS_T_PTR) want |= W_CHAN_PTR | W_A;
+        } else if (streq(qname, n_bund_svc)) {
+            if (any || qtype == DNS_T_PTR) want |= W_BUND_PTR | W_A;
+        } else if (match_chan_inst(qname, &want_idx)) {
+            if (any || qtype == DNS_T_SRV || qtype == DNS_T_TXT)
+                want |= W_CHAN_ONE | W_A;
+        } else if (match_bund_inst(qname, &want_idx)) {
+            if (any || qtype == DNS_T_SRV || qtype == DNS_T_TXT)
+                want |= W_BUND_ONE | W_A;
         } else if (streq(qname, lcq_host)) {
             if (any || qtype == DNS_T_A) want |= W_A;
         } else {
@@ -378,6 +600,8 @@ void mdns_init(void)
     cat2(n_host, sizeof(n_host), g_dante.hostname, ".local");
     cat2(n_arc_svc, sizeof(n_arc_svc), "_netaudio-arc._udp", ".local");
     cat2(n_cmc_svc, sizeof(n_cmc_svc), "_netaudio-cmc._udp", ".local");
+    cat2(n_chan_svc, sizeof(n_chan_svc), "_netaudio-chan._udp", ".local");
+    cat2(n_bund_svc, sizeof(n_bund_svc), "_netaudio-bund._udp", ".local");
     cat2(n_arc_inst, sizeof(n_arc_inst), g_dante.name, "._netaudio-arc._udp.local");
     cat2(n_cmc_inst, sizeof(n_cmc_inst), g_dante.name, "._netaudio-cmc._udp.local");
 

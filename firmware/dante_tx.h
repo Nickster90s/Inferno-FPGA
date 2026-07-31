@@ -43,4 +43,8 @@ void    dante_tx_poll(void);     // enable/disable the talker on PTPv1 lock
 uint8_t dante_tx_enabled(void);
 void    dante_tx_report(void);   // console diagnostics
 
+// Flow -> multicast group, for the mDNS bundle records.
+const uint8_t *dante_tx_flow_ip(unsigned f);
+unsigned       dante_tx_flows(void);
+
 #endif // DANTE_TX_H
