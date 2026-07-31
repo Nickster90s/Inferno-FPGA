@@ -18,6 +18,34 @@
 
 dante_arc_stats_t g_arc_stats;
 
+// Per-RX-channel subscription, set by 0x3010 and reported back by 0x3000.
+//
+// 0x3010 is a SET, not a query. Dante Controller sends "subscribe RxN to
+// <channel>@<host>" and expects the device to REMEMBER it -- then reads 0x3000
+// back to confirm. Answering OK and discarding it makes a patch fail silently:
+// we claim success and then contradict ourselves.
+#define DANTE_MAX_SUBNAME 32
+static char sub_tx_name[DANTE_RX_CHANNELS ? DANTE_RX_CHANNELS : 1][DANTE_MAX_SUBNAME];
+static char sub_tx_host[DANTE_RX_CHANNELS ? DANTE_RX_CHANNELS : 1][DANTE_MAX_SUBNAME];
+
+// inferno documents 0x01010009 for an active subscription and 0x00000001 for
+// "remembers the subscription but has not resolved it". We use the latter: the
+// subscription is stored and advertised, but we do not receive audio, so
+// claiming an active flow would be a lie DC would act on.
+#define SUB_STATUS_PENDING 0x00000001u
+
+static void sub_copy(char *dst, const uint8_t *req, uint32_t len, uint16_t off)
+{
+    dst[0] = 0;
+    if (!off || off >= len) return;
+    uint32_t n = 0;
+    while (off + n < len && req[off + n] && n < DANTE_MAX_SUBNAME - 1) {
+        dst[n] = (char)req[off + n];
+        n++;
+    }
+    dst[n] = 0;
+}
+
 // Opcodes. Names from inferno; the numeric values are what matters.
 #define OP_CHANNELS_AND_FLOWS_COUNT   0x1000
 #define OP_GET_DEVICE_NAME            0x1002
@@ -337,11 +365,21 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
             put_u16_at(slot,  0, idx);
             put_u16_at(slot,  2, 6);
             put_u16_at(slot,  4, common);
-            put_u16_at(slot,  6, 0);          // no transmitter subscribed
-            put_u16_at(slot,  8, 0);
+            // Report the subscription 0x3010 stored, or zeros if none. DC
+            // reads this back to confirm the patch took.
+            uint16_t tx_off = 0, host_off = 0;
+            uint32_t status = 0;
+            if (sub_tx_name[idx - 1][0]) {
+                tx_off   = dante_msg_str(&m, sub_tx_name[idx - 1]);
+                host_off = sub_tx_host[idx - 1][0]
+                         ? dante_msg_str(&m, sub_tx_host[idx - 1]) : 0;
+                status   = SUB_STATUS_PENDING;
+            }
+            put_u16_at(slot,  6, tx_off);
+            put_u16_at(slot,  8, host_off);
             put_u16_at(slot, 10, name_off);
-            put_u16_at(slot, 12, 0);          // subscription_status hi
-            put_u16_at(slot, 14, 0);          // subscription_status lo
+            put_u16_at(slot, 12, (uint16_t)(status >> 16));
+            put_u16_at(slot, 14, (uint16_t)status);
             put_u16_at(slot, 16, 0);
             put_u16_at(slot, 18, 0);
             pg.actual++;
@@ -384,7 +422,31 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     // is OK with NO content, which is exactly what DVS returns (measured with
     // tools/arc_query.py: 0x3010 -> OK len=0, 0x3014 -> OK len=0). An empty
     // subscription list is a valid answer; an error is not.
-    case 0x3010:
+    case 0x3010: {
+        // Subscription SET. Captured from DC patching the A16R to us:
+        //
+        //   0201 0001 0034 0037 00.. "01" 00 "RedNetA16R"
+        //    |    |    |    |
+        //    |    |    |    +-- tx hostname offset   (absolute from packet start)
+        //    |    |    +------- tx channel name offset
+        //    |    +------------ our RX channel id, 1-based
+        //    +----------------- 0x0201, fixed in every request seen
+        //
+        // An empty name is an UNSUBSCRIBE, which is how DC clears a patch.
+        if (clen >= 8) {
+            uint16_t ch  = dante_req_u16(content, 2);
+            uint16_t noff = dante_req_u16(content, 4);
+            uint16_t hoff = dante_req_u16(content, 6);
+            if (ch >= 1 && ch <= DANTE_RX_CHANNELS) {
+                sub_copy(sub_tx_name[ch - 1], req, len, noff);
+                sub_copy(sub_tx_host[ch - 1], req, len, hoff);
+                printf("[arc] subscribe Rx%u <- '%s'@'%s'\n",
+                       ch, sub_tx_name[ch - 1], sub_tx_host[ch - 1]);
+            }
+        }
+        break;
+    }
+
     case 0x3014:
         break;                      // code stays DANTE_CODE_OK, zero content
 
