@@ -22,6 +22,7 @@
 #include "dante_tx.h"
 #include "dante_dev.h"
 #include "ptpv1.h"
+#include "gptp.h"
 #include "net.h"
 #include <generated/csr.h>
 #include <string.h>
@@ -167,13 +168,57 @@ void dante_tx_init(void)
 // Talker gate
 // ---------------------------------------------------------------------------
 
+// Load the media-clock timestamp counter from the PTP clock.
+//
+// The counters free-run from reset, so without this the header carries seconds
+// since BOOT while every other device carries seconds since the grandmaster's
+// epoch -- measured 426 against the A16R's 84625. A receiver subscribes fine
+// and then discards every packet as hours stale: green patch, no audio.
+//
+// sub = ns * 48000 / 1e9 = ns * 3 / 62500, exact and small enough for 32 bits
+// (ns < 1e9, so ns*3 < 3e9 -- unsigned, and it must stay unsigned).
+static void ts_anchor(void)
+{
+    ptp_timestamp_t t = gptp_read_time();
+    uint32_t sub = (uint32_t)((t.nanoseconds * 3u) / 62500u);
+    if (sub >= 48000u) sub = 47999u;
+
+    aaf_pkt_ts_load_sec_write((uint32_t)t.seconds);
+    aaf_pkt_ts_load_sub_write(sub);
+    aaf_pkt_ts_load_write(1);
+    g_tx_stats.anchors++;
+    printf("[dtx] media clock anchored to PTP %lu.%09lu (sample %lu)\n",
+           (unsigned long)t.seconds, (unsigned long)t.nanoseconds,
+           (unsigned long)sub);
+}
+
 void dante_tx_poll(void)
 {
     uint8_t want = g_ptpv1.locked;
 
+    // Re-anchor when the emitted seconds drifts from PTP by more than a second.
+    // The media clock is rate-disciplined by mcr, so this should never fire in
+    // steady state; it exists to recover from a PTP step, which moves absolute
+    // time out from under a counter that only ever increments.
+    if (talker_on && want) {
+        ptp_timestamp_t t = gptp_read_time();
+        uint32_t emitted = aaf_pkt_dbg_last_sec_read();
+        uint32_t now_s   = (uint32_t)t.seconds;
+        uint32_t diff    = (emitted > now_s) ? (emitted - now_s) : (now_s - emitted);
+        if (diff > 1) {
+            printf("[dtx] media clock %lu vs PTP %lu -- re-anchoring\n",
+                   (unsigned long)emitted, (unsigned long)now_s);
+            ts_anchor();
+        }
+    }
+
     if (want == talker_on) return;
 
     if (want) {
+        // Anchor BEFORE enabling. Enabling first would put a burst of
+        // wrong-epoch packets on the wire, and a receiver that has already
+        // decided our timestamps are nonsense may not re-evaluate.
+        ts_anchor();
         aaf_pkt_enable_write(1);
         talker_on = 1;
         g_tx_stats.enables++;

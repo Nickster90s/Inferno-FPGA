@@ -214,6 +214,30 @@ class DantePacketizer(LiteXModule):
                              description="802.1Q TCI = (pcp<<13)|vid. Class A default pcp=3, vid=2.")
         self.ts_offset     = CSRStorage(32, reset=0,
                              description="presentation_time offset (ns) added to gPTP now. Milan AAF = 2 ms.")
+
+        # ANCHOR THE MEDIA CLOCK TO PTP.
+        #
+        # ts_sec/ts_sub below free-run from reset, so the header carried seconds
+        # since BOOT while every other device on the network carries seconds
+        # since the grandmaster's epoch. Measured on the wire:
+        #
+        #   A16R    239.255.121.190   sec=84625
+        #   ours    239.255.0.66      sec=426      <- uptime, not PTP time
+        #
+        # Nothing about the stream looked wrong -- tag 0x02, step exactly 16,
+        # correct group -- so a receiver subscribed happily and then discarded
+        # every packet as ~23 hours stale. A green patch with no audio.
+        #
+        # The TSU already holds correct absolute time (ptpv1.c steps it via
+        # tsu_step_seconds_write), so this only needs a load path. Firmware
+        # writes the target and pulses ts_load; the value is adopted at the next
+        # sample strobe, keeping the load in the media-clock domain.
+        self.ts_load_sec   = CSRStorage(32, reset=0,
+                             description="Seconds to load into the media-clock timestamp counter.")
+        self.ts_load_sub   = CSRStorage(32, reset=0,
+                             description="Subsecond samples (0..47999) to load alongside ts_load_sec.")
+        self.ts_load       = CSRStorage(1,
+                             description="Write 1 to adopt ts_load_sec/ts_load_sub at the next sample strobe.")
         # REMOVED (2026-06-23): pres_base CSR. It fed the (now-deleted) pres-ramp
         # dilation, so it was dead; worse, on openXC7 the value mcr.c wrote into it
         # (gbase ~= the NCO increment) was ending up in the pres in place of
@@ -441,14 +465,27 @@ class DantePacketizer(LiteXModule):
         ts_sec  = Signal(32)
         ts_sub  = Signal(32)          # 0 .. 47999
         SUBSEC_MAX = 48000
-        self.sync += If(strobe,
-            If(ts_sub == (SUBSEC_MAX - 1),
-                ts_sub.eq(0),
-                ts_sec.eq(ts_sec + 1),
-            ).Else(
-                ts_sub.eq(ts_sub + 1),
+        # A pending load is adopted at the next strobe, so the counter only ever
+        # changes in the media-clock domain. Emitted timestamps stay multiples
+        # of fpp regardless of what is loaded: the pacing condition below fires
+        # when ts_sub[0:4] == 15 and subtracts 15, so the result is a multiple
+        # of 16 by construction, not by luck with the loaded value.
+        ts_load_pending = Signal()
+        self.sync += [
+            If(self.ts_load.re, ts_load_pending.eq(1)),
+            If(strobe,
+                If(ts_load_pending,
+                    ts_sec.eq(self.ts_load_sec.storage),
+                    ts_sub.eq(self.ts_load_sub.storage),
+                    ts_load_pending.eq(0),
+                ).Elif(ts_sub == (SUBSEC_MAX - 1),
+                    ts_sub.eq(0),
+                    ts_sec.eq(ts_sec + 1),
+                ).Else(
+                    ts_sub.eq(ts_sub + 1),
+                ),
             ),
-        )
+        ]
         # Emitted timestamp: the counter value at send_req, minus one packet
         # (the samples in THIS packet were captured over the preceding fpp
         # strobes), plus a firmware-tunable offset in samples.

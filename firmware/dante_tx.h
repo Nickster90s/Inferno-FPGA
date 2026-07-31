@@ -35,6 +35,7 @@
 typedef struct {
     uint32_t enables;
     uint32_t disables;
+    uint32_t anchors;     // media-clock loads from PTP
 } dante_tx_stats_t;
 extern dante_tx_stats_t g_tx_stats;
 

@@ -477,6 +477,71 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         break;
     }
 
+    case 0x2201: {
+        // Create multicast TX flow.
+        //
+        // Content is a list of u16 offsets to flow descriptors, each:
+        //   0  2  flow_id (1-based)
+        //   2  2  flow_type   (2 = multicast)
+        //   4 10  unknown
+        //  14  2  channels_count
+        //  16 .. channel indices, u16 each, 1-based
+        // (inferno proto_arc.rs create_multicast_tx_flow, arc_server.rs:396).
+        // Response: u16 count, u16 0, then the accepted flow ids.
+        //
+        // SCOPE: our six bundles are statically bound in gateware -- flow f
+        // always carries channels 8f-7..8f -- so we can confirm a request that
+        // matches a bundle we already transmit, and we cannot honour an
+        // arbitrary channel set. Saying OK to one we cannot produce would give
+        // Dante Controller a flow that never appears on the wire, so those are
+        // refused rather than silently accepted. Arbitrary maps need the
+        // per-flow channel-map CSRs (plan Phase 5(c)), which this build lacks.
+        uint16_t accepted[8]; uint32_t nacc = 0;
+        for (uint32_t i = 0; i + 2 <= clen && nacc < 8; i += 2) {
+            uint32_t off = dante_req_u16(content, i);
+            if (off < DANTE_HDR_LEN) continue;
+            uint32_t d = off - DANTE_HDR_LEN;              // into content
+            if (d + 16 > clen) continue;
+            uint16_t fid  = dante_req_u16(content, d);
+            uint16_t ftyp = dante_req_u16(content, d + 2);
+            uint16_t nch  = dante_req_u16(content, d + 14);
+            if (ftyp != 2 || fid == 0 || fid > dante_tx_flows()) {
+                printf("[arc] 2201: refusing flow id=%u type=%u\n", fid, ftyp);
+                continue;
+            }
+            if (nch != 8 || d + 16 + 2 * nch > clen) {
+                printf("[arc] 2201: refusing flow %u, %u channels (we emit 8)\n", fid, nch);
+                continue;
+            }
+            int matches = 1;
+            for (unsigned c = 0; c < 8; c++)
+                if (dante_req_u16(content, d + 16 + 2 * c) != (uint16_t)((fid - 1) * 8 + c + 1))
+                    matches = 0;
+            if (!matches) {
+                printf("[arc] 2201: flow %u channel set is not bundle %u's fixed map\n", fid, fid);
+                continue;
+            }
+            accepted[nacc++] = fid;
+        }
+        if (nacc == 0) { code = 0x0022; break; }
+        dante_msg_u16(&m, (uint16_t)nacc);
+        dante_msg_u16(&m, 0);
+        for (uint32_t i = 0; i < nacc; i++) dante_msg_u16(&m, accepted[i]);
+        printf("[arc] 2201: confirmed %lu existing multicast flow(s)\n",
+               (unsigned long)nacc);
+        break;
+    }
+
+    case 0x2202:
+        // Delete multicast TX flow. Refused, and refused honestly: the six
+        // bundles are how every subscription to this device works, they are
+        // bound at init and transmit for the life of the board. Answering OK
+        // and keeping them running would leave Dante Controller showing a flow
+        // it believes it deleted.
+        printf("[arc] 2202: refusing delete -- multicast bundles are permanent\n");
+        code = 0x0022;
+        break;
+
     case OP_QUERY_RX_FLOWS: {
         // We source no RX flows; DANTE_RX_CHANNELS exists only as an
         // observation aid, and nothing subscribes on our behalf.
