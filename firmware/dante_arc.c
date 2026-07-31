@@ -11,6 +11,7 @@
 
 #include "dante_arc.h"
 #include "dante_msg.h"
+#include "dante_tx.h"
 #include "dante_dev.h"
 #include "net.h"
 #include <string.h>
@@ -390,9 +391,95 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         break;
     }
 
-    case OP_QUERY_TX_FLOWS:
+    case OP_QUERY_TX_FLOWS: {
+        // Report the 6 multicast bundles we actually transmit.
+        //
+        // Dante Controller's Device View "Transmit" tab is built from this, and
+        // with it stubbed at zero flows a subscription could go green while the
+        // device still showed no flow at all -- which is exactly what we saw.
+        //
+        // THE ITEM IS A u16 OFFSET, not an inline struct. Unlike 0x2000, where
+        // each slot holds the descriptor itself, here each slot holds an
+        // absolute offset to a FlowDescriptorHeader written in the trailing
+        // area (inferno proto_arc.rs query_tx_flows, arc_server.rs:311-394).
+        // Each flow contributes four separate blobs, and the order they are
+        // written in matters only because later ones reference earlier offsets.
+        uint16_t start = (clen >= 4) ? dante_req_u16(content, 2) : 1;
+        if (start == 0) start = 1;
+
+        page_t pg;
+        page_begin(&m, &pg, 2, dante_tx_flows());
+
+        uint16_t f = start;
+        for (; f <= dante_tx_flows() && pg.actual < pg.space; f++) {
+            const uint8_t *dip = dante_tx_flow_ip(f - 1);
+
+            // "<flow_id>_<process_id>", the local flow name real devices use.
+            char fname[24];
+            {
+                unsigned n2 = 0;
+                if (f >= 10) fname[n2++] = (char)('0' + f / 10);
+                fname[n2++] = (char)('0' + f % 10);
+                fname[n2++] = '_';
+                unsigned pid = g_dante.process_id, div = 10000, lead = 0;
+                while (div) {
+                    unsigned d = (pid / div) % 10;
+                    if (d || lead || div == 1) { fname[n2++] = (char)('0' + d); lead = 1; }
+                    div /= 10;
+                }
+                fname[n2] = 0;
+            }
+            uint16_t local_flow_name_off = dante_msg_str(&m, fname);
+
+            // MULTICAST is signalled by both remote offsets being zero -- there
+            // is no remote host, because nobody is told where to send. That is
+            // the same test inferno makes to pick flow_type.
+            const uint16_t remote_host_off    = 0;
+            const uint16_t remote_rx_flow_off = 0;
+
+            while (m.len & 3) dante_msg_u8(&m, 0);      // align 4
+            uint16_t sock_off = (uint16_t)m.len;
+            dante_msg_u16(&m, 0x8002);
+            dante_msg_u16(&m, DANTE_PORT_MEDIA);
+            dante_msg_bytes(&m, dip, 4);
+
+            uint16_t names_off = (uint16_t)m.len;
+            dante_msg_u16(&m, 0x0a00);
+            dante_msg_u16(&m, 1);
+            dante_msg_u16(&m, remote_host_off);
+            dante_msg_u16(&m, remote_rx_flow_off);
+            dante_msg_u16(&m, 0x0010);
+            dante_msg_u16(&m, local_flow_name_off);
+            // For a multicast flow the first 4 bytes of this trailing field are
+            // the latency in ns; the bundle record advertises 1 ms, so match it.
+            dante_msg_u32(&m, 1000000);
+            dante_msg_u32(&m, 0);
+
+            uint16_t descr_off = (uint16_t)m.len;
+            dante_msg_u16(&m, f);                       // flow_id, 1-based
+            dante_msg_u16(&m, 2);                       // 2 = multicast, 0x11 unicast
+            dante_msg_u32(&m, g_dante.sample_rate);
+            dante_msg_u16(&m, 0);
+            dante_msg_u16(&m, g_dante.bits_per_sample);
+            dante_msg_u16(&m, 1);
+            dante_msg_u16(&m, 8);                       // channels in this flow
+            dante_msg_u16(&m, sock_off);
+            for (unsigned c = 0; c < 8; c++)
+                dante_msg_u16(&m, (uint16_t)((f - 1) * 8 + c + 1));   // 1-based
+            dante_msg_u16(&m, names_off);               // footer
+
+            put_u16_at(page_slot(&m, &pg), 0, descr_off);
+            pg.actual++;
+            if (m.len >= PACKET_SIZE_SOFT_LIMIT) { f++; break; }
+        }
+        page_end(&m, &pg);
+        if (f <= dante_tx_flows()) code = DANTE_CODE_MORE;
+        break;
+    }
+
     case OP_QUERY_RX_FLOWS: {
-        // No flows yet. Phase 5 fills TX in with the 6 multicast bundles.
+        // We source no RX flows; DANTE_RX_CHANNELS exists only as an
+        // observation aid, and nothing subscribes on our behalf.
         page_t pg;
         page_begin(&m, &pg, 8, 0);
         page_end(&m, &pg);
