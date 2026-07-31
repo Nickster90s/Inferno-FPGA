@@ -494,10 +494,9 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         // (inferno proto_arc.rs create_multicast_tx_flow, arc_server.rs:396).
         // Response: u16 count, u16 0, then the accepted flow ids.
         //
-        // SCOPE: our six bundles are statically bound in gateware -- flow f
-        // always carries channels 8f-7..8f -- so we can confirm a request that
-        // matches a bundle we already transmit, and we cannot honour an
-        // arbitrary channel set. Saying OK to one we cannot produce would give
+        // SCOPE: flow f carries channels 8f-7..8f, so an arbitrary channel set
+        // is still refused -- but a matching request is now genuinely honoured:
+        // the bundle is bound and starts transmitting. Saying OK to one we cannot produce would give
         // Dante Controller a flow that never appears on the wire, so those are
         // refused rather than silently accepted. Arbitrary maps need the
         // per-flow channel-map CSRs (plan Phase 5(c)), which this build lacks.
@@ -524,6 +523,14 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
                     matches = 0;
             if (!matches) {
                 printf("[arc] 2201: flow %u channel set is not bundle %u's fixed map\n", fid, fid);
+                continue;
+            }
+            // ACTUALLY SWITCH THE BUNDLE ON. Confirming without binding would
+            // hand Dante Controller a flow that never reaches the wire -- the
+            // same lie 0x2202 was telling in the other direction. Bundles are
+            // pre-bound with nslots = 0, so this only sets the map and count.
+            if (dante_tx_bind_multicast(fid - 1) < 0) {
+                printf("[arc] 2201: could not bind bundle %u\n", fid);
                 continue;
             }
             accepted[nacc++] = fid;
