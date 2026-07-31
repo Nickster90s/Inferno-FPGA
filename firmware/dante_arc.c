@@ -404,10 +404,25 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     }
 
     case OP_UNKNOWN_3300:
-        // arc_server.rs:652 is blunt about this one: "WTF: this is necessary to
-        // avoid 'clock domain mismatch' error in DC". Reproduced verbatim.
-        dante_msg_u16(&m, 0x3800); dante_msg_u16(&m, 0x38fd);
-        dante_msg_u16(&m, 0x38fe); dante_msg_u16(&m, 0x38ff);
+        // The clock-domain response. arc_server.rs:652 is blunt about it:
+        // "WTF: this is necessary to avoid 'clock domain mismatch' error in
+        // DC", and hardcodes 38 00 38 fd 38 fe 38 ff -- which is the AM2's.
+        //
+        // It is NOT one constant. Queried from hardware, all three differ:
+        //
+        //   DVS  (N/A)      380038fb38fc38ff 00000000   12 bytes
+        //   A16R (checkbox) 3800397f398039ff 7900efef   12 bytes
+        //   AM2  (N/A)      380038fd38fe38ff             8 bytes
+        //
+        // We were sending inferno's constant, i.e. the AM2's 8-byte form.
+        // Switched to DVS's, for the same reason as clock stats, the keyed
+        // 0x1100, 0x1102 and the 0x1000 flags: DVS is the device this design
+        // actually resembles, and these descriptions have to agree with each
+        // other -- mixing sources already produced a device that contradicted
+        // itself once.
+        dante_msg_u16(&m, 0x3800); dante_msg_u16(&m, 0x38fb);
+        dante_msg_u16(&m, 0x38fc); dante_msg_u16(&m, 0x38ff);
+        dante_msg_u16(&m, 0x0000); dante_msg_u16(&m, 0x0000);
         break;
 
     case OP_UNKNOWN_1100: {
