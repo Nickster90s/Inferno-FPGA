@@ -368,7 +368,11 @@ int dante_tx_bind_unicast(const uint8_t peer_ip[4], const uint8_t dst_ip[4],
                           uint8_t nslots, uint8_t fpp)
 {
     uint8_t dmac[6];
-    if (net_arp_lookup(dst_ip, dmac) != 0) {
+    // net_arp_lookup returns 1 on SUCCESS, 0 on miss -- not the 0-is-success
+    // convention the rest of net.h uses (net_udp_bind, net_udp_commit). This
+    // was inverted here and rejected every flow whose MAC we already knew, with
+    // 0x0315 "too many TX flows" while all six contexts sat free.
+    if (!net_arp_lookup(dst_ip, dmac)) {
         // The request itself came from this peer, so its MAC is in the cache
         // from that frame. If it somehow is not, refuse rather than transmit to
         // a broadcast MAC.

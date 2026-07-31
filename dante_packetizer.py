@@ -820,7 +820,7 @@ class DantePacketizer(LiteXModule):
                 NextValue(stream_idx, 0),         # first stream of the block
                 NextValue(pkt_primed, primed),    # whole block is silence OR audio
                 If(~aligned_once, NextValue(rd, rd_anchor)),  # first block: anchor the read
-                NextState("BUILD"),
+                NextState("CHECK"),
             ),
         )
         # Latch on the IDLE->BUILD transition. No presentation accumulator to
@@ -847,18 +847,31 @@ class DantePacketizer(LiteXModule):
         # transmit, and it is why removing the multicast bundles dropped us from
         # 65.5 Mbit/s to 0.03.
         flow_off = (nslots == 0)
-        fsm.act("BUILD",
-            If(flow_off,
-                # Nothing configured here: move straight to the next context.
-                If(stream_idx != (streams - 1),
-                    NextValue(stream_idx, stream_idx + 1),
-                    NextValue(byte_idx, 0), NextValue(bph, 0),
-                    NextValue(cs_slot, 0), NextValue(cs_samp, 0),
-                ).Else(
-                    If(pkt_primed, NextValue(rd, rd + 64)),
-                    NextState("IDLE"),
-                ),
+        # SKIP DISABLED FLOWS IN THEIR OWN STATE.
+        #
+        # This was first written as an If(flow_off, ...) at the top of BUILD,
+        # which does not work: Migen takes the LAST assignment to a signal in a
+        # state, so the unconditional NextValue(byte_idx, byte_idx+1) and
+        # NextState("PREFETCH") at the bottom of BUILD both overrode it. A
+        # disabled flow therefore still built a packet -- with nslots = 0 that is
+        # a 51-byte header-only frame, emitted for every unconfigured context.
+        fsm.act("SKIP",
+            If(stream_idx != (streams - 1),
+                NextValue(stream_idx, stream_idx + 1),
+                NextValue(byte_idx, 0), NextValue(bph, 0),
+                NextValue(cs_slot, 0), NextValue(cs_samp, 0),
+                NextState("CHECK"),
+            ).Else(
+                If(pkt_primed, NextValue(rd, rd + 64)),
+                NextState("IDLE"),
             ),
+        )
+        # One state to look at the newly selected context before committing to
+        # build it. stream_idx changed only last cycle, so flow_off is valid now.
+        fsm.act("CHECK",
+            If(flow_off, NextState("SKIP")).Else(NextState("BUILD")),
+        )
+        fsm.act("BUILD",
             Case(lane, {
                 0: NextValue(wacc[0:8],   cur_byte),
                 1: NextValue(wacc[8:16],  cur_byte),
@@ -939,7 +952,7 @@ class DantePacketizer(LiteXModule):
                         NextValue(byte_idx, 0),
                         NextValue(bph, 0),
                         NextValue(cs_slot, 0), NextValue(cs_samp, 0),
-                        NextState("BUILD"),
+                        NextState("CHECK"),
                     ).Else(
                         # Block done. rd advances ONE tick = 8 samples x 8 channel
                         # slots = 64 entries, because pacing is now at the finest
