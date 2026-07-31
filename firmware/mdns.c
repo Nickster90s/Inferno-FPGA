@@ -80,6 +80,61 @@ static uint32_t name_decode(const uint8_t *msg, uint32_t msglen, uint32_t off,
 }
 
 // Encode a dotted name. Uncompressed, deliberately -- see mdns.h.
+// NAME COMPRESSION.
+//
+// A working A16R channel reply -- one DVS accepted -- is 141 bytes with ~8
+// compression pointers. Ours was 322 with ~1, because every name was written
+// out in full. That was a deliberate simplification in the plan ("emit
+// uncompressed names"), legal per RFC 1035, and the strongest remaining
+// candidate for why two independent RedNet resolvers re-queried our records
+// instead of accepting them.
+//
+// A small per-message cache of names already written. On a repeat we emit the
+// 2-byte 0xC0 pointer instead of the full name, which is where nearly all the
+// saving is: the instance name appears as the owner of both the SRV and the
+// TXT record, and the SRV target reappears as the A record's owner.
+static uint32_t name_encode(uint8_t *p, const char *name);   // fwd
+
+#define NC_MAX   10
+#define NC_NAME  96
+static struct { char name[NC_NAME]; uint16_t off; } nc[NC_MAX];
+static uint8_t nc_n;
+
+static void nc_reset(void) { nc_n = 0; }
+
+static int nc_find(const char *name)
+{
+    for (uint8_t i = 0; i < nc_n; i++) {
+        const char *a = nc[i].name, *b = name;
+        while (*a && *a == *b) { a++; b++; }
+        if (!*a && !*b) return nc[i].off;
+    }
+    return -1;
+}
+
+static void nc_add(const char *name, uint32_t off)
+{
+    if (nc_n >= NC_MAX || off > 0x3FFF) return;
+    uint32_t i = 0;
+    while (name[i] && i < NC_NAME - 1) { nc[nc_n].name[i] = name[i]; i++; }
+    nc[nc_n].name[i] = 0;
+    nc[nc_n].off = (uint16_t)off;
+    nc_n++;
+}
+
+// Write `name` at p+n, as a pointer if it has been written already.
+static uint32_t name_put(uint8_t *p, uint32_t n, const char *name)
+{
+    int off = nc_find(name);
+    if (off >= 0) {
+        p[n++] = (uint8_t)(0xC0 | ((off >> 8) & 0x3F));
+        p[n++] = (uint8_t)(off & 0xFF);
+        return n;
+    }
+    nc_add(name, n);
+    return n + name_encode(p + n, name);
+}
+
 static uint32_t name_encode(uint8_t *p, const char *name)
 {
     uint32_t n = 0;
@@ -195,7 +250,7 @@ static uint32_t build_txt_cmc(uint8_t *p)
 static uint32_t put_rr_head(uint8_t *p, uint32_t n, const char *name,
                             uint16_t type, uint16_t cls, uint32_t ttl)
 {
-    n += name_encode(p + n, name);
+    n = name_put(p, n, name);
     p[n++] = (uint8_t)(type >> 8); p[n++] = (uint8_t)type;
     p[n++] = (uint8_t)(cls  >> 8); p[n++] = (uint8_t)cls;
     p[n++] = (uint8_t)(ttl >> 24); p[n++] = (uint8_t)(ttl >> 16);
@@ -215,7 +270,8 @@ static uint32_t put_ptr(uint8_t *p, uint32_t n, const char *svc, const char *ins
 {
     n = put_rr_head(p, n, svc, DNS_T_PTR, DNS_C_IN, MDNS_TTL);
     uint32_t lp = n; n += 2;                       // rdlength placeholder
-    uint32_t l  = name_encode(p + n, inst);
+    uint32_t nn = name_put(p, n, inst);
+    uint32_t l  = nn - n;
     p[lp] = (uint8_t)(l >> 8); p[lp + 1] = (uint8_t)l;
     return n + l;
 }
@@ -228,7 +284,7 @@ static uint32_t put_srv(uint8_t *p, uint32_t n, const char *inst, uint16_t port)
     p[n++] = 0; p[n++] = 0;                        // priority
     p[n++] = 0; p[n++] = 0;                        // weight
     p[n++] = (uint8_t)(port >> 8); p[n++] = (uint8_t)port;
-    n += name_encode(p + n, n_host);
+    n = name_put(p, n, n_host);
     uint32_t l = n - s0;
     p[lp] = (uint8_t)(l >> 8); p[lp + 1] = (uint8_t)l;
     return n;
@@ -459,6 +515,7 @@ static void send_response(uint32_t want)
     uint32_t n = 0;
     uint16_t answers = 0;
 
+    nc_reset();                           // compression offsets are per-message
     p[0] = 0; p[1] = 0;                   // transaction id: 0 for mDNS
     p[2] = 0x84; p[3] = 0x00;             // response + authoritative
     p[4] = 0; p[5] = 0;                   // qdcount, patched below
