@@ -14,8 +14,22 @@
 #include <stdio.h>
 
 #define MDNS_PORT       5353
-#define MDNS_TTL        4500        // seconds; matches what Dante devices use
-#define MDNS_TTL_A      120
+// TTL 10, and NO cache-flush bit. Both read off a channel reply the RedNets
+// accept, byte for byte:
+//
+//   A16R (accepted)  ttl=10    class=0x0001   no cache-flush
+//   ours (rejected)  ttl=4500  class=0x8001   cache-flush on every record
+//
+// The 4500 was a guess that this file recorded as "matches what Dante devices
+// use". It does not -- real Dante channel records live for 10 seconds, which
+// makes sense for state that changes whenever a patch changes.
+//
+// The cache-flush bit is the more likely blocker of the two. RFC 6762 sets it
+// on unique records, but Dante does not, and a receiver that has cached a
+// channel record may treat a flushing answer as an instruction to discard
+// rather than as the resolution it asked for.
+#define MDNS_TTL        10
+#define MDNS_TTL_A      10
 
 #define DNS_T_A         1
 #define DNS_T_PTR       12
@@ -260,7 +274,7 @@ static uint32_t put_rr_head(uint8_t *p, uint32_t n, const char *name,
 
 static uint32_t put_a(uint8_t *p, uint32_t n)
 {
-    n = put_rr_head(p, n, n_host, DNS_T_A, DNS_C_IN | DNS_CACHE_FLUSH, MDNS_TTL_A);
+    n = put_rr_head(p, n, n_host, DNS_T_A, DNS_C_IN, MDNS_TTL_A);
     p[n++] = 0; p[n++] = 4;
     memcpy(p + n, g_net_ip, 4); n += 4;
     return n;
@@ -278,7 +292,7 @@ static uint32_t put_ptr(uint8_t *p, uint32_t n, const char *svc, const char *ins
 
 static uint32_t put_srv(uint8_t *p, uint32_t n, const char *inst, uint16_t port)
 {
-    n = put_rr_head(p, n, inst, DNS_T_SRV, DNS_C_IN | DNS_CACHE_FLUSH, MDNS_TTL);
+    n = put_rr_head(p, n, inst, DNS_T_SRV, DNS_C_IN, MDNS_TTL);
     uint32_t lp = n; n += 2;
     uint32_t s0 = n;
     p[n++] = 0; p[n++] = 0;                        // priority
@@ -292,7 +306,7 @@ static uint32_t put_srv(uint8_t *p, uint32_t n, const char *inst, uint16_t port)
 
 static uint32_t put_txt(uint8_t *p, uint32_t n, const char *inst, int is_arc)
 {
-    n = put_rr_head(p, n, inst, DNS_T_TXT, DNS_C_IN | DNS_CACHE_FLUSH, MDNS_TTL);
+    n = put_rr_head(p, n, inst, DNS_T_TXT, DNS_C_IN, MDNS_TTL);
     uint32_t lp = n; n += 2;
     uint32_t l  = is_arc ? build_txt_arc(p + n) : build_txt_cmc(p + n);
     p[lp] = (uint8_t)(l >> 8); p[lp + 1] = (uint8_t)l;
@@ -573,7 +587,7 @@ static void send_response(uint32_t want)
         char inst[DANTE_MAX_NAME + 48];
         chan_inst(inst, sizeof(inst), want_idx);
         n = put_srv(p, n, inst, DANTE_PORT_FLOWS); answers++;   // SRV port 4455
-        n = put_rr_head(p, n, inst, DNS_T_TXT, DNS_C_IN | DNS_CACHE_FLUSH, MDNS_TTL);
+        n = put_rr_head(p, n, inst, DNS_T_TXT, DNS_C_IN, MDNS_TTL);
         { uint32_t lp = n; n += 2;
           uint32_t l = build_txt_chan(p + n, want_idx);
           p[lp] = (uint8_t)(l >> 8); p[lp+1] = (uint8_t)l; n += l; }
@@ -583,7 +597,7 @@ static void send_response(uint32_t want)
         char inst[DANTE_MAX_NAME + 48];
         bund_inst(inst, sizeof(inst), want_idx);
         n = put_srv(p, n, inst, DANTE_PORT_MEDIA); answers++;   // SRV port 4321
-        n = put_rr_head(p, n, inst, DNS_T_TXT, DNS_C_IN | DNS_CACHE_FLUSH, MDNS_TTL);
+        n = put_rr_head(p, n, inst, DNS_T_TXT, DNS_C_IN, MDNS_TTL);
         { uint32_t lp = n; n += 2;
           uint32_t l = build_txt_bund(p + n, want_idx);
           p[lp] = (uint8_t)(l >> 8); p[lp+1] = (uint8_t)l; n += l; }
