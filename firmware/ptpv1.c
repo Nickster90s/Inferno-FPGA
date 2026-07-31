@@ -526,8 +526,28 @@ static void ptpv1_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         if (!have_t2_t1) return;              // no Sync pair resolved yet
         int64_t d = (last_t2_t1 + t4_t3) / 2;
         if (d < 0) d = 0;                     // negative delay is nonsense
-        if (d < 10000000LL)                   // ignore absurd (>10 ms) outliers
-            g_ptpv1.mean_path_delay_ns = d;
+        if (d < 10000000LL) {                 // ignore absurd (>10 ms) outliers
+            // SMOOTH, do not jump. The formula cancels our clock offset only if
+            // that offset is the same at t2 and at t3, which holds once locked
+            // but not while the servo is still moving -- so each raw estimate
+            // carries whatever phase correction happened in between.
+            //
+            // Applying it directly made the offset ping-pong with the servo:
+            // the servo drives (t2-t1) toward mpd, which recomputes mpd lower,
+            // which shifts the offset again -- 35 -> 21.4 -> 14.8 -> 11.4 us,
+            // each step throwing us out of lock. Exactly the -13612 ns and
+            // 8547 ns unlock excursions seen on the console right after a clean
+            // "LOCKED, offset -44 ns".
+            //
+            // The real path delay is constant on a fixed link, so a slow filter
+            // is not just a damper, it is the better estimator. alpha = 1/8
+            // over a 4 s DelayReq cadence settles in ~30 s and keeps each step
+            // well inside the 2 us unlock threshold.
+            if (g_ptpv1.mean_path_delay_ns == 0)
+                g_ptpv1.mean_path_delay_ns = d;   // first measurement
+            else
+                g_ptpv1.mean_path_delay_ns += (d - g_ptpv1.mean_path_delay_ns) / 8;
+        }
         have_t3 = 0;
         break;
     }
