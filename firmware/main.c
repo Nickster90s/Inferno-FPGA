@@ -30,6 +30,7 @@
 #include "ptpv1.h"
 #include "dante_tx.h"
 #include "dante_flows.h"
+void dante_stats_init(void);
 
 // MAC address — locally administered, unique per device.
 // TODO: read from SPI flash or EEPROM in production.
@@ -720,6 +721,7 @@ static void aaf_gw_push_binding(void)
     // equivalent and the CSRs no longer exist.
     dante_tx_init();
     dante_flows_init();
+    dante_stats_init();
 }
 
 static void aaf_gw_set(uint8_t on)
