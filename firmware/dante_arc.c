@@ -54,22 +54,9 @@ dante_arc_stats_t g_arc_stats;
 // Verified on the AM2: count 0x1f = 31, and 2 + 31*4 = 126 = the exact 0x1102
 // length. The 0x1100 blob holds 0x0000bb80 = 48000 among other things.
 //
-// Both tables are now DVS's, and they have to come from the SAME device.
-//
-// 0x1102 declares which properties EXIST; 0x1100 supplies their values. Taking
-// them from different devices makes the pair self-contradictory, which is
-// exactly what happened: 0x1100 was switched to DVS (declaring key 0x0064 = 0,
-// no external clock) while 0x1102 was still the AM2's, which does not list
-// 0x0064 at all. We were simultaneously telling DC the property does not exist
-// and giving it a value.
-//
-//   DVS   28 keys, 0x0064 = 0x0001 (exists)    -> N/A
-//   A16R  33 keys, 0x0064 = 0x0001 (exists)    -> checkbox, value 1 in 0x1100
-//   AM2   31 keys, 0x0064 ABSENT               -> N/A
-//
-// DVS is the correct source for both: a device with no clock hardware to offer,
-// which is this board. It declares the property exists and reports it as zero,
-// and that pairing is what yields N/A on a model DC does not recognise. Replaying it verbatim is safe with
+// This is a byte-exact replay of the RF04-RedNetAM2 (169.254.61.114), captured
+// from hardware on this bench -- deliberately the device Dante Controller shows
+// as *Follower*, which is the role we want. Replaying it verbatim is safe with
 // respect to the offset fields: those offsets are absolute from the start of
 // the packet (see dante_msg.h), and our header is the same 10 bytes, so every
 // offset stays valid as long as the body is emitted unchanged.
@@ -97,71 +84,18 @@ static const uint8_t arc_1100_body[202] = {
     0x42, 0x40, 0x00, 0x0f, 0x42, 0x40, 0x01, 0x35, 0xf1, 0xb4, 0x00, 0x1e,
     0x84, 0x80, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00,
 };
-static const uint8_t arc_1100_keyed[142] = {
-    0x19, 0x19, 0x02, 0x01, 0x00, 0x01, 0x82, 0x04, 0x00, 0x70, 0x82, 0x05,
-    0x00, 0x74, 0x02, 0x10, 0x00, 0x20, 0x02, 0x11, 0x00, 0x20, 0x00, 0x00,
-    0x82, 0x18, 0x00, 0x00, 0x82, 0x19, 0x83, 0x01, 0x00, 0x78, 0x83, 0x02,
-    0x00, 0x7c, 0x83, 0x06, 0x00, 0x80, 0x03, 0x10, 0x00, 0x3c, 0x03, 0x11,
-    0x00, 0x10, 0x03, 0x03, 0x00, 0x04, 0x80, 0x21, 0x00, 0x84, 0x00, 0xf0,
-    0x00, 0x00, 0x00, 0x00, 0x80, 0x60, 0x00, 0x22, 0x00, 0x01, 0x00, 0x63,
-    0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x65, 0x02, 0x22,
-    0x00, 0x00, 0x02, 0x12, 0x00, 0x30, 0x83, 0x21, 0x00, 0x94, 0x00, 0x00,
-    0x00, 0x66, 0x02, 0x14, 0x00, 0x80, 0x00, 0x98, 0x96, 0x80, 0x00, 0x98,
-    0x96, 0x80, 0x00, 0x98, 0x96, 0x80, 0x1d, 0xcd, 0x65, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1e, 0x84, 0x80,
-};
-
-// 0x1100 answered for a KEYED query.
-//
-// Dante Controller does not send 0x1100 empty -- it sends a list of 25 property
-// keys (0201 8204 8205 0210 0211 8218 8219 8301 8302 8306 0310 0311 0303 8021
-// 00f0 8060 0022 0063 0064 0065 0222 0212 8321 0066 0214), and the reply is
-// (key, value) pairs answering exactly those, 146 bytes.
-//
-// We were returning arc_1100_body -- the AM2's answer to an EMPTY probe, a
-// different shape at 202 bytes with a different 31-key set -- for every
-// request. DC cannot map that onto the keys it asked for, so it falls back to
-// defaults, which is how "Enable Sync To External" ends up offering an enabled
-// checkbox for us while both DVS and the AM2 show N/A.
-//
-// The keyed reply is DVS's, captured by replaying DC's exact request at it.
-//
-// KEY 0x0064 IS THE EXTERNAL-CLOCK CAPABILITY, and the three devices differ in
-// a way that matters more than "capable or not":
-//
-//   A16R (checkbox)  ... 0063 0001  0064 0001 ...   present, value 1
-//   DVS  (N/A)       ... 0063 0000  0064 0000 ...   present, value 0
-//   AM2  (N/A)       ... 0063 0001  0000 0064 ...   ABSENT
-//
-// Both DVS and the AM2 display N/A, so copying either "should" have worked --
-// but it did not. We copied the AM2, which OMITS the key, and DC fell back to
-// its default and offered the checkbox anyway. DVS states the key explicitly as
-// zero, and gets N/A.
-//
-// That is the same rule that has governed every one of these fixes: DC treats
-// absent data as "assume the default", and only an explicit value overrides it.
-// The AM2 presumably gets away with omitting it because DC recognises its model
-// and knows an Ultimo has no word-clock input; our model means nothing to DC,
-// so we have to say so ourselves.
-//
-// DVS is the right template regardless: a device with no clock hardware to
-// offer, which is exactly this board.
-//
-// CAVEAT: it also carries DVS's latency figures (0x00989680 = 10 ms). Those are
-// not ours. Answering the query in the right shape is what this fixes; deriving
-// each value is separate work, and matters before anything depends on them.
-static const uint8_t arc_1102_body[114] = {
-    0x00, 0x1c, 0x80, 0x20, 0x00, 0x01, 0x80, 0x21, 0x00, 0x03, 0x00, 0x22,
-    0x00, 0x03, 0x00, 0x24, 0x00, 0x01, 0x00, 0x63, 0x00, 0x01, 0x00, 0x64,
-    0x00, 0x01, 0x00, 0xf0, 0x00, 0x03, 0x02, 0x01, 0x00, 0x03, 0x82, 0x04,
-    0x00, 0x01, 0x82, 0x05, 0x00, 0x01, 0x02, 0x0a, 0x00, 0x01, 0x02, 0x0b,
-    0x00, 0x01, 0x02, 0x10, 0x00, 0x01, 0x02, 0x11, 0x00, 0x01, 0x02, 0x12,
-    0x00, 0x01, 0x02, 0x13, 0x00, 0x01, 0x02, 0x14, 0x00, 0x01, 0x83, 0x01,
-    0x00, 0x01, 0x83, 0x06, 0x00, 0x01, 0x83, 0x02, 0x00, 0x01, 0x03, 0x10,
-    0x00, 0x01, 0x03, 0x11, 0x00, 0x01, 0x03, 0x03, 0x00, 0x03, 0x83, 0xf0,
-    0x00, 0x01, 0x06, 0x01, 0x00, 0x01, 0x03, 0x09, 0x00, 0x01, 0x02, 0x09,
-    0x00, 0x01, 0x07, 0x01, 0x00, 0x03,
+static const uint8_t arc_1102_body[126] = {
+    0x00, 0x1f, 0x80, 0x20, 0x00, 0x01, 0x80, 0x21, 0x00, 0x03, 0x00, 0x22,
+    0x00, 0x03, 0x00, 0x23, 0x00, 0x03, 0x00, 0x24, 0x00, 0x01, 0x80, 0x60,
+    0x00, 0x03, 0x00, 0x62, 0x00, 0x03, 0x00, 0x63, 0x00, 0x01, 0x02, 0x01,
+    0x00, 0x03, 0x82, 0x04, 0x00, 0x03, 0x82, 0x05, 0x00, 0x03, 0x02, 0x0a,
+    0x00, 0x01, 0x02, 0x0b, 0x00, 0x01, 0x02, 0x10, 0x00, 0x03, 0x02, 0x11,
+    0x00, 0x03, 0x02, 0x12, 0x00, 0x03, 0x02, 0x13, 0x00, 0x01, 0x02, 0x14,
+    0x00, 0x01, 0x02, 0x22, 0x00, 0x03, 0x83, 0x01, 0x00, 0x03, 0x83, 0x06,
+    0x00, 0x01, 0x83, 0x02, 0x00, 0x01, 0x83, 0x21, 0x00, 0x01, 0x03, 0x10,
+    0x00, 0x01, 0x03, 0x11, 0x00, 0x01, 0x03, 0x12, 0x00, 0x01, 0x03, 0x03,
+    0x00, 0x03, 0x83, 0xf0, 0x00, 0x01, 0x06, 0x01, 0x00, 0x01, 0x03, 0x09,
+    0x00, 0x01, 0x02, 0x09, 0x00, 0x01,
 };
 
 // Soft cap on response size, so a paginated reply stays inside one datagram.
@@ -271,27 +205,10 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
 
     case OP_CHANNELS_AND_FLOWS_COUNT: {
         // The response DC uses to size everything else.
-        //
-        // We used to send unknown1_0 = 0x00 and flags2 = 0x30, setting only the
-        // two bits inferno names (bit4 supports_tx_channel_rename, bit5
-        // supports_tx_multicast) and leaving every unnamed bit clear. Real
-        // hardware does not:
-        //
-        //   A16R  1f f9      DVS  1f f9      AM2  1d f9      ours  00 30
-        //
-        // flags2 = 0xf9 on ALL THREE -- so beyond the two named bits they also
-        // set the low nibble to 9 and the top two bits to 3. Whatever those
-        // encode, every shipping device asserts them, and we were the only
-        // device on the network declaring otherwise. Under-declaring is exactly
-        // how this bring-up kept ending up with DC's defaults instead of our
-        // values.
-        //
-        // Matching DVS (1f f9): it is the device modelled everywhere else here
-        // -- clock stats, 0x1100 and 0x1102 all come from it -- and consistency
-        // across those matters more than any single bit, as mixing the AM2's
-        // and DVS's property tables already proved.
-        dante_msg_u8 (&m, 0x1f);                           // unknown1_0
-        dante_msg_u8 (&m, 0xf9);                           // flags2
+        // flags2 is an LSB-first bitfield: bit4 = supports_tx_channel_rename,
+        // bit5 = supports_tx_multicast. We claim both.
+        dante_msg_u8 (&m, 0);                              // unknown1_0
+        dante_msg_u8 (&m, (1u << 4) | (1u << 5));          // flags2
         dante_msg_u16(&m, DANTE_TX_CHANNELS);
         dante_msg_u16(&m, DANTE_RX_CHANNELS);
         dante_msg_u16(&m, 4);                              // unknown2_4
@@ -404,39 +321,15 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     }
 
     case OP_UNKNOWN_3300:
-        // The clock-domain response. arc_server.rs:652 is blunt about it:
-        // "WTF: this is necessary to avoid 'clock domain mismatch' error in
-        // DC", and hardcodes 38 00 38 fd 38 fe 38 ff -- which is the AM2's.
-        //
-        // It is NOT one constant. Queried from hardware, all three differ:
-        //
-        //   DVS  (N/A)      380038fb38fc38ff 00000000   12 bytes
-        //   A16R (checkbox) 3800397f398039ff 7900efef   12 bytes
-        //   AM2  (N/A)      380038fd38fe38ff             8 bytes
-        //
-        // We were sending inferno's constant, i.e. the AM2's 8-byte form.
-        // Switched to DVS's, for the same reason as clock stats, the keyed
-        // 0x1100, 0x1102 and the 0x1000 flags: DVS is the device this design
-        // actually resembles, and these descriptions have to agree with each
-        // other -- mixing sources already produced a device that contradicted
-        // itself once.
-        dante_msg_u16(&m, 0x3800); dante_msg_u16(&m, 0x38fb);
-        dante_msg_u16(&m, 0x38fc); dante_msg_u16(&m, 0x38ff);
-        dante_msg_u16(&m, 0x0000); dante_msg_u16(&m, 0x0000);
+        // arc_server.rs:652 is blunt about this one: "WTF: this is necessary to
+        // avoid 'clock domain mismatch' error in DC". Reproduced verbatim.
+        dante_msg_u16(&m, 0x3800); dante_msg_u16(&m, 0x38fd);
+        dante_msg_u16(&m, 0x38fe); dante_msg_u16(&m, 0x38ff);
         break;
 
-    case OP_UNKNOWN_1100: {
-        // A keyed query carries a u16 count at content[0]. An empty probe
-        // (count 0 or no content) still gets the full advertisement.
-        uint16_t nkeys = (len >= DANTE_HDR_LEN + 2)
-                       ? (uint16_t)((req[DANTE_HDR_LEN] << 8) | req[DANTE_HDR_LEN + 1])
-                       : 0;
-        if (nkeys)
-            dante_msg_bytes(&m, arc_1100_keyed, sizeof(arc_1100_keyed));
-        else
-            dante_msg_bytes(&m, arc_1100_body, sizeof(arc_1100_body));
+    case OP_UNKNOWN_1100:
+        dante_msg_bytes(&m, arc_1100_body, sizeof(arc_1100_body));
         break;
-    }
 
     case OP_UNKNOWN_1102:
         dante_msg_bytes(&m, arc_1102_body, sizeof(arc_1102_body));
