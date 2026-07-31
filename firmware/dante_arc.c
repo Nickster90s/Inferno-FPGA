@@ -412,7 +412,12 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
 
         uint16_t f = start;
         for (; f <= dante_tx_flows() && pg.actual < pg.space; f++) {
-            const uint8_t *dip = dante_tx_flow_ip(f - 1);
+            // Only report contexts that are actually BOUND. We used to list all
+            // six multicast bundles unconditionally, which after the unicast
+            // rework meant Dante Controller showed six flows that put nothing on
+            // the wire -- and then tried to delete them.
+            uint8_t  dip[4]; uint16_t dport8; uint8_t ns, fp, mc;
+            if (!dante_tx_flow_desc(f - 1, dip, &dport8, &ns, &fp, &mc)) continue;
 
             // "<flow_id>_<process_id>", the local flow name real devices use.
             char fname[24];
@@ -440,7 +445,7 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
             while (m.len & 3) dante_msg_u8(&m, 0);      // align 4
             uint16_t sock_off = (uint16_t)m.len;
             dante_msg_u16(&m, 0x8002);
-            dante_msg_u16(&m, DANTE_PORT_MEDIA);
+            dante_msg_u16(&m, dport8);
             dante_msg_bytes(&m, dip, 4);
 
             uint16_t names_off = (uint16_t)m.len;
@@ -457,14 +462,14 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
 
             uint16_t descr_off = (uint16_t)m.len;
             dante_msg_u16(&m, f);                       // flow_id, 1-based
-            dante_msg_u16(&m, 2);                       // 2 = multicast, 0x11 unicast
+            dante_msg_u16(&m, mc ? 2 : 0x11);           // 2 = multicast, 0x11 unicast
             dante_msg_u32(&m, g_dante.sample_rate);
             dante_msg_u16(&m, 0);
             dante_msg_u16(&m, g_dante.bits_per_sample);
             dante_msg_u16(&m, 1);
-            dante_msg_u16(&m, 8);                       // channels in this flow
+            dante_msg_u16(&m, ns);                      // channels in this flow
             dante_msg_u16(&m, sock_off);
-            for (unsigned c = 0; c < 8; c++)
+            for (unsigned c = 0; c < ns; c++)
                 dante_msg_u16(&m, (uint16_t)((f - 1) * 8 + c + 1));   // 1-based
             dante_msg_u16(&m, names_off);               // footer
 
@@ -532,15 +537,23 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         break;
     }
 
-    case 0x2202:
-        // Delete multicast TX flow. Refused, and refused honestly: the six
-        // bundles are how every subscription to this device works, they are
-        // bound at init and transmit for the life of the board. Answering OK
-        // and keeping them running would leave Dante Controller showing a flow
-        // it believes it deleted.
-        printf("[arc] 2202: refusing delete -- multicast bundles are permanent\n");
-        code = 0x0022;
+    case 0x2202: {
+        // Delete multicast TX flow. This USED to refuse, on the grounds that the
+        // six bundles were permanent. That stopped being true when the unicast
+        // rework made bundles bind with nslots = 0 and transmit nothing until
+        // asked -- so the refusal was a stale comment refusing a request we can
+        // now honour trivially, and Dante Controller simply retried forever.
+        //
+        // Content is a list of u16 flow ids, 1-based.
+        uint32_t deleted = 0;
+        for (uint32_t i = 0; i + 2 <= clen; i += 2) {
+            uint16_t fid = dante_req_u16(content, i);
+            if (fid == 0 || fid > dante_tx_flows()) continue;
+            if (dante_tx_unbind(fid - 1) == 0) deleted++;
+        }
+        printf("[arc] 2202: deleted %lu flow(s)\n", (unsigned long)deleted);
         break;
+    }
 
     case OP_QUERY_RX_FLOWS: {
         // We source no RX flows; DANTE_RX_CHANNELS exists only as an

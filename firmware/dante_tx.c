@@ -321,6 +321,11 @@ typedef struct {
     uint8_t  peer[4];
     uint32_t last_ms;
     uint32_t rebinds;      // times this context was re-bound from scratch
+    uint8_t  dst[4];
+    uint16_t dport;
+    uint8_t  nslots;
+    uint8_t  fpp;
+    uint8_t  mcast;        // 1 = multicast bundle, 0 = unicast to a receiver
 } flow_slot_t;
 static flow_slot_t flows[N_FLOWS];
 
@@ -433,6 +438,11 @@ int dante_tx_bind_unicast(const uint8_t peer_ip[4], const uint8_t dst_ip[4],
         printf("[dtx] flow %d -> %u.%u.%u.%u:%u, %u slots, fpp %u\n",
                f, dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3], dst_port, nslots, fpp);
     }
+    for (int i = 0; i < 4; i++) flows[f].dst[i] = dst_ip[i];
+    flows[f].dport  = dst_port;
+    flows[f].nslots = nslots;
+    flows[f].fpp    = fpp;
+    flows[f].mcast  = 0;
     flows[f].last_ms = now_ms;
     return f;
 }
@@ -476,7 +486,11 @@ int dante_tx_bind_multicast(unsigned f)
     const uint8_t *dip = flow_ip[f];
     uint8_t dmac[6] = { 0x01, 0x00, 0x5E, (uint8_t)(dip[1] & 0x7F), dip[2], dip[3] };
     write_ctx(f, dip, dmac, DANTE_PORT_MEDIA, chans, 8, 16);
-    g_flows_stats.active++;
+    flows[f].in_use = 1;
+    for (int i = 0; i < 4; i++) flows[f].dst[i] = dip[i];
+    flows[f].dport = DANTE_PORT_MEDIA;
+    flows[f].nslots = 8; flows[f].fpp = 16; flows[f].mcast = 1;
+    flows[f].last_ms = gptp_uptime_ms();
     printf("[dtx] multicast bundle %u ON -> %u.%u.%u.%u\n",
            f, dip[0], dip[1], dip[2], dip[3]);
     return (int)f;
@@ -501,4 +515,29 @@ void dante_tx_flow_info(unsigned f, uint8_t *in_use, uint32_t *age_ms,
     *in_use  = flows[f].in_use;
     *age_ms  = flows[f].in_use ? (gptp_uptime_ms() - flows[f].last_ms) : 0;
     *rebinds = flows[f].rebinds;
+}
+
+// Describe a bound flow for ARC 0x2200. Returns 0 if the context is idle, so
+// the reply lists what we ACTUALLY transmit rather than six bundles that exist
+// only as pre-computed headers.
+int dante_tx_flow_desc(unsigned f, uint8_t ip[4], uint16_t *port,
+                       uint8_t *nslots, uint8_t *fpp, uint8_t *mcast)
+{
+    if (f >= N_FLOWS || !flows[f].in_use) return 0;
+    for (int i = 0; i < 4; i++) ip[i] = flows[f].dst[i];
+    *port = flows[f].dport; *nslots = flows[f].nslots;
+    *fpp = flows[f].fpp;    *mcast = flows[f].mcast;
+    return 1;
+}
+
+// Tear a flow down on request (ARC 0x2202). nslots = 0 makes the builder skip
+// the context entirely.
+int dante_tx_unbind(unsigned f)
+{
+    if (f >= N_FLOWS || !flows[f].in_use) return -1;
+    flows[f].in_use = 0;
+    aaf_pkt_ctx_select_write(f);
+    aaf_pkt_flow_cfg_write(0);
+    printf("[dtx] flow %u deleted\n", f);
+    return 0;
 }
