@@ -326,6 +326,7 @@ typedef struct {
     uint8_t  nslots;
     uint8_t  fpp;
     uint8_t  mcast;        // 1 = multicast bundle, 0 = unicast to a receiver
+    uint16_t ext_id;       // flow id Dante Controller uses for this flow
 } flow_slot_t;
 static flow_slot_t flows[N_FLOWS];
 
@@ -477,23 +478,43 @@ void dante_tx_expire(void)
 // bound by bind_flow(). Multicast is NOT a separate datapath -- it is a flow
 // whose destination happens to be a group address, so it runs through exactly
 // the same per-context map the unicast path uses. Kept available for 0x2201.
-int dante_tx_bind_multicast(unsigned f)
+int dante_tx_bind_multicast(uint16_t ext_id, const uint16_t *chans, uint8_t n)
 {
-    if (f >= N_FLOWS) return -1;
-    uint16_t chans[8];
-    for (unsigned i = 0; i < 8; i++) chans[i] = (uint16_t)(f * 8 + i + 1);
+    if (n == 0 || n > 8) return -1;
+
+    // Reuse the context already serving this Dante Controller flow id, else a
+    // free one. DC's flow id is a HANDLE, not an index into our contexts -- it
+    // picks from the max-flows value we advertise in 0x1000 (32), so the two
+    // numbering spaces have to be kept apart.
+    int f = -1;
+    for (unsigned i = 0; i < N_FLOWS; i++)
+        if (flows[i].in_use && flows[i].mcast && flows[i].ext_id == ext_id) { f = (int)i; break; }
+    if (f < 0)
+        for (unsigned i = 0; i < N_FLOWS; i++)
+            if (!flows[i].in_use) { f = (int)i; break; }
+    if (f < 0) return -1;
 
     const uint8_t *dip = flow_ip[f];
     uint8_t dmac[6] = { 0x01, 0x00, 0x5E, (uint8_t)(dip[1] & 0x7F), dip[2], dip[3] };
-    write_ctx(f, dip, dmac, DANTE_PORT_MEDIA, chans, 8, 16);
+    write_ctx((unsigned)f, dip, dmac, DANTE_PORT_MEDIA, chans, n, 16);
+
     flows[f].in_use = 1;
     for (int i = 0; i < 4; i++) flows[f].dst[i] = dip[i];
     flows[f].dport = DANTE_PORT_MEDIA;
-    flows[f].nslots = 8; flows[f].fpp = 16; flows[f].mcast = 1;
+    flows[f].nslots = n; flows[f].fpp = 16; flows[f].mcast = 1;
+    flows[f].ext_id = ext_id;
     flows[f].last_ms = gptp_uptime_ms();
-    printf("[dtx] multicast bundle %u ON -> %u.%u.%u.%u\n",
-           f, dip[0], dip[1], dip[2], dip[3]);
-    return (int)f;
+    printf("[dtx] multicast flow %u (ctx %d) -> %u.%u.%u.%u, %u ch\n",
+           ext_id, f, dip[0], dip[1], dip[2], dip[3], n);
+    return f;
+}
+
+// Find the context serving a Dante Controller flow id, for 0x2202.
+int dante_tx_ctx_for_id(uint16_t ext_id)
+{
+    for (unsigned i = 0; i < N_FLOWS; i++)
+        if (flows[i].in_use && flows[i].ext_id == ext_id) return (int)i;
+    return -1;
 }
 
 // Per-flow state for the UDP stats endpoint: is the context bound, and how long
@@ -521,12 +542,13 @@ void dante_tx_flow_info(unsigned f, uint8_t *in_use, uint32_t *age_ms,
 // the reply lists what we ACTUALLY transmit rather than six bundles that exist
 // only as pre-computed headers.
 int dante_tx_flow_desc(unsigned f, uint8_t ip[4], uint16_t *port,
-                       uint8_t *nslots, uint8_t *fpp, uint8_t *mcast)
+                       uint8_t *nslots, uint8_t *fpp, uint8_t *mcast, uint16_t *id)
 {
     if (f >= N_FLOWS || !flows[f].in_use) return 0;
     for (int i = 0; i < 4; i++) ip[i] = flows[f].dst[i];
     *port = flows[f].dport; *nslots = flows[f].nslots;
     *fpp = flows[f].fpp;    *mcast = flows[f].mcast;
+    if (id) *id = flows[f].ext_id ? flows[f].ext_id : (uint16_t)(f + 1);
     return 1;
 }
 

@@ -416,8 +416,8 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
             // six multicast bundles unconditionally, which after the unicast
             // rework meant Dante Controller showed six flows that put nothing on
             // the wire -- and then tried to delete them.
-            uint8_t  dip[4]; uint16_t dport8; uint8_t ns, fp, mc;
-            if (!dante_tx_flow_desc(f - 1, dip, &dport8, &ns, &fp, &mc)) continue;
+            uint8_t  dip[4]; uint16_t dport8, ext; uint8_t ns, fp, mc;
+            if (!dante_tx_flow_desc(f - 1, dip, &dport8, &ns, &fp, &mc, &ext)) continue;
 
             // "<flow_id>_<process_id>", the local flow name real devices use.
             char fname[24];
@@ -461,7 +461,7 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
             dante_msg_u32(&m, 0);
 
             uint16_t descr_off = (uint16_t)m.len;
-            dante_msg_u16(&m, f);                       // flow_id, 1-based
+            dante_msg_u16(&m, ext);                     // the id DC knows it by
             dante_msg_u16(&m, mc ? 2 : 0x11);           // 2 = multicast, 0x11 unicast
             dante_msg_u32(&m, g_dante.sample_rate);
             dante_msg_u16(&m, 0);
@@ -485,62 +485,62 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     case 0x2201: {
         // Create multicast TX flow.
         //
-        // Content is a list of u16 offsets to flow descriptors, each:
-        //   0  2  flow_id (1-based)
-        //   2  2  flow_type   (2 = multicast)
+        // Content is a PAGE, not a bare array: space_items u8, actual_items u8,
+        // then that many u16 offsets to flow descriptors. Scanning every u16 in
+        // the content as an offset is what produced "refusing flow id=2560" --
+        // 0x0A00 is the magic word inside MostlyZeros, i.e. we were reading the
+        // descriptor bodies as if they were the index.
+        //
+        // Each descriptor (inferno create_multicast_tx_flow::FlowDescriptorHeader):
+        //   0  2  flow_id     -- Dante Controller's HANDLE, up to the max-flows
+        //                        value we advertise in 0x1000 (32). NOT an index
+        //                        into our six contexts; that mapping is kept in
+        //                        dante_tx_bind_multicast.
+        //   2  2  flow_type   -- 2 = multicast
         //   4 10  unknown
         //  14  2  channels_count
         //  16 .. channel indices, u16 each, 1-based
-        // (inferno proto_arc.rs create_multicast_tx_flow, arc_server.rs:396).
-        // Response: u16 count, u16 0, then the accepted flow ids.
-        //
-        // SCOPE: flow f carries channels 8f-7..8f, so an arbitrary channel set
-        // is still refused -- but a matching request is now genuinely honoured:
-        // the bundle is bound and starts transmitting. Saying OK to one we cannot produce would give
-        // Dante Controller a flow that never appears on the wire, so those are
-        // refused rather than silently accepted. Arbitrary maps need the
-        // per-flow channel-map CSRs (plan Phase 5(c)), which this build lacks.
         uint16_t accepted[8]; uint32_t nacc = 0;
-        for (uint32_t i = 0; i + 2 <= clen && nacc < 8; i += 2) {
-            uint32_t off = dante_req_u16(content, i);
+        uint32_t nitems = (clen >= 2) ? content[1] : 0;
+        for (uint32_t i = 0; i < nitems && nacc < 8; i++) {
+            uint32_t io = 2 + i * 2;
+            if (io + 2 > clen) break;
+            uint32_t off = dante_req_u16(content, io);
             if (off < DANTE_HDR_LEN) continue;
-            uint32_t d = off - DANTE_HDR_LEN;              // into content
+            uint32_t d = off - DANTE_HDR_LEN;
             if (d + 16 > clen) continue;
+
             uint16_t fid  = dante_req_u16(content, d);
             uint16_t ftyp = dante_req_u16(content, d + 2);
             uint16_t nch  = dante_req_u16(content, d + 14);
-            if (ftyp != 2 || fid == 0 || fid > dante_tx_flows()) {
-                printf("[arc] 2201: refusing flow id=%u type=%u\n", fid, ftyp);
+            if (ftyp != 2 || fid == 0) {
+                printf("[arc] 2201: refusing id=%u type=%u\n", fid, ftyp);
                 continue;
             }
-            if (nch != 8 || d + 16 + 2 * nch > clen) {
-                printf("[arc] 2201: refusing flow %u, %u channels (we emit 8)\n", fid, nch);
+            // ANY 1..8 channels. This used to demand exactly 8 in the fixed
+            // bundle order, which is why adding channels 1 and 2 was refused --
+            // a restriction left over from before the gateware gained per-slot
+            // channel maps. It has them now, so honour what was asked for.
+            if (nch == 0 || nch > 8 || d + 16 + 2 * nch > clen) {
+                printf("[arc] 2201: refusing flow %u, %u channels\n", fid, nch);
                 continue;
             }
-            int matches = 1;
-            for (unsigned c = 0; c < 8; c++)
-                if (dante_req_u16(content, d + 16 + 2 * c) != (uint16_t)((fid - 1) * 8 + c + 1))
-                    matches = 0;
-            if (!matches) {
-                printf("[arc] 2201: flow %u channel set is not bundle %u's fixed map\n", fid, fid);
-                continue;
-            }
-            // ACTUALLY SWITCH THE BUNDLE ON. Confirming without binding would
-            // hand Dante Controller a flow that never reaches the wire -- the
-            // same lie 0x2202 was telling in the other direction. Bundles are
-            // pre-bound with nslots = 0, so this only sets the map and count.
-            if (dante_tx_bind_multicast(fid - 1) < 0) {
-                printf("[arc] 2201: could not bind bundle %u\n", fid);
+            uint16_t chans[8];
+            for (unsigned c = 0; c < nch; c++)
+                chans[c] = dante_req_u16(content, d + 16 + 2 * c);
+
+            if (dante_tx_bind_multicast(fid, chans, (uint8_t)nch) < 0) {
+                printf("[arc] 2201: no free context for flow %u\n", fid);
+                code = 0x0315;
                 continue;
             }
             accepted[nacc++] = fid;
         }
-        if (nacc == 0) { code = 0x0022; break; }
+        if (nacc == 0) { if (code == DANTE_CODE_OK) code = 0x0022; break; }
         dante_msg_u16(&m, (uint16_t)nacc);
         dante_msg_u16(&m, 0);
         for (uint32_t i = 0; i < nacc; i++) dante_msg_u16(&m, accepted[i]);
-        printf("[arc] 2201: confirmed %lu existing multicast flow(s)\n",
-               (unsigned long)nacc);
+        printf("[arc] 2201: created %lu multicast flow(s)\n", (unsigned long)nacc);
         break;
     }
 
@@ -555,8 +555,9 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         uint32_t deleted = 0;
         for (uint32_t i = 0; i + 2 <= clen; i += 2) {
             uint16_t fid = dante_req_u16(content, i);
-            if (fid == 0 || fid > dante_tx_flows()) continue;
-            if (dante_tx_unbind(fid - 1) == 0) deleted++;
+            if (fid == 0) continue;
+            int ctx = dante_tx_ctx_for_id(fid);      // DC's id -> our context
+            if (ctx >= 0 && dante_tx_unbind((unsigned)ctx) == 0) deleted++;
         }
         printf("[arc] 2202: deleted %lu flow(s)\n", (unsigned long)deleted);
         break;

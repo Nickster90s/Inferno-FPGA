@@ -56,10 +56,13 @@ unsigned       dante_tx_flows(void);
 int  dante_tx_bind_unicast(const uint8_t peer_ip[4], const uint8_t dst_ip[4],
                            uint16_t dst_port, const uint16_t *chans,
                            uint8_t nslots, uint8_t fpp);
-int  dante_tx_bind_multicast(unsigned f);   // 8 consecutive ch, fpp 16
+
 unsigned dante_tx_active(void);
 int  dante_tx_flow_desc(unsigned f, uint8_t ip[4], uint16_t *port,
-                        uint8_t *nslots, uint8_t *fpp, uint8_t *mcast);
+                        uint8_t *nslots, uint8_t *fpp, uint8_t *mcast,
+                        uint16_t *id);
+int  dante_tx_bind_multicast(uint16_t ext_id, const uint16_t *chans, uint8_t n);
+int  dante_tx_ctx_for_id(uint16_t ext_id);
 int  dante_tx_unbind(unsigned f);
 void dante_tx_expire(void);
 void dante_tx_flow_info(unsigned f, uint8_t *in_use, uint32_t *age_ms,
