@@ -72,6 +72,23 @@ void dante_info_set_gptp(const gptp_t *g) { s_gptp = g; }
 
 // ---------------------------------------------------------------------------
 
+// Variant that echoes a specific seqnum instead of using our own counter, for
+// replies that a controller has to correlate with its request.
+static uint32_t put_hdr_seq(uint8_t *p, uint16_t start_code,
+                            const uint8_t opcode[8], uint16_t seq)
+{
+    uint32_t n = 0;
+    p[n++] = (uint8_t)(start_code >> 8); p[n++] = (uint8_t)start_code;
+    p[n++] = 0; p[n++] = 0;                                   // total_length
+    p[n++] = (uint8_t)(seq >> 8);        p[n++] = (uint8_t)seq;
+    p[n++] = (uint8_t)(g_dante.process_id >> 8);
+    p[n++] = (uint8_t)g_dante.process_id;
+    memcpy(p + n, g_dante.device_id, 8); n += 8;
+    memcpy(p + n, vendor_str, 8);        n += 8;
+    memcpy(p + n, opcode, 8);            n += 8;
+    return n;                                                 // == 32
+}
+
 static uint32_t put_hdr(uint8_t *p, uint16_t start_code, const uint8_t opcode[8])
 {
     uint32_t n = 0;
@@ -367,14 +384,31 @@ static void send_product_info(const uint8_t *dst_ip, uint16_t dst_port)
 // Layout from inferno info_mcast_server.rs:327-341.
 // ---------------------------------------------------------------------------
 
-static void send_clock_stats(const uint8_t *dst_ip, uint16_t dst_port)
+static void send_clock_stats(const uint8_t *dst_ip, uint16_t dst_port,
+                             const uint8_t *req)
 {
-    static const uint8_t op[8] = {0x07, 0x2a, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00};
-
     if (!g_ptpv1.have_master) return;        // nothing meaningful to report yet
 
+    // ECHO the request's seqnum and opcode instead of using our own.
+    //
+    // Dante Controller asks with seq=0x03de and opcode 073e 0021 0000 0064; we
+    // were answering with our own counter and a hardcoded 072a 0020 0000 0000
+    // (inferno's constant). The exchange completed and the content was correct
+    // -- LOCKED, right ppb, right master clock id -- and DC still showed us as
+    // PTPv2 Domain 0 / Priority 0/0 with Primary v1 Multicast N/A, i.e. it was
+    // not ingesting the reply at all. A controller that cannot correlate a
+    // response to its request has no reason to.
+    //
+    // Only byte 3 changes, 0x21 (request) -> 0x20 (reply), which is the one
+    // part of the opcode inferno's own dispatch treats as fixed; every other
+    // byte, including the 0x3e family and the trailing 0x64, is carried back.
+    uint8_t op[8];
+    memcpy(op, req + 24, 8);
+    op[3] = 0x20;
+    uint16_t rseq = (uint16_t)((req[4] << 8) | req[5]);
+
     uint8_t *p = net_udp_payload_buf();
-    uint32_t n = put_hdr(p, 0xFFFF, op);
+    uint32_t n = put_hdr_seq(p, 0xFFFF, op, rseq);
     uint8_t *c = p + n;
     uint32_t o = 0;
 
@@ -479,7 +513,7 @@ static void info_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     case 0x60: case 0x61: send_device_info (src_ip, src_port); break;
     case 0xc0: case 0xc1: send_product_info(src_ip, src_port); break;
     case 0x13:            send_network_info(src_ip, src_port); break;
-    case 0x21:            send_clock_stats (src_ip, src_port); break;
+    case 0x21:            send_clock_stats (src_ip, src_port, req); break;
     default:
         // Log unknowns: DC's requests to us are unicast and therefore invisible
         // to host-side capture, so the console is the only place they show up.
