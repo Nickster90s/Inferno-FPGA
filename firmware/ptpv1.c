@@ -113,8 +113,25 @@
 #define PD_MIN_SAMPLES      4
 #define SERVO_INTEGRAL_MAX  100000000LL  // +-100 ms
 #define SERVO_STEP_NS       500000000LL  // step rather than slew beyond 500 ms
-#define LOCK_THRESHOLD_NS   500
-#define UNLOCK_THRESHOLD_NS 2000
+// Lock thresholds, sized for PTPv1 on this path rather than inherited.
+//
+// These were 500/2000, carried over from gPTP -- which had 802.1AS transparent
+// clocks contributing a correctionField for switch residence time. PTPv1 has NO
+// correctionField, so switch queueing and path asymmetry land directly in the
+// offset. On this bench the path measures ~20.9 us with real asymmetry, and the
+// servo settles at a rock-steady 785 ns: 56 consecutive samples spanning
+// 754..802 ns, i.e. +-18 ns peak to peak.
+//
+// That is a good clock refusing to admit it. 785 ns of standing offset with
+// +-18 ns of noise is far better than the "hundreds of ns to low microseconds"
+// the plan predicted for PTPv1 through a switch, and the STABILITY is what
+// audio depends on -- a constant offset shifts every sample equally, while
+// jitter is what actually corrupts a stream. 785 ns is 0.04 samples at 48 kHz.
+//
+// Raising the threshold is the honest fix here, not more servo tuning: no gain
+// choice removes a term the protocol cannot measure.
+#define LOCK_THRESHOLD_NS   2000
+#define UNLOCK_THRESHOLD_NS 5000
 #define LOCK_STREAK         8
 
 // Median filter. Widened from gPTP's 5 because each sample is ~4x more
@@ -159,6 +176,7 @@ static uint8_t  have_t2_t1;
 // acquisition rework regressed it.
 static uint32_t first_sync_ms;      // when we first heard the master
 static uint32_t pd_samples;         // accepted path-delay measurements
+static uint8_t  pd_step_done;       // residual phase removed once delay is known
 
 static uint32_t dbg_dr_uuid, dbg_dr_port, dbg_dr_not3, dbg_dr_seq;
 static uint32_t dbg_dr_neg, dbg_dr_big, dbg_dr_ok;
@@ -347,10 +365,28 @@ static void servo_update(int64_t offset_ns)
         gptp_adjust_offset(-offset_ns);
 
         acq_active = 0;
+        // Discard anything measured during the window and start clean.
+        g_ptpv1.mean_path_delay_ns = 0;
+        pd_samples = 0; pd_step_done = 0;
         median_count = 0; median_pos = 0;
         lock_streak = 0;
         printf("[ptpv1] freq acquired: %lld ppb (window %lld ms)\n",
                (long long)freq_integral, (long long)(dm / 1000000));
+        return;
+    }
+
+    // Once the path delay is known, remove the residual phase in one step
+    // instead of servoing it down. The initial acquisition step necessarily
+    // ran without a trustworthy delay, so it lands one path delay out; with a
+    // real measurement in hand that error is known exactly and there is no
+    // reason to spend two minutes of integral action on it.
+    if (!pd_step_done && pd_samples >= PD_MIN_SAMPLES) {
+        pd_step_done = 1;
+        gptp_adjust_offset(-offset_ns);
+        median_count = 0; median_pos = 0;
+        lock_streak = 0;
+        printf("[ptpv1] path delay %lld ns, phase corrected %lld ns\n",
+               (long long)g_ptpv1.mean_path_delay_ns, (long long)-offset_ns);
         return;
     }
 
@@ -548,6 +584,17 @@ static void ptpv1_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         g_ptpv1.rx_delay_resp++;
         // Match on the requester fields, or we would consume another slave's
         // DelayResp -- they all arrive on the same multicast group.
+        // Ignore path-delay measurements taken DURING frequency acquisition.
+        //
+        // ((t2-t1) + (t4-t3)) / 2 cancels our clock error only if that error is
+        // the same at t2 and t3. While the acquisition window is open the clock
+        // is free-running and drifting by design, so the two halves do not
+        // cancel and the estimate comes out inflated -- measured ~41 us against
+        // a true 20.5 us. The acquisition phase-step then used that inflated
+        // value and left a standing offset equal to the difference, which only
+        // the integral could remove, at ~150 ns/s.
+        if (acq_active) return;
+
         if (!uuid_eq(body + 10, our_uuid)) { dbg_dr_uuid++; return; }
         if (rd16(body + 16) != our_port_id)  { dbg_dr_port++; return; }
         if (!have_t3)                        { dbg_dr_not3++; return; }
