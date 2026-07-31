@@ -49,3 +49,12 @@ const uint8_t *dante_tx_flow_ip(unsigned f);
 unsigned       dante_tx_flows(void);
 
 #endif // DANTE_TX_H
+
+// Bind a unicast flow from a receiver's request. Returns the context index, or
+// -1 if none is free. `chans` are 1-based tx channel numbers, 0 meaning an
+// unused slot that must carry silence.
+int  dante_tx_bind_unicast(const uint8_t peer_ip[4], const uint8_t dst_ip[4],
+                           uint16_t dst_port, const uint16_t *chans,
+                           uint8_t nslots, uint8_t fpp);
+int  dante_tx_bind_multicast(unsigned f);   // 8 consecutive ch, fpp 16
+void dante_tx_expire(void);      // drop flows whose keepalives stopped

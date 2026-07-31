@@ -113,6 +113,12 @@ static void bind_flow(unsigned f)
     // the context, the same way stream_id_lo latched the AVTP pair.
     aaf_pkt_udp_dport_write(DANTE_PORT_MEDIA);
 
+    // nslots = 0: bound but NOT transmitting. The header fields are ready so a
+    // bundle can be switched on later (0x2201, DC's "add a flow") without
+    // re-deriving anything, but nothing goes on the wire until something asks.
+    // This is what took us from 65.5 Mbit/s to 0.03 -- see dante_tx_poll.
+    aaf_pkt_flow_cfg_write(0);
+
     printf("[dtx] flow %u -> %u.%u.%u.%u:%u  mac %02x:%02x:%02x:%02x:%02x:%02x  csum %04x\n",
            f, dip[0], dip[1], dip[2], dip[3], DANTE_PORT_MEDIA,
            dmac[0], dmac[1], dmac[2], dmac[3], dmac[4], dmac[5], csum);
@@ -293,4 +299,137 @@ void dante_tx_report(void)
     printf("[dtx] last ts = %lu.%lu (sec.subsec_samples)\n",
            (unsigned long)aaf_pkt_dbg_last_sec_read(),
            (unsigned long)aaf_pkt_dbg_last_ts_read());
+}
+
+// ---------------------------------------------------------------------------
+// Unicast flows
+//
+// A unicast flow differs from a multicast bundle in three ways, all of which
+// come from the receiver's request rather than from us: the destination is the
+// receiver's own address, the slot map is the channel list it named, and fpp is
+// its choice. Measured from two real receivers asking for the same two
+// channels -- A16R 4 slots [1,2,0,0] fpp 8, AM2 2 slots [1,2] fpp 16 -- which
+// is why slot count, map and fpp are all per-context.
+//
+// The gateware side is unchanged in kind: same ctx_select indirection, same
+// firmware-computed IP checksum. Multicast still works through exactly this
+// path; a bundle is just a flow whose destination is a group address.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    uint8_t  in_use;
+    uint8_t  peer[4];
+    uint32_t last_ms;
+} flow_slot_t;
+static flow_slot_t flows[N_FLOWS];
+
+// Keepalives arrive about every 5 s; flows_control.rs calls a lapsed flow
+// "stream expired (i.e. no keepalives)". Three missed refreshes is the cutoff.
+#define FLOW_TIMEOUT_MS  16000
+
+
+static void write_ctx(unsigned f, const uint8_t dst_ip[4], const uint8_t dmac[6],
+                      uint16_t dport, const uint16_t *chans, uint8_t nslots,
+                      uint8_t fpp)
+{
+    uint16_t ip_total = (uint16_t)(20 + 8 + 9 + nslots * fpp * BYTES_PER_SAMP);
+    uint16_t csum = ip_header_checksum(g_net_ip, dst_ip, ip_total,
+                                       DANTE_TX_IP_TOS, DANTE_TX_IP_TTL);
+
+    aaf_pkt_ctx_select_write(f);
+
+    uint32_t lo = 0, hi = 0;
+    for (unsigned i = 0; i < 8; i++) {
+        uint32_t ent = 0;
+        if (i < nslots && chans[i] != 0 && chans[i] <= DANTE_TX_CHANNELS)
+            ent = (uint32_t)((chans[i] - 1) & 0x3F) | 0x80u;   // valid bit
+        if (i < 4) lo |= ent << (i * 8);
+        else       hi |= ent << ((i - 4) * 8);
+    }
+    aaf_pkt_chmap_lo_write(lo);
+    aaf_pkt_chmap_hi_write(hi);
+
+    aaf_pkt_dst_ip_write((uint32_t)dst_ip[0] << 24 | (uint32_t)dst_ip[1] << 16 |
+                         (uint32_t)dst_ip[2] << 8  | dst_ip[3]);
+    aaf_pkt_ip_csum_write(csum);
+    aaf_pkt_udp_sport_write(DANTE_PORT_MEDIA);
+    aaf_pkt_dst_mac_hi_write(((uint32_t)dmac[0] << 8) | dmac[1]);
+    aaf_pkt_dst_mac_lo_write(((uint32_t)dmac[2] << 24) | ((uint32_t)dmac[3] << 16) |
+                             ((uint32_t)dmac[4] << 8)  |  dmac[5]);
+    aaf_pkt_udp_dport_write(dport);
+
+    // flow_cfg LAST: it latches the channel map with it, so the builder never
+    // sees a half-written map.
+    aaf_pkt_flow_cfg_write((uint32_t)(nslots & 0x0F) | ((fpp == 16) ? 0x10u : 0u));
+}
+
+int dante_tx_bind_unicast(const uint8_t peer_ip[4], const uint8_t dst_ip[4],
+                          uint16_t dst_port, const uint16_t *chans,
+                          uint8_t nslots, uint8_t fpp)
+{
+    uint8_t dmac[6];
+    if (net_arp_lookup(dst_ip, dmac) != 0) {
+        // The request itself came from this peer, so its MAC is in the cache
+        // from that frame. If it somehow is not, refuse rather than transmit to
+        // a broadcast MAC.
+        printf("[dtx] no ARP entry for %u.%u.%u.%u\n",
+               dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3]);
+        return -1;
+    }
+
+    // Re-bind an existing flow from the same peer rather than allocating a new
+    // context: the ~5 s keepalive is the SAME request repeated, and treating
+    // each one as a new flow would exhaust all six contexts in half a minute.
+    int f = -1;
+    for (unsigned i = 0; i < N_FLOWS; i++)
+        if (flows[i].in_use && (flows[i].peer[0]==peer_ip[0] && flows[i].peer[1]==peer_ip[1] && flows[i].peer[2]==peer_ip[2] && flows[i].peer[3]==peer_ip[3])) { f = (int)i; break; }
+    if (f < 0)
+        for (unsigned i = 0; i < N_FLOWS; i++)
+            if (!flows[i].in_use) { f = (int)i; break; }
+    if (f < 0) return -1;
+
+    write_ctx((unsigned)f, dst_ip, dmac, dst_port, chans, nslots, fpp);
+
+    if (!flows[f].in_use) {
+        flows[f].in_use = 1;
+        for (int i = 0; i < 4; i++) flows[f].peer[i] = peer_ip[i];
+        g_flows_stats.active++;
+        printf("[dtx] flow %d -> %u.%u.%u.%u:%u, %u slots, fpp %u\n",
+               f, dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3], dst_port, nslots, fpp);
+    }
+    flows[f].last_ms = gptp_uptime_ms();
+    return f;
+}
+
+void dante_tx_expire(void)
+{
+    uint32_t now = gptp_uptime_ms();
+    for (unsigned i = 0; i < N_FLOWS; i++) {
+        if (!flows[i].in_use) continue;
+        if ((now - flows[i].last_ms) < FLOW_TIMEOUT_MS) continue;
+        flows[i].in_use = 0;
+        if (g_flows_stats.active) g_flows_stats.active--;
+        aaf_pkt_ctx_select_write(i);
+        aaf_pkt_flow_cfg_write(0);          // nslots = 0 -> builder skips it
+        printf("[dtx] flow %u expired (no keepalive)\n", i);
+    }
+}
+
+// Turn a multicast bundle on: 8 consecutive channels at fpp 16, to the group
+// bound by bind_flow(). Multicast is NOT a separate datapath -- it is a flow
+// whose destination happens to be a group address, so it runs through exactly
+// the same per-context map the unicast path uses. Kept available for 0x2201.
+int dante_tx_bind_multicast(unsigned f)
+{
+    if (f >= N_FLOWS) return -1;
+    uint16_t chans[8];
+    for (unsigned i = 0; i < 8; i++) chans[i] = (uint16_t)(f * 8 + i + 1);
+
+    const uint8_t *dip = flow_ip[f];
+    uint8_t dmac[6] = { 0x01, 0x00, 0x5E, (uint8_t)(dip[1] & 0x7F), dip[2], dip[3] };
+    write_ctx(f, dip, dmac, DANTE_PORT_MEDIA, chans, 8, 16);
+    g_flows_stats.active++;
+    printf("[dtx] multicast bundle %u ON -> %u.%u.%u.%u\n",
+           f, dip[0], dip[1], dip[2], dip[3]);
+    return (int)f;
 }

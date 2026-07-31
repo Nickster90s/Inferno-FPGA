@@ -899,7 +899,7 @@ int main(void)
         // Owned by dante_tx.c now, which holds the same PTPv1-lock gate but
         // also knows the flow bindings. aaf_gw_enabled still gates it, so the
         // 'a' console command can still take the gateware out of the path.
-        if (aaf_gw_enabled) dante_tx_poll();
+        if (aaf_gw_enabled) { dante_tx_poll(); dante_tx_expire(); }
         else if (dante_tx_enabled()) { aaf_pkt_enable_write(0); }
 
         // ---- USB rate matching ----------------------------------------------

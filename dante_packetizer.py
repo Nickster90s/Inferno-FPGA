@@ -236,6 +236,18 @@ class DantePacketizer(LiteXModule):
                              description="Seconds to load into the media-clock timestamp counter.")
         self.ts_load_sub   = CSRStorage(32, reset=0,
                              description="Subsecond samples (0..47999) to load alongside ts_load_sec.")
+        # PER-FLOW SHAPE. A unicast flow is not a bundle: the receiver names the
+        # channels it wants, how many slots, and its own fpp. Measured from two
+        # real receivers asking us for the same two channels:
+        #   A16R  4 slots [1,2,0,0]  fpp 8
+        #   AM2   2 slots [1,2]      fpp 16
+        # So slot count, fpp and the slot->channel map all vary per flow, and
+        # all three change the packet length. Multicast is unchanged by this --
+        # a bundle is just a flow whose destination is a group address and whose
+        # map is eight consecutive channels.
+        self.chmap_lo      = CSRStorage(32, description="Slots 0..3: per byte, [5:0] tx channel (0-based), [7] valid. 0 = silence.")
+        self.chmap_hi      = CSRStorage(32, description="Slots 4..7, same encoding.")
+        self.flow_cfg      = CSRStorage(8,  description="[3:0] slot count (0 = flow disabled), [4] fpp: 0 = 8, 1 = 16. Write LAST -> latches the map.")
         self.ts_load       = CSRStorage(1,
                              description="Write 1 to adopt ts_load_sec/ts_load_sub at the next sample strobe.")
         # REMOVED (2026-06-23): pres_base CSR. It fed the (now-deleted) pres-ramp
@@ -512,15 +524,24 @@ class DantePacketizer(LiteXModule):
             # 48000 % 16 == 0, so firing when the low log2(fpp) bits wrap makes
             # every emitted timestamp an exact multiple of fpp -- the property
             # flows_tx.rs bootstraps by hand -- with no arithmetic at all.
+            # PACE AT THE FINEST fpp (8), not at a single global fpp. A flow with
+            # fpp=8 is due every tick; one with fpp=16 every other tick. Both stay
+            # aligned by construction: a flow is only due when the low log2(fpp)
+            # bits of the sample counter are all ones, so its emitted timestamp
+            # (counter - (fpp-1)) is a multiple of its own fpp and can never go
+            # negative -- which is what makes the subtraction below safe without a
+            # borrow into seconds.
             If(strobe,
-                If(ts_sub[0:blk_bits] == (samples_per_packet - 1),
+                If(ts_sub[0:3] == 7,
                     send_req.eq(1),
                     # Latch the timestamp for THIS packet: the counter is about
                     # to land on the first sample of the NEXT packet, so the
                     # packet we are about to build starts fpp samples earlier.
+                    # Latch the RAW counter; each flow subtracts its own fpp-1
+                    # at build time, because flows of different fpp cover
+                    # different windows ending at this same instant.
                     ts_sec_emit.eq(ts_sec),
-                    ts_sub_emit.eq(ts_sub - (samples_per_packet - 1)
-                                   + self.ts_offset.storage),
+                    ts_sub_emit.eq(ts_sub + self.ts_offset.storage),
                 ),
             ),
         ]
@@ -536,6 +557,9 @@ class DantePacketizer(LiteXModule):
         sport_arr= Array([Signal(16) for _ in range(streams)])
         dport_arr= Array([Signal(16) for _ in range(streams)])
         dmac_arr = Array([Signal(48) for _ in range(streams)])
+        cmlo_arr = Array([Signal(32) for _ in range(streams)])
+        cmhi_arr = Array([Signal(32) for _ in range(streams)])
+        cfg_arr  = Array([Signal(8)  for _ in range(streams)])
         ctx_sel  = self.ctx_select.storage
         # udp_dport is the LATCH trigger: firmware writes dst_ip, ip_csum and
         # udp_sport first, then udp_dport last, exactly as it wrote stream_id_lo
@@ -549,9 +573,46 @@ class DantePacketizer(LiteXModule):
             ]),
             If(self.dst_mac_lo.re,
                dmac_arr[ctx_sel].eq(Cat(self.dst_mac_lo.storage, self.dst_mac_hi.storage))),
+            # flow_cfg last: it latches the channel map with it, so a half-written
+            # map is never visible to the builder.
+            If(self.flow_cfg.re, [
+                cmlo_arr[ctx_sel].eq(self.chmap_lo.storage),
+                cmhi_arr[ctx_sel].eq(self.chmap_hi.storage),
+                cfg_arr[ctx_sel].eq(self.flow_cfg.storage),
+            ]),
         ]
 
         stream_idx = Signal(max=streams) if streams > 1 else Signal()
+
+        # ---- Per-flow packet geometry, derived combinationally ----------------
+        # pay_len = nslots * fpp * 3. fpp is 8 or 16, so this is (nslots*3) shifted
+        # by 3 or 4 -- an add and a mux, no multiplier and no DSP48.
+        #
+        # pay_len is ALWAYS a multiple of 8, so TOTAL = 51 + pay_len always has
+        # TOTAL % 4 == 3. LAST_BE therefore stays the constant 0b0100 for every
+        # flow shape, and N_WORDS = 13 + pay_len/4 needs no divider. That is luck
+        # worth stating: had it not held, both would have been per-flow logic.
+        cfg_now   = cfg_arr[stream_idx]
+        nslots    = Signal(4)
+        fpp16     = Signal()
+        self.comb += [nslots.eq(cfg_now[0:4]), fpp16.eq(cfg_now[4])]
+        cur_fpp   = Signal(8)
+        self.comb += cur_fpp.eq(Mux(fpp16, 16, 8))
+        # This flow's window START. ts_sub_emit holds the counter at the tick.
+        f_ts_sub  = Signal(32)
+        self.comb += f_ts_sub.eq(ts_sub_emit - (cur_fpp - 1))
+        ns3       = Signal(6)
+        self.comb += ns3.eq(nslots + (nslots << 1))            # nslots * 3
+        pay_len   = Signal(10)
+        self.comb += pay_len.eq(Mux(fpp16, ns3 << 4, ns3 << 3))
+        f_total   = Signal(11)
+        self.comb += f_total.eq(HDR_LEN + pay_len)
+        f_last_idx = Signal(max=128)
+        self.comb += f_last_idx.eq(12 + pay_len[2:])           # (52 + pay_len)/4 - 1
+        f_ip_len  = Signal(16)
+        f_udp_len = Signal(16)
+        self.comb += [f_ip_len.eq(37 + pay_len), f_udp_len.eq(17 + pay_len)]
+
         src_mac = Cat(self.src_mac_lo.storage, self.src_mac_hi.storage)   # [0:48], byte0 = [40:48]
         dst_mac = dmac_arr[stream_idx]                                    # selected context
         dst_ip  = dip_arr[stream_idx]
@@ -589,8 +650,7 @@ class DantePacketizer(LiteXModule):
             # ---- IPv4, 20 bytes (14..33) ----
             Constant(0x45, 8),                                                  # 14 ver/IHL
             self.ip_tos.storage,                                                # 15 TOS (0xB8)
-            Constant((IP_TOTAL_LEN >> 8) & 0xFF, 8),                            # 16 total length hi
-            Constant(IP_TOTAL_LEN & 0xFF, 8),                                   # 17 total length lo
+            f_ip_len[8:16], f_ip_len[0:8],                                      # 16,17 total length (PER FLOW)
             Constant(0x00, 8), Constant(0x00, 8),                               # 18,19 ID = 0
             Constant(0x00, 8), Constant(0x00, 8),                               # 20,21 flags/frag = 0
             self.ip_ttl.storage,                                                # 22 TTL
@@ -603,15 +663,14 @@ class DantePacketizer(LiteXModule):
             # ---- UDP, 8 bytes (34..41) ----
             be16(sport, 0), be16(sport, 1),                                     # 34,35 src port
             be16(dport, 0), be16(dport, 1),                                     # 36,37 dst port
-            Constant((UDP_TOTAL_LEN >> 8) & 0xFF, 8),                           # 38 length hi
-            Constant(UDP_TOTAL_LEN & 0xFF, 8),                                  # 39 length lo
+            f_udp_len[8:16], f_udp_len[0:8],                                    # 38,39 length (PER FLOW)
             Constant(0x00, 8), Constant(0x00, 8),                               # 40,41 checksum = 0
             # ---- Dante, 9 bytes (42..50) ----
             Constant(0x02, 8),                                                  # 42 constant tag
             ts_sec_emit[24:32], ts_sec_emit[16:24],
             ts_sec_emit[8:16],  ts_sec_emit[0:8],                                # 43..46 seconds
-            ts_sub_emit[24:32], ts_sub_emit[16:24],
-            ts_sub_emit[8:16],  ts_sub_emit[0:8],                                # 47..50 subsec samples
+            f_ts_sub[24:32], f_ts_sub[16:24],
+            f_ts_sub[8:16],  f_ts_sub[0:8],                                      # 47..50 subsec samples (PER FLOW)
         ]
         assert len(hb) == HDR_LEN
         header = Array(hb)
@@ -675,7 +734,8 @@ class DantePacketizer(LiteXModule):
         # (stream_idx picks which of the de-interleaved rings).
         samp_rd = Signal(32)
         rdat    = Signal(36)
-        self.comb += rdat.eq(Array([rps[_s].dat_r for _s in range(streams)])[stream_idx])
+        # rdat's ring selector is cs_mem_d, defined with the slot addressing below;
+        # the comb assignment therefore lives there, not here.
         self.comb += samp_rd.eq(Cat(rdat[0:8], rdat[9:17], rdat[18:26], rdat[27:35]))
         # 24-BIT PAYLOAD. AAF put 4 bytes per sample and could select the byte
         # straight from the low bits of the payload offset; Dante puts 3, and
@@ -704,10 +764,51 @@ class DantePacketizer(LiteXModule):
         # reads its OWN 8-ch ring straight out (rd + sc) — no stride, no row math (the
         # de-interleave already happened at the demux write). All rings share the
         # address; stream_idx selects the data (samp_rd above).
-        sc = Signal(max=FRAME_SAMPLES + 2)
-        self.comb += rdf.eq(rd + sc)
+        # SLOT/SAMPLE ADDRESSING, replacing the contiguous sc sweep.
+        #
+        # The ring already stores channel c of sample s at address s*8 + c within
+        # ring c>>3, so an ARBITRARY channel is reachable by concatenation alone:
+        #     mem  = ch >> 3
+        #     addr = base + (samp << 3) + (ch & 7)
+        # No stride arithmetic, no row math, no multiply -- the distinction that
+        # matters, because the strided shared-ring read this design tried once
+        # before produced garbage on hardware. The write path is untouched.
+        #
+        # Slot iterates fastest: Dante interleaves per sample, slot 0..n-1 within
+        # each sample, which is exactly what the old sc sweep produced when every
+        # flow carried 8 consecutive channels.
+        cs_slot = Signal(4)              # slot whose address is on the RAM now
+        cs_samp = Signal(8)              # sample index within this packet
+        cm_all  = Signal(64)
+        self.comb += cm_all.eq(Cat(cmlo_arr[stream_idx], cmhi_arr[stream_idx]))
+        cs_ent  = Signal(8)
+        self.comb += cs_ent.eq(Array([cm_all[i*8:(i+1)*8] for i in range(8)])[cs_slot])
+        cs_ch   = Signal(6)
+        cs_vld  = Signal()
+        self.comb += [cs_ch.eq(cs_ent[0:6]), cs_vld.eq(cs_ent[7])]
+
+        # Window START for this flow: all flows share `rd`, which advances one
+        # 8-sample tick at a time, so an fpp=16 flow simply starts 8 samples
+        # earlier. That keeps ONE read pointer for flows of different fpp.
+        f_base = Signal(32)
+        self.comb += f_base.eq(rd - Mux(fpp16, 64, 0))
+        self.comb += rdf.eq(f_base + (cs_samp << 3) + cs_ch[0:3])
         for _s in range(streams):
             self.comb += rps[_s].adr.eq(rdf[0:log2depth])
+        # The data mux follows the address by one cycle, so which ring and
+        # whether the slot is silence must be delayed to match.
+        cs_mem_d = Signal(max=max(streams, 2))
+        cs_vld_d = Signal()
+        self.sync += [cs_mem_d.eq(cs_ch[3:6]), cs_vld_d.eq(cs_vld)]
+        self.comb += rdat.eq(Array([rps[_s].dat_r for _s in range(streams)])[cs_mem_d])
+        # Next (slot, sample), slot fastest with wrap at nslots.
+        nx_slot = Signal(4)
+        nx_samp = Signal(8)
+        self.comb += If(cs_slot == (nslots - 1),
+            nx_slot.eq(0), nx_samp.eq(cs_samp + 1),
+        ).Else(
+            nx_slot.eq(cs_slot + 1), nx_samp.eq(cs_samp),
+        )
         aligned_once = Signal()   # read anchored to the first block (anchor-once align)
         fsm = FSM(reset_state="IDLE")
         self.submodules.fsm = fsm
@@ -715,7 +816,7 @@ class DantePacketizer(LiteXModule):
             If(send_req,
                 NextValue(byte_idx, 0),
                 NextValue(bph, 0),          # every packet starts on sample byte 0
-                NextValue(sc, 0),                 # prefetch sample 0 of frame 0
+                NextValue(cs_slot, 0), NextValue(cs_samp, 0),
                 NextValue(stream_idx, 0),         # first stream of the block
                 NextValue(pkt_primed, primed),    # whole block is silence OR audio
                 If(~aligned_once, NextValue(rd, rd_anchor)),  # first block: anchor the read
@@ -740,8 +841,24 @@ class DantePacketizer(LiteXModule):
         # BUILD: one byte/cycle into wacc; commit a word every 4th byte and on
         # the final (possibly partial) byte. 234 cycles ≈ 4.7 µs << 125 µs.
         commit_full = (lane == 3)
-        is_last     = (byte_idx == (TOTAL - 1))
+        is_last     = (byte_idx == (f_total - 1))
+        # A flow with no slots is not configured. Skip it without building --
+        # this is what lets six contexts exist while only the requested ones
+        # transmit, and it is why removing the multicast bundles dropped us from
+        # 65.5 Mbit/s to 0.03.
+        flow_off = (nslots == 0)
         fsm.act("BUILD",
+            If(flow_off,
+                # Nothing configured here: move straight to the next context.
+                If(stream_idx != (streams - 1),
+                    NextValue(stream_idx, stream_idx + 1),
+                    NextValue(byte_idx, 0), NextValue(bph, 0),
+                    NextValue(cs_slot, 0), NextValue(cs_samp, 0),
+                ).Else(
+                    If(pkt_primed, NextValue(rd, rd + 64)),
+                    NextState("IDLE"),
+                ),
+            ),
             Case(lane, {
                 0: NextValue(wacc[0:8],   cur_byte),
                 1: NextValue(wacc[8:16],  cur_byte),
@@ -758,11 +875,16 @@ class DantePacketizer(LiteXModule):
             # A silence packet (~pkt_primed) holds samp_hold=0 and does NOT advance
             # rd, so the ring fills until primed; 48 samples/packet keeps ch-align.
             If(pkt_primed,
-                If(byte_idx == 0, NextValue(sc, 1)),         # prefetch sample 1 during header
-                If(byte_idx == 1, NextValue(samp_hold, samp_rd)),   # latch sample 0
+                If(byte_idx == 0,
+                    NextValue(cs_slot, nx_slot), NextValue(cs_samp, nx_samp)),
+                If(byte_idx == 1,
+                    NextValue(samp_hold, Mux(cs_vld_d, samp_rd, 0))),
                 If((byte_idx >= HDR_LEN) & (bph == (BYTES_PER_SAMPLE - 1)),
-                    NextValue(samp_hold, samp_rd),           # latch the prefetched sample
-                    NextValue(sc, sc + 1),                   # strided fetch advances via rdf(sc)
+                    # Silence for an unmapped slot: the receiver asked for 4 slots
+                    # but named only 2 channels, and the other two must carry zeros
+                    # rather than whatever the ring happens to hold.
+                    NextValue(samp_hold, Mux(cs_vld_d, samp_rd, 0)),
+                    NextValue(cs_slot, nx_slot), NextValue(cs_samp, nx_samp),
                 ),
             ).Else(
                 NextValue(samp_hold, 0),
@@ -773,9 +895,9 @@ class DantePacketizer(LiteXModule):
                 ).Else(NextValue(bph, bph + 1)),
             ),
             If(is_last,
-                # Final word (rem=3 → lanes 0,1,2 valid). wacc[0:8]=byte432,
-                # cur_byte=byte233; zero-pad the rest.
-                fr_we.eq(1), fr_adr.eq(LAST_IDX),
+                # Final word. pay_len is always a multiple of 4, so TOTAL % 4 == 3
+                # for EVERY flow shape -- lanes 0,1,2 valid, rest zero-padded.
+                fr_we.eq(1), fr_adr.eq(f_last_idx),
                 fr_dat.eq(Cat(wacc[0:8], cur_byte, Constant(0, 32 - rem * 8))
                           if rem else Cat(wacc, cur_byte)),
                 NextValue(rd_idx, 0),
@@ -800,8 +922,8 @@ class DantePacketizer(LiteXModule):
         fsm.act("STREAM",
             source.valid.eq(1),
             source.data.eq(frame_rp.dat_r),
-            source.last.eq(rd_idx == LAST_IDX),
-            If(rd_idx == LAST_IDX,
+            source.last.eq(rd_idx == f_last_idx),
+            If(rd_idx == f_last_idx,
                 source.last_be.eq(LAST_BE),
             ).Else(
                 source.last_be.eq(0xF),
@@ -815,12 +937,15 @@ class DantePacketizer(LiteXModule):
                         # from the SAME 288-sample block (rd unchanged).
                         NextValue(stream_idx, stream_idx + 1),
                         NextValue(byte_idx, 0),
-                        NextValue(sc, 0),
+                        NextValue(bph, 0),
+                        NextValue(cs_slot, 0), NextValue(cs_samp, 0),
                         NextState("BUILD"),
                     ).Else(
-                        # Block done: every ring advances FRAME_SAMPLES (6 frames x
-                        # 8ch); all rings share `rd` (read in lockstep). Audio only.
-                        If(pkt_primed, NextValue(rd, rd + FRAME_SAMPLES)),
+                        # Block done. rd advances ONE tick = 8 samples x 8 channel
+                        # slots = 64 entries, because pacing is now at the finest
+                        # fpp. An fpp=16 flow reads from rd-64 and so still sees a
+                        # full, correctly aligned 16-sample window.
+                        If(pkt_primed, NextValue(rd, rd + 64)),
                         NextState("IDLE"),
                     ),
                 ).Else(

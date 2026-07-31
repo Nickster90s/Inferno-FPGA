@@ -27,6 +27,8 @@
 #include "dante_dev.h"
 #include "dante_msg.h"
 #include "net.h"
+#include "dante_tx.h"
+#include <generated/csr.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -104,12 +106,32 @@ static void flows_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
                    (unsigned long)g_dante.sample_rate, g_dante.bits_per_sample);
             code = 0x0301;
             g_flows_stats.rejected++;
+        } else if (fpp != 8 && fpp != 16) {
+            printf("[flow] rejected: fpp %u, we do 8 or 16\n", fpp);
+            code = 0x0301;
+            g_flows_stats.rejected++;
+        } else if (nch == 0 || nch > 8) {
+            printf("[flow] rejected: %u slots, max 8\n", nch);
+            code = 0x0315;
+            g_flows_stats.rejected++;
         } else {
-            // Accepted, but no unicast flow is built yet -- see the scope note
-            // at the top. The reply carries no flow descriptor, so a receiver
-            // will not get audio from this alone; what it does is complete the
-            // exchange instead of leaving it hanging.
-            g_flows_stats.accepted++;
+            // BUILD THE FLOW. Everything needed comes from the request: the
+            // destination is the receiver's own socket descriptor, the slot map
+            // is the channel list it named, and fpp is its choice, not ours.
+            uint16_t chans[8];
+            for (unsigned i = 0; i < nch; i++)
+                chans[i] = (16u + i*2u + 2u <= clen) ? rd16(c + 16 + i*2) : 0;
+
+            int f = dante_tx_bind_unicast(src_ip, dst, dport, chans, (uint8_t)nch,
+                                          (uint8_t)fpp);
+            if (f < 0) {
+                printf("[flow] no free context\n");
+                code = 0x0315;                  // too many TX flows
+                g_flows_stats.rejected++;
+            } else {
+                g_flows_stats.accepted++;
+                printf("[flow] bound context %d\n", f);
+            }
         }
     } else {
         printf("[flow] unhandled opcode1 %#06x len=%lu from %u.%u.%u.%u\n",
