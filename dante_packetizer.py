@@ -424,6 +424,41 @@ class DantePacketizer(LiteXModule):
         ]
         strobe = Signal()
         self.comb += strobe.eq(mcr.sample_strobe & en)
+
+        # ---- Dante timestamp: two counters, no arithmetic ----------------------
+        #
+        # Dante's header is a SAMPLE INDEX, not a presentation time:
+        #   timestamp = seconds * 48000 + subsec_samples
+        # so all the AVTP presentation-time machinery (gPTP re-anchor, CRF
+        # dilation, the *1e9 shift-add tree, pres_offset) is gone. Two counters
+        # driven by the media clock give the header directly -- no multiply, no
+        # divide, nothing wide.
+        #
+        # Because 48000 is divisible by fpp (16), pacing off the low bits of
+        # subsec_samples makes EVERY emitted timestamp a multiple of fpp by
+        # construction, which is what flows_tx.rs bootstraps by hand. That also
+        # replaces the free-running blk_idx the AAF packetizer used for pacing.
+        ts_sec  = Signal(32)
+        ts_sub  = Signal(32)          # 0 .. 47999
+        SUBSEC_MAX = 48000
+        self.sync += If(strobe,
+            If(ts_sub == (SUBSEC_MAX - 1),
+                ts_sub.eq(0),
+                ts_sec.eq(ts_sec + 1),
+            ).Else(
+                ts_sub.eq(ts_sub + 1),
+            ),
+        )
+        # Emitted timestamp: the counter value at send_req, minus one packet
+        # (the samples in THIS packet were captured over the preceding fpp
+        # strobes), plus a firmware-tunable offset in samples.
+        #
+        # flows_tx.rs:44 is worth heeding here -- "it's better to have the clock
+        # in the past than in the future - otherwise Dante devices receiving
+        # from us go mad and fart" -- which is what ts_offset is for.
+        ts_sec_emit = Signal(32)
+        ts_sub_emit = Signal(32)
+
         underruns = Signal(32)
         self.comb += [self.underrun_count.status.eq(underruns),
                       self.fifo_level.status.eq(level_u)]
@@ -491,40 +526,6 @@ class DantePacketizer(LiteXModule):
         # NOTE: no sequence number and no presentation time. Dante's header has
         # neither -- the sample-index timestamp IS the ordering, which is why the
         # AVTP seq_arr and the pres ramp are both gone.
-
-        # ---- Dante timestamp: two counters, no arithmetic ----------------------
-        #
-        # Dante's header is a SAMPLE INDEX, not a presentation time:
-        #   timestamp = seconds * 48000 + subsec_samples
-        # so all the AVTP presentation-time machinery (gPTP re-anchor, CRF
-        # dilation, the *1e9 shift-add tree, pres_offset) is gone. Two counters
-        # driven by the media clock give the header directly -- no multiply, no
-        # divide, nothing wide.
-        #
-        # Because 48000 is divisible by fpp (16), pacing off the low bits of
-        # subsec_samples makes EVERY emitted timestamp a multiple of fpp by
-        # construction, which is what flows_tx.rs bootstraps by hand. That also
-        # replaces the free-running blk_idx the AAF packetizer used for pacing.
-        ts_sec  = Signal(32)
-        ts_sub  = Signal(32)          # 0 .. 47999
-        SUBSEC_MAX = 48000
-        self.sync += If(strobe,
-            If(ts_sub == (SUBSEC_MAX - 1),
-                ts_sub.eq(0),
-                ts_sec.eq(ts_sec + 1),
-            ).Else(
-                ts_sub.eq(ts_sub + 1),
-            ),
-        )
-        # Emitted timestamp: the counter value at send_req, minus one packet
-        # (the samples in THIS packet were captured over the preceding fpp
-        # strobes), plus a firmware-tunable offset in samples.
-        #
-        # flows_tx.rs:44 is worth heeding here -- "it's better to have the clock
-        # in the past than in the future - otherwise Dante devices receiving
-        # from us go mad and fart" -- which is what ts_offset is for.
-        ts_sec_emit = Signal(32)
-        ts_sub_emit = Signal(32)
 
         def mac_byte(sig, i):   # i=0 is the wire-first (MSB) byte of a 48-bit MAC
             hi = 48 - i * 8
@@ -735,7 +736,7 @@ class DantePacketizer(LiteXModule):
             If(source.ready,
                 If(source.last,
                     NextValue(pkt_count, pkt_count + 1),
-                    NextValue(seq, seq + 1),                 # per-stream (seq = seq_arr[stream_idx])
+                    # (no sequence number: Dante's header has none)
                     If(stream_idx != (streams - 1),
                         # More frames in this block: build the next stream's slice
                         # from the SAME 288-sample block (rd unchanged).
