@@ -271,10 +271,27 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
 
     case OP_CHANNELS_AND_FLOWS_COUNT: {
         // The response DC uses to size everything else.
-        // flags2 is an LSB-first bitfield: bit4 = supports_tx_channel_rename,
-        // bit5 = supports_tx_multicast. We claim both.
-        dante_msg_u8 (&m, 0);                              // unknown1_0
-        dante_msg_u8 (&m, (1u << 4) | (1u << 5));          // flags2
+        //
+        // We used to send unknown1_0 = 0x00 and flags2 = 0x30, setting only the
+        // two bits inferno names (bit4 supports_tx_channel_rename, bit5
+        // supports_tx_multicast) and leaving every unnamed bit clear. Real
+        // hardware does not:
+        //
+        //   A16R  1f f9      DVS  1f f9      AM2  1d f9      ours  00 30
+        //
+        // flags2 = 0xf9 on ALL THREE -- so beyond the two named bits they also
+        // set the low nibble to 9 and the top two bits to 3. Whatever those
+        // encode, every shipping device asserts them, and we were the only
+        // device on the network declaring otherwise. Under-declaring is exactly
+        // how this bring-up kept ending up with DC's defaults instead of our
+        // values.
+        //
+        // Matching DVS (1f f9): it is the device modelled everywhere else here
+        // -- clock stats, 0x1100 and 0x1102 all come from it -- and consistency
+        // across those matters more than any single bit, as mixing the AM2's
+        // and DVS's property tables already proved.
+        dante_msg_u8 (&m, 0x1f);                           // unknown1_0
+        dante_msg_u8 (&m, 0xf9);                           // flags2
         dante_msg_u16(&m, DANTE_TX_CHANNELS);
         dante_msg_u16(&m, DANTE_RX_CHANNELS);
         dante_msg_u16(&m, 4);                              // unknown2_4
