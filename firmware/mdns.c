@@ -28,8 +28,13 @@
 // on unique records, but Dante does not, and a receiver that has cached a
 // channel record may treat a flushing answer as an instruction to discard
 // rather than as the resolution it asked for.
-#define MDNS_TTL        10
-#define MDNS_TTL_A      10
+// TTLs measured off the A16R answering the same queries, not guessed:
+//   PTR 4500, TXT 4500, SRV 120, A 120
+// Both were 10, which is far shorter than anything real Dante hardware uses.
+// At TTL 10 avahi expired our records every ten seconds, so a resolver had to
+// re-query constantly and any gap in answering read as the channel vanishing.
+#define MDNS_TTL        4500    // PTR and TXT
+#define MDNS_TTL_A      120     // A, and SRV
 
 #define DNS_T_A         1
 #define DNS_T_PTR       12
@@ -318,7 +323,7 @@ static uint32_t put_ptr(uint8_t *p, uint32_t n, const char *svc, const char *ins
 
 static uint32_t put_srv(uint8_t *p, uint32_t n, const char *inst, uint16_t port)
 {
-    n = put_rr_head(p, n, inst, DNS_T_SRV, DNS_C_IN, MDNS_TTL);
+    n = put_rr_head(p, n, inst, DNS_T_SRV, DNS_C_IN, MDNS_TTL_A);  // SRV 120, like A
     uint32_t lp = n; n += 2;
     uint32_t s0 = n;
     p[n++] = 0; p[n++] = 0;                        // priority
@@ -367,14 +372,43 @@ static uint32_t put_txt(uint8_t *p, uint32_t n, const char *inst, int is_arc)
 // mDNS response must not be fragmented.
 #define MDNS_SPLIT_BYTES  900
 
-// "<label>@<devicename>", the instance form real devices use ("08@RedNetA16R").
-static void inst_name(char *dst, int max, const char *label)
+// Instance-name buffer. This must hold the FULL service instance name --
+// "<channel>@<device>._netaudio-chan._udp.local" -- which is up to 32 + 1 + 31
+// + 26 + 1 = 91 bytes. The old buffers were DANTE_MAX_NAME + 48 = 80, sized
+// when these names were built WITHOUT the service suffix.
+#define MDNS_INST_MAX     112
+
+// Rotating cursor for the channel PTR flood; see W_CHAN_PTR below.
+static unsigned chan_ptr_start;
+
+// The FULL service instance name: "<label>@<devicename>._netaudio-chan._udp.local".
+//
+// The service suffix used to be missing here, and that single omission is why
+// no receiver could ever subscribe to us.
+//
+// It was invisible because the two halves of the code disagreed. The query
+// MATCHERS (match_chan_inst) appended the suffix before comparing, so an
+// incoming query for "1@Dev._netaudio-chan._udp.local" matched and we replied.
+// But EMISSION used this bare name for the PTR rdata and for the SRV and TXT
+// owner names, so the reply announced records belonging to "1@Dev." -- a
+// root-level name that answers nobody's question. A resolver discards it and
+// reports "cannot find this channel on the network".
+//
+// Measured against the A16R for the same browse query:
+//     A16R   PTR dlen=16  -> 01@RedNetA16R._netaudio-chan._udp.local
+//     ours   PTR dlen=23  -> 1@N-Series-Switchover            <- bare, at root
+//
+// The suffix now also gives name compression something to bite on: it is
+// already in the packet as the question/owner name, so it costs 2 bytes.
+static void inst_name(char *dst, int max, const char *label, const char *svc)
 {
     int n = 0;
     while (*label && n < max - 1) dst[n++] = *label++;
     if (n < max - 1) dst[n++] = '@';
     const char *d = g_dante.name;
     while (*d && n < max - 1) dst[n++] = *d++;
+    if (n < max - 1) dst[n++] = '.';
+    while (*svc && n < max - 1) dst[n++] = *svc++;
     dst[n] = 0;
 }
 
@@ -382,7 +416,7 @@ static void chan_inst(char *dst, int max, unsigned ch1)   // ch1 = 1..48
 {
     char label[DANTE_MAX_NAME];
     dante_tx_channel_name((uint16_t)ch1, label, sizeof(label));
-    inst_name(dst, max, label);
+    inst_name(dst, max, label, n_chan_svc);
 }
 
 static void bund_inst(char *dst, int max, unsigned b1)    // b1 = 1..6
@@ -392,7 +426,7 @@ static void bund_inst(char *dst, int max, unsigned b1)    // b1 = 1..6
     if (b1 >= 10) label[n++] = (char)('0' + b1 / 10);
     label[n++] = (char)('0' + b1 % 10);
     label[n] = 0;
-    inst_name(dst, max, label);
+    inst_name(dst, max, label, n_bund_svc);
 }
 
 static uint32_t txt_put_kv_u(uint8_t *p, uint32_t n, const char *k, uint32_t v)
@@ -500,12 +534,13 @@ static int has_suffix(const char *q, const char *suf)
 static int match_chan_inst(const char *q, unsigned *idx)
 {
     if (!has_suffix(q, "._netaudio-chan._udp.local")) return 0;
-    char inst[DANTE_MAX_NAME + 48];
+    // chan_inst now yields the full name, so compare against it directly. The
+    // old cat2() here is exactly what hid the emission bug: matching built the
+    // full name, emission did not.
+    char inst[MDNS_INST_MAX];
     for (unsigned c = 1; c <= DANTE_TX_CHANNELS; c++) {
         chan_inst(inst, sizeof(inst), c);
-        char full[DANTE_MAX_NAME + 64];
-        cat2(full, sizeof(full), inst, "._netaudio-chan._udp.local");
-        if (ieq(q, full)) { *idx = c; return 1; }
+        if (ieq(q, inst)) { *idx = c; return 1; }
     }
     return 0;
 }
@@ -513,12 +548,10 @@ static int match_chan_inst(const char *q, unsigned *idx)
 static int match_bund_inst(const char *q, unsigned *idx)
 {
     if (!has_suffix(q, "._netaudio-bund._udp.local")) return 0;
-    char inst[DANTE_MAX_NAME + 48];
+    char inst[MDNS_INST_MAX];
     for (unsigned b = 1; b <= N_BUNDLES; b++) {
         bund_inst(inst, sizeof(inst), b);
-        char full[DANTE_MAX_NAME + 64];
-        cat2(full, sizeof(full), inst, "._netaudio-bund._udp.local");
-        if (ieq(q, full)) { *idx = b; return 1; }
+        if (ieq(q, inst)) { *idx = b; return 1; }
     }
     return 0;
 }
@@ -595,14 +628,21 @@ static void send_response(uint32_t want)
     // bounded batch per response and let the browser re-query; avahi and DC
     // both do, and a truncated-but-valid response beats an oversized one.
     if (want & W_CHAN_PTR) {
-        char inst[DANTE_MAX_NAME + 48];
-        for (unsigned c = 1; c <= DANTE_TX_CHANNELS && n < MDNS_SPLIT_BYTES; c++) {
+        // ROTATE the starting channel. One response holds ~24 PTRs, so a fixed
+        // start meant channels 1..24 were announced on every browse and 25..48
+        // on none of them -- avahi listed exactly 24 of our 48. The A16R
+        // answers a rotating subset for the same reason (09..18, then 03..08,
+        // then 01..02) and browsers accumulate across repeated queries.
+        char inst[MDNS_INST_MAX];
+        for (unsigned i = 0; i < DANTE_TX_CHANNELS && n < MDNS_SPLIT_BYTES; i++) {
+            unsigned c = (chan_ptr_start + i) % DANTE_TX_CHANNELS + 1;
             chan_inst(inst, sizeof(inst), c);
             n = put_ptr(p, n, n_chan_svc, inst); answers++;
+            chan_ptr_start = c;                  // resume past the last one sent
         }
     }
     if (want & W_BUND_PTR) {
-        char inst[DANTE_MAX_NAME + 48];
+        char inst[MDNS_INST_MAX];
         for (unsigned b = 1; b <= N_BUNDLES; b++) {
             bund_inst(inst, sizeof(inst), b);
             n = put_ptr(p, n, n_bund_svc, inst); answers++;
@@ -614,7 +654,7 @@ static void send_response(uint32_t want)
         // TXT and A records ride along as supporting data. We had both in
         // answers (an=2), and a resolver looking for the TXT among additionals
         // will not find it there.
-        char inst[DANTE_MAX_NAME + 48];
+        char inst[MDNS_INST_MAX];
         chan_inst(inst, sizeof(inst), want_idx);
         n = put_srv(p, n, inst, DANTE_PORT_FLOWS); answers++;   // SRV port 4455
         n = put_rr_head(p, n, inst, DNS_T_TXT, DNS_C_IN, MDNS_TTL);
@@ -624,7 +664,7 @@ static void send_response(uint32_t want)
         chan_txt_additional++;
     }
     if (want & W_BUND_ONE) {
-        char inst[DANTE_MAX_NAME + 48];
+        char inst[MDNS_INST_MAX];
         bund_inst(inst, sizeof(inst), want_idx);
         n = put_srv(p, n, inst, DANTE_PORT_MEDIA); answers++;   // SRV port 4321
         n = put_rr_head(p, n, inst, DNS_T_TXT, DNS_C_IN, MDNS_TTL);
