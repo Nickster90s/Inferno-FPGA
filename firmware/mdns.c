@@ -542,6 +542,7 @@ static void send_response(uint32_t want)
     // supporting data can reject the record it came with -- which reads on the
     // far side as "cannot find this channel on the network".
     uint16_t additional = 0;
+    uint16_t chan_txt_additional = 0;
 
     // Channel / bundle records, synthesised on demand.
     //
@@ -564,6 +565,11 @@ static void send_response(uint32_t want)
         }
     }
     if (want & W_CHAN_ONE) {
+        // SRV is the ANSWER; TXT is ADDITIONAL. A reply DVS accepted from the
+        // A16R carries an=1, ar=3 -- only the SRV answers the question, and the
+        // TXT and A records ride along as supporting data. We had both in
+        // answers (an=2), and a resolver looking for the TXT among additionals
+        // will not find it there.
         char inst[DANTE_MAX_NAME + 48];
         chan_inst(inst, sizeof(inst), want_idx);
         n = put_srv(p, n, inst, DANTE_PORT_FLOWS); answers++;   // SRV port 4455
@@ -571,7 +577,7 @@ static void send_response(uint32_t want)
         { uint32_t lp = n; n += 2;
           uint32_t l = build_txt_chan(p + n, want_idx);
           p[lp] = (uint8_t)(l >> 8); p[lp+1] = (uint8_t)l; n += l; }
-        answers++;
+        chan_txt_additional++;
     }
     if (want & W_BUND_ONE) {
         char inst[DANTE_MAX_NAME + 48];
@@ -581,12 +587,13 @@ static void send_response(uint32_t want)
         { uint32_t lp = n; n += 2;
           uint32_t l = build_txt_bund(p + n, want_idx);
           p[lp] = (uint8_t)(l >> 8); p[lp+1] = (uint8_t)l; n += l; }
-        answers++;
+        chan_txt_additional++;
     }
 
     if (want & W_A) { n = put_a(p, n); additional++; }
 
     p[6]  = (uint8_t)(answers >> 8);    p[7]  = (uint8_t)answers;
+    additional += chan_txt_additional;
     p[10] = (uint8_t)(additional >> 8); p[11] = (uint8_t)additional;
 
     if (net_udp_commit(mdns_group, MDNS_PORT, MDNS_PORT, n, NET_TOS_BEST_EFFORT) == 0)
