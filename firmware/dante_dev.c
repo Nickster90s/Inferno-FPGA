@@ -46,10 +46,17 @@ void dante_dev_init(const uint8_t mac[6])
     // KEEP THE HOSTNAME SHORT. device_info.rs:31 notes Dante Controller ignores
     // devices whose name exceeds 31 characters.
     int p = 0;
-    p = append_str(g_dante.name, p, DANTE_MAX_NAME, "InfernoFPGA-");
-    p = append_hex2(g_dante.name, p, DANTE_MAX_NAME, mac[3]);
-    p = append_hex2(g_dante.name, p, DANTE_MAX_NAME, mac[4]);
-    p = append_hex2(g_dante.name, p, DANTE_MAX_NAME, mac[5]);
+    // Dante device names double as the mDNS hostname, so they must be a valid
+    // DNS label: letters, digits and hyphens only. The space in "N-Series
+    // Switchover" becomes a hyphen -- a hostname cannot contain a space and
+    // Dante Controller rejects such names. Every real device on this bench
+    // follows the same rule (RF04-RedNetAM2-RFtech).
+    //
+    // The MAC suffix is deliberately gone, by request. The trade-off: two of
+    // these boards on one network would now present the same name and hostname
+    // and collide in mDNS. Fine for a single bench unit; add the suffix back if
+    // a second board ever appears.
+    p = append_str(g_dante.name, p, DANTE_MAX_NAME, "N-Series-Switchover");
 
     memcpy(g_dante.hostname, g_dante.name, DANTE_MAX_NAME);
 

@@ -355,6 +355,11 @@ static void servo_update(int64_t offset_ns)
     g_ptpv1.current_addend_full = (uint64_t)addend;
     gptp_set_addend_full(g_ptpv1.current_addend_full);
 
+    // NOTE: gating lock on mean_path_delay != 0 was tried here to suppress the
+    // single unlock/relock right after boot (the first DelayResp shifting the
+    // offset by the whole path delay). It prevented locking ENTIRELY, because
+    // mean_path_delay is currently stuck at 0 -- a separate bug, tracked below.
+    // Do not re-add this gate until the path delay is reliably measured.
     int64_t a = filtered < 0 ? -filtered : filtered;
     if (a < LOCK_THRESHOLD_NS) {
         if (++lock_streak >= LOCK_STREAK && !g_ptpv1.locked) {
