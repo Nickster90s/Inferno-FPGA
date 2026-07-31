@@ -1,114 +1,174 @@
+// On-device capture of the Dante control plane — Phase 3/4 debug tool.
+//
+// WHY THIS EXISTS, and why host-side tcpdump is not a substitute.
+//
+// Dante Controller talks to this board over UNICAST. The bench switch is
+// unmanaged: it floods multicast and broadcast, but forwards unicast only to
+// the destination port. So a tcpdump on the build host sees our multicast
+// (mDNS, heartbeat, device info) and NONE of the controller's requests to us,
+// nor our replies. Every "DC sent us nothing" conclusion drawn from a host
+// capture during this bring-up was measuring the switch, not DC -- including a
+// 45 s capture on port 4440 that caught zero packets while the board's console
+// was logging ARC requests the whole time.
+//
+// The board is the only place both directions are visible. This records them
+// and ships the ring to the host over UDP, so the exchange can be decoded
+// properly instead of being read as console hex.
+//
+// It was previously an AVB tool, filtering MSRP (0x22ea) and ADP/ACMP (0x22f0).
+// Under Dante none of those ethertypes occur, so it had been silently recording
+// nothing since Phase 0.
+
 #include "cap.h"
+#include "net.h"
 #include "gptp.h"      // gptp_uptime_ms()
 #include <stdio.h>
 #include <string.h>
 
-// 150 control frames × 56 bytes ≈ 8.4 KB. Enough for boot → gPTP lock → the
-// talker reconnect handshake. STOP-when-full (keep the FIRST N from boot, not a
-// ring) so the boot reconnect is always captured no matter when you dump.
-#define CAP_N      150
-#define CAP_BYTES  56    // eth(14) + ACMPDU up to listener_unique_id @ frame[52..53]
+// 64 x 256 B ~= 16.6 KB. 256 bytes holds a full ARC response header plus the
+// start of its payload, which is what identifies an exchange; the recorded
+// length field still reports the true on-wire size when truncated.
+#define CAP_N      64
+#define CAP_BYTES  256
+
+// Trigger and delivery ports. The host sends anything to CAP_REQ_PORT and the
+// ring comes back on CAP_OUT_PORT, so a dump needs no console access -- which
+// matters because the UART belongs to the user's picocom.
+#define CAP_REQ_PORT  7778
+#define CAP_OUT_PORT  9997
 
 typedef struct {
     uint32_t t_ms;
-    uint8_t  dir;        // 0=RX 1=TX
-    uint16_t len;
+    uint8_t  dir;              // 0 = RX, 1 = TX
+    uint16_t len;              // true on-wire length
+    uint16_t caplen;           // bytes actually stored
     uint8_t  data[CAP_BYTES];
 } cap_entry_t;
 
 static cap_entry_t cap_ring[CAP_N];
-static uint16_t    cap_count = 0;
+static uint16_t    cap_head;        // next slot to write
+static uint32_t    cap_total;       // frames recorded since reset
+static uint8_t     cap_wrapped;
 
-static uint8_t cap_eid[8];       // our entity_id (set by cap_set_eid)
-static uint8_t cap_eid_set = 0;
+void cap_set_eid(const uint8_t *eid) { (void)eid; }   // AVB leftover; unused
 
-void cap_set_eid(const uint8_t *eid) { memcpy(cap_eid, eid, 8); cap_eid_set = 1; }
-
-// Keep ADP (discovery) + MSRP + ONLY the ACMP that concerns OUR entity (talker
-// or listener entity_id == us). Skip AECP (0xFB) — it's the controllers' READ_
-// DESCRIPTOR enumeration flood that buries the reconnect — and skip cross-device
-// ACMP we merely snoop (ACMP is multicast, so we see the whole segment).
+// Control plane only. Deliberately EXCLUDES 4321 (multicast audio): that is
+// 99.2% of frames on this network and would evict the exchange we care about
+// within milliseconds. Also excludes our own mDNS and heartbeat multicast,
+// which the host can already see.
 static int cap_is_control(const uint8_t *f, uint32_t len)
 {
-    if (len < 16) return 0;
-    uint16_t et = ((uint16_t)f[12] << 8) | f[13];
-    if (et == 0x22ea) return 1;                       // MSRP
-    if (et != 0x22f0) return 0;
-    if (f[14] == 0xFA) return 1;                       // ADP (discovery)
-    if (f[14] == 0xFC) {                               // ACMP — only OUR streams
-        if (!cap_eid_set || len < 50) return 1;        // eid not known yet: keep all
-        int tk = 1, ln = 1;
-        for (int i = 0; i < 8; i++) {
-            if (f[34 + i] != cap_eid[i]) tk = 0;       // talker_entity_id @ PDU+20
-            if (f[42 + i] != cap_eid[i]) ln = 0;       // listener_entity_id @ PDU+28
-        }
-        return tk || ln;
-    }
-    return 0;                                          // AECP (0xFB) + rest: skip
+    if (len < 42) return 0;
+    if (f[12] != 0x08 || f[13] != 0x00) return 0;      // IPv4
+    uint32_t ihl = (uint32_t)(f[14] & 0x0F) * 4;
+    if (f[23] != 17) return 0;                         // UDP
+    uint32_t u = 14 + ihl;
+    if (len < u + 8) return 0;
+
+    uint16_t sp = (uint16_t)((f[u] << 8) | f[u + 1]);
+    uint16_t dp = (uint16_t)((f[u + 2] << 8) | f[u + 3]);
+
+    static const uint16_t ports[] = {
+        4440,   // ARC   — routing/control, where DC asks the questions
+        8800,   // CMC
+        8700,   // info request / clock stats
+        4455,   // flow control
+        319, 320 // PTPv1 event/general
+    };
+    for (unsigned i = 0; i < sizeof(ports) / sizeof(ports[0]); i++)
+        if (sp == ports[i] || dp == ports[i]) return 1;
+    return 0;
 }
 
 void cap_record(uint8_t dir, const uint8_t *frame, uint32_t len)
 {
-    if (cap_count >= CAP_N) return;                   // stop when full (first-N)
     if (!cap_is_control(frame, len)) return;
-    cap_entry_t *e = &cap_ring[cap_count++];
-    e->t_ms = gptp_uptime_ms();
-    e->dir  = dir;
-    e->len  = (uint16_t)len;
+
+    // RING, not stop-when-full. The old first-N behaviour was right for a boot
+    // handshake; here the interesting traffic happens when someone clicks in
+    // Dante Controller, long after boot, so keep the most RECENT frames.
+    cap_entry_t *e = &cap_ring[cap_head];
+    cap_head = (uint16_t)((cap_head + 1) % CAP_N);
+    if (cap_head == 0) cap_wrapped = 1;
+    cap_total++;
+
+    e->t_ms   = gptp_uptime_ms();
+    e->dir    = dir;
+    e->len    = (uint16_t)len;
     uint32_t n = len < CAP_BYTES ? len : CAP_BYTES;
+    e->caplen = (uint16_t)n;
     memcpy(e->data, frame, n);
-    if (n < CAP_BYTES) memset(e->data + n, 0, CAP_BYTES - n);
 }
 
-void cap_reset(void) { cap_count = 0; }
-
-static const char *acmp_name(uint8_t m)
+void cap_reset(void)
 {
-    switch (m) {
-    case 0:  return "CONNECT_TX_CMD";    case 1:  return "CONNECT_TX_RSP";
-    case 2:  return "DISCONNECT_TX_CMD"; case 3:  return "DISCONNECT_TX_RSP";
-    case 4:  return "GET_TX_STATE_CMD";  case 5:  return "GET_TX_STATE_RSP";
-    case 6:  return "CONNECT_RX_CMD";    case 7:  return "CONNECT_RX_RSP";
-    case 8:  return "DISCONNECT_RX_CMD"; case 9:  return "DISCONNECT_RX_RSP";
-    case 10: return "GET_RX_STATE_CMD";  case 11: return "GET_RX_STATE_RSP";
-    default: return "ACMP?";
+    cap_head = 0; cap_total = 0; cap_wrapped = 0;
+    memset(cap_ring, 0, sizeof(cap_ring));
+}
+
+// Ship the ring to the requester, oldest first, two entries per datagram.
+static void cap_send_ring(const uint8_t dst_ip[4], uint16_t dst_port)
+{
+    uint16_t start = cap_wrapped ? cap_head : 0;
+    uint16_t count = cap_wrapped ? CAP_N : cap_head;
+
+    for (uint16_t i = 0; i < count; i += 2) {
+        uint8_t *p = net_udp_payload_buf();
+        uint32_t n = 0;
+
+        p[n++] = (uint8_t)(cap_total >> 24); p[n++] = (uint8_t)(cap_total >> 16);
+        p[n++] = (uint8_t)(cap_total >> 8);  p[n++] = (uint8_t)cap_total;
+        p[n++] = (uint8_t)(i >> 8);          p[n++] = (uint8_t)i;
+        p[n++] = (uint8_t)(count >> 8);      p[n++] = (uint8_t)count;
+
+        for (uint16_t k = 0; k < 2 && (i + k) < count; k++) {
+            const cap_entry_t *e = &cap_ring[(start + i + k) % CAP_N];
+            p[n++] = (uint8_t)(e->t_ms >> 24); p[n++] = (uint8_t)(e->t_ms >> 16);
+            p[n++] = (uint8_t)(e->t_ms >> 8);  p[n++] = (uint8_t)e->t_ms;
+            p[n++] = e->dir;
+            p[n++] = (uint8_t)(e->len >> 8);    p[n++] = (uint8_t)e->len;
+            p[n++] = (uint8_t)(e->caplen >> 8); p[n++] = (uint8_t)e->caplen;
+            memcpy(p + n, e->data, e->caplen);
+            n += e->caplen;
+        }
+        net_udp_commit(dst_ip, dst_port, CAP_OUT_PORT, n, NET_TOS_BEST_EFFORT);
     }
 }
 
+static void cap_req_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
+                       uint16_t src_port, const uint8_t *payload, uint32_t len)
+{
+    (void)dst_ip; (void)src_port;
+    // Payload byte 0: 'r' also resets the ring after dumping.
+    cap_send_ring(src_ip, CAP_OUT_PORT);
+    if (len >= 1 && payload[0] == 'r') cap_reset();
+}
+
+void cap_init(void)
+{
+    net_udp_bind(CAP_REQ_PORT, cap_req_rx);
+    printf("[cap] control-plane capture: %u frames, request on :%u -> :%u\n",
+           CAP_N, CAP_REQ_PORT, CAP_OUT_PORT);
+}
+
+// Console dump kept for the 'R' command, but deliberately terse: the UDP path
+// is the one that carries full frames.
 void cap_dump(void)
 {
-    printf("\n[CAP] %u control frames from boot (RX=from wire, TX=we sent):\n", cap_count);
-    printf("   t_ms  dir  type                tuid luid st  src-mac\n");
-    for (uint16_t i = 0; i < cap_count; i++) {
-        cap_entry_t *e = &cap_ring[i];
-        const uint8_t *f = e->data;
-        const char *d = e->dir ? "TX" : "RX";
-        uint16_t et = ((uint16_t)f[12] << 8) | f[13];
-        // src MAC (last 3 bytes) — tells us MOTU (00:0e:55) vs us (…:00:42) vs bridge
-        if (et == 0x22f0 && f[14] == 0xFC) {          // ACMP: PDU starts at frame[14]
-            uint8_t  msg    = f[15] & 0x0F;
-            uint8_t  status = (f[16] >> 3) & 0x1F;
-            uint16_t tuid   = ((uint16_t)f[14 + 36] << 8) | f[14 + 37];
-            uint16_t luid   = ((uint16_t)f[14 + 38] << 8) | f[14 + 39];
-            // controller_id @ PDU+12 -> frame[26..33]; flags @ PDU+50 -> frame[64..65]
-            // (beyond CAP_BYTES=56, so read low bytes we DO have). stream_id @ frame[18..25].
-            uint8_t sid_present = 0;
-            for (int k = 18; k < 26; k++) if (f[k]) { sid_present = 1; break; }
-            printf("  %6lu  %s  %-18s t%u l%u st%u src%02x:%02x:%02x ctrl%02x:%02x:%02x sid%c\n",
-                   (unsigned long)e->t_ms, d, acmp_name(msg), tuid, luid, status,
-                   f[6], f[7], f[8], f[31], f[32], f[33], sid_present ? 'Y' : '-');
-        } else if (et == 0x22f0 && f[14] == 0xFA) {
-            printf("  %6lu  %s  ADP msg=%u            -    -   -  %02x:%02x:%02x\n",
-                   (unsigned long)e->t_ms, d, f[15] & 0x0F, f[6], f[7], f[8]);
-        } else if (et == 0x22f0 && f[14] == 0xFB) {
-            printf("  %6lu  %s  AECP                  -    -   -  %02x:%02x:%02x\n",
-                   (unsigned long)e->t_ms, d, f[6], f[7], f[8]);
-        } else if (et == 0x22ea) {
-            printf("  %6lu  %s  MSRP len=%-3u          -    -   -  %02x:%02x:%02x\n",
-                   (unsigned long)e->t_ms, d, e->len, f[6], f[7], f[8]);
-        }
+    uint16_t start = cap_wrapped ? cap_head : 0;
+    uint16_t count = cap_wrapped ? CAP_N : cap_head;
+    printf("[cap] %lu frames recorded, %u in ring\n",
+           (unsigned long)cap_total, count);
+    for (uint16_t i = 0; i < count; i++) {
+        const cap_entry_t *e = &cap_ring[(start + i) % CAP_N];
+        uint32_t ihl = (uint32_t)(e->data[14] & 0x0F) * 4;
+        uint32_t u = 14 + ihl;
+        uint16_t sp = (uint16_t)((e->data[u] << 8) | e->data[u + 1]);
+        uint16_t dp = (uint16_t)((e->data[u + 2] << 8) | e->data[u + 3]);
+        printf("  %8lu ms %s %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u len=%u\n",
+               (unsigned long)e->t_ms, e->dir ? "TX" : "RX",
+               e->data[26], e->data[27], e->data[28], e->data[29], sp,
+               e->data[30], e->data[31], e->data[32], e->data[33], dp,
+               e->len);
     }
-    printf("[CAP] end. %s\n\n",
-           cap_count >= CAP_N ? "(buffer FULL — increase CAP_N if reconnect not shown)"
-                              : "(still capturing)");
 }

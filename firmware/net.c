@@ -8,6 +8,7 @@
 // because `ping` is the fastest possible proof the stack works at all.
 
 #include "net.h"
+#include "cap.h"
 #include <string.h>
 #include <stdio.h>
 #include <generated/csr.h>
@@ -87,6 +88,14 @@ static uint8_t *tx_buf(void)
 static void eth_send(uint32_t len)
 {
     if (len < 60) len = 60;                       // pad to minimum frame
+
+    // Record our own control-plane transmissions. Both directions have to come
+    // from the board: the host cannot see either side of a unicast exchange
+    // with the controller (unmanaged switch forwards unicast only to the
+    // destination port), so a capture holding requests without our replies
+    // would not show whether we answered, or what we answered with.
+    cap_record(1, (const uint8_t *)(ETHMAC_BASE + ETHMAC_SLOT_SIZE *
+                                    (ETHMAC_RX_SLOTS + txslot)), len);
     while (!ethmac_sram_reader_ready_read())
         ;
     ethmac_sram_reader_slot_write(txslot);

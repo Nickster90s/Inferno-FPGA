@@ -11,5 +11,6 @@ void cap_set_eid(const uint8_t *eid);   // our 8-byte entity_id — filters ACMP
 void cap_record(uint8_t dir, const uint8_t *frame, uint32_t len);  // dir: 0=RX 1=TX
 void cap_dump(void);      // decode + print the ring ('R' command)
 void cap_reset(void);     // clear + re-arm
+void cap_init(void);      // bind the UDP dump-request port
 
 #endif

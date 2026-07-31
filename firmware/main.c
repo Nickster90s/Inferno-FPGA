@@ -866,6 +866,7 @@ int main(void)
     dante_info_set_gptp(&gptp);
     dante_info_init();
     ptpv1_init(mac_addr);
+    cap_init();
     mcr_init(&mcr, CONFIG_CLOCK_FREQUENCY, 48000);
     // Give MCR the gPTP handle so the free-running (cs=0) NCO is disciplined to
     // the network media rate (exactly 48000 gPTP-Hz) instead of the raw crystal.
