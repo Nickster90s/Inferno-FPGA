@@ -467,11 +467,9 @@ static void send_response(uint32_t want)
     p[10] = 0; p[11] = 0;                 // arcount, patched below
     n = 12;
 
-    if (echo_q && echo_q_len && echo_q_len < 300) {
-        memcpy(p + n, echo_q, echo_q_len);
-        n += echo_q_len;
-        p[4] = 0; p[5] = 1;               // qdcount = 1
-    }
+    // NO question echo. Added on a misread of an earlier capture and REVERTED:
+    // a working A16R reply that DVS accepted has qd=0. The qd=1 sample that
+    // prompted the change was a different response type.
 
     if (want & W_SERVICES) { n = put_ptr(p, n, n_services, n_arc_svc); answers++;
                              n = put_ptr(p, n, n_services, n_cmc_svc); answers++; }
