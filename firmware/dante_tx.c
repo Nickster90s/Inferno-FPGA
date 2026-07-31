@@ -324,8 +324,14 @@ typedef struct {
 static flow_slot_t flows[N_FLOWS];
 
 // Keepalives arrive about every 5 s; flows_control.rs calls a lapsed flow
-// "stream expired (i.e. no keepalives)". Three missed refreshes is the cutoff.
-#define FLOW_TIMEOUT_MS  16000
+// "stream expired (i.e. no keepalives)".
+//
+// 45 s, not 16. At 16 s the expiry fired BETWEEN keepalives on real hardware --
+// every flow was torn down and rebuilt on each refresh, which disables the
+// context (nslots = 0) for the gap and would be audible. The only thing this
+// timeout does is release a context when a receiver goes away for good, so
+// erring long costs nothing and erring short costs audio.
+#define FLOW_TIMEOUT_MS  45000
 
 
 static void write_ctx(unsigned f, const uint8_t dst_ip[4], const uint8_t dmac[6],
