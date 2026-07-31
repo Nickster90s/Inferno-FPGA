@@ -29,6 +29,7 @@
 #include "dante_info.h"
 #include "ptpv1.h"
 #include "dante_tx.h"
+#include "dante_flows.h"
 
 // MAC address — locally administered, unique per device.
 // TODO: read from SPI flash or EEPROM in production.
@@ -718,6 +719,7 @@ static void aaf_gw_push_binding(void)
     // 91:E0:F0 destination MACs and the Class A VLAN TCI -- has no Dante
     // equivalent and the CSRs no longer exist.
     dante_tx_init();
+    dante_flows_init();
 }
 
 static void aaf_gw_set(uint8_t on)

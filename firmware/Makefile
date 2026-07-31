@@ -21,7 +21,7 @@ include $(SOC_DIRECTORY)/software/common.mak
 # timestamp offset that had simply never been recompiled.
 DEPFLAGS := -MMD -MP
 
-OBJECTS = crt0.o main.o gptp.o mcr.o cfgflash.o config.o cap.o net.o dante_dev.o dante_msg.o mdns.o dante_arc.o dante_cmc.o dante_info.o ptpv1.o dante_tx.o
+OBJECTS = crt0.o main.o gptp.o mcr.o cfgflash.o config.o cap.o net.o dante_dev.o dante_msg.o mdns.o dante_arc.o dante_cmc.o dante_info.o ptpv1.o dante_tx.o dante_flows.o
 
 # Add our source directory to includes
 CFLAGS += $(DEPFLAGS) -I.

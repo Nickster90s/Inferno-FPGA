@@ -296,7 +296,12 @@ static void igmp_rx(const uint8_t *p, uint32_t len)
 // UDP
 // ---------------------------------------------------------------------------
 
-#define UDP_BINDINGS  8
+// 12, not 8. The table was exactly full -- 4440, 8800, 8700, 5353, 319, 320
+// plus the two debug ports -- so net_udp_bind(4455) for the flow-control server
+// failed SILENTLY and the port simply never answered. net_udp_bind returns a
+// status nobody checks, which is how a full table looks identical to a working
+// one until something stops responding.
+#define UDP_BINDINGS  12
 
 typedef struct { uint16_t port; net_udp_handler_t fn; } udp_binding_t;
 static udp_binding_t udp_bindings[UDP_BINDINGS];
