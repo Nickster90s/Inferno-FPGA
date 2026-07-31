@@ -140,7 +140,10 @@ void dante_tx_init(void)
     // about this: "it's better to have the clock in the past than in the future
     // - otherwise Dante devices receiving from us go mad and fart." The offset
     // is in samples; -24 is half a packet at fpp=16.
-    aaf_pkt_ts_offset_write((uint32_t)(int32_t)DANTE_TX_TS_OFFSET);
+    // ZERO, deliberately -- see ts_anchor(). This CSR adds into an unsigned
+    // subsecond field with no carry into seconds, so any nonzero value wraps
+    // at one end of the second or the other. The offset lives in the anchor.
+    aaf_pkt_ts_offset_write(0);
 
     for (unsigned f = 0; f < N_FLOWS; f++) bind_flow(f);
 
@@ -180,16 +183,38 @@ void dante_tx_init(void)
 static void ts_anchor(void)
 {
     ptp_timestamp_t t = gptp_read_time();
-    uint32_t sub = (uint32_t)((t.nanoseconds * 3u) / 62500u);
-    if (sub >= 48000u) sub = 47999u;
+    int32_t  sub = (int32_t)((t.nanoseconds * 3u) / 62500u);
+    uint32_t sec = (uint32_t)t.seconds;
 
-    aaf_pkt_ts_load_sec_write((uint32_t)t.seconds);
-    aaf_pkt_ts_load_sub_write(sub);
+    // THE OFFSET IS APPLIED HERE, NOT IN THE ts_offset CSR.
+    //
+    // The gateware computes the emitted timestamp as ts_sub - (fpp-1) and the
+    // CSR offset was added to that, in a 32-bit UNSIGNED field with no carry
+    // into seconds. With the old -32 the sum went negative twice a second (at
+    // ts_sub 15 and 31) and wrapped:
+    //
+    //     sec=85673 subsec=4294967264      <- -32, unsigned
+    //
+    // Measured 6 of these in a 3-second capture of one flow: 2 per second per
+    // flow, 12 per second across six flows, each ~4.29e9 samples in the
+    // future. A positive CSR offset has the mirror bug at the top of the
+    // second (subsec >= 48000). Only zero is safe there.
+    //
+    // Shifting the ANCHOR instead is exact: the counter is a real (sec, sub)
+    // pair, so the carry is done here in C where seconds exist, and the
+    // emitted value is always ts_sub - 15 with ts_sub congruent to 15 mod 16 --
+    // in [0, 47984], a multiple of fpp, and never wrapping either way.
+    sub += DANTE_TX_TS_OFFSET;
+    if (sub < 0)            { sub += 48000; sec -= 1; }
+    else if (sub >= 48000)  { sub -= 48000; sec += 1; }
+
+    aaf_pkt_ts_load_sec_write(sec);
+    aaf_pkt_ts_load_sub_write((uint32_t)sub);
     aaf_pkt_ts_load_write(1);
     g_tx_stats.anchors++;
-    printf("[dtx] media clock anchored to PTP %lu.%09lu (sample %lu)\n",
+    printf("[dtx] media clock anchored to PTP %lu.%09lu -> %lu.%lu (offset %d)\n",
            (unsigned long)t.seconds, (unsigned long)t.nanoseconds,
-           (unsigned long)sub);
+           (unsigned long)sec, (unsigned long)sub, DANTE_TX_TS_OFFSET);
 }
 
 void dante_tx_poll(void)

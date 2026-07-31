@@ -30,7 +30,7 @@
 //
 // -32 samples = -667 us, the nearest multiple of fpp to inferno's -500 us that
 // errs on the side of "further in the past".
-#define DANTE_TX_TS_OFFSET   (-32)      // two packets at fpp=16
+#define DANTE_TX_TS_OFFSET   (74)       // samples; applied in ts_anchor(), NOT the CSR
 
 typedef struct {
     uint32_t enables;
