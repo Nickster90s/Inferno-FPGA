@@ -461,18 +461,22 @@ static uint32_t build_txt_chan(uint8_t *p, unsigned ch1)
     // advertising 48, which would have a receiver negotiate a 48-channel flow
     // against a device whose flows carry 8.
     n = txt_put_kv_u(p, n, "nchan=", 8);
-    // THE KEY THAT MAKES MULTICAST SUBSCRIPTION WORK.
-    {
-        char kv[24]; int i = 0;
-        kv[i++] = 'b'; kv[i++] = '.';
-        if (b1 >= 10) kv[i++] = (char)('0' + b1 / 10);
-        kv[i++] = (char)('0' + b1 % 10);
-        kv[i++] = '=';
-        kv[i++] = (char)('0' + pos);
-        kv[i] = 0;
-        n = txt_put(p, n, kv);
-    }
+    // b.<bundle>=<pos> IS DELIBERATELY ABSENT -- this device is now unicast.
+    //
+    // mdns_client.rs takes the multicast path the moment ANY TXT key starts
+    // with "b.", so advertising it forces every subscription to multicast.
+    // That was costing 65.5 Mbit/s of the 69.6 Mbit/s measured on the segment
+    // -- 94% of all traffic -- because we transmitted all six bundles
+    // unconditionally whether or not anyone had subscribed, and an unmanaged
+    // switch floods every one of them to every port. The A16R was receiving
+    // 65 Mbit/s it never asked for while playing two channels.
+    //
+    // Real Dante defaults to unicast; multicast flows are created explicitly
+    // (opcode 0x2201, DC's "add a flow"). Without this key a receiver resolves
+    // the channel, finds no bundle, and connects to the SRV target -- our flow
+    // control server on 4455 -- naming exactly the channels and fpp it wants.
     n = txt_put(p, n, "at2");
+    (void)b1; (void)pos;
     return n;
 }
 

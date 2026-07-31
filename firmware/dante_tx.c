@@ -23,6 +23,7 @@
 #include "dante_dev.h"
 #include "ptpv1.h"
 #include "gptp.h"
+#include "dante_flows.h"
 #include "net.h"
 #include <generated/csr.h>
 #include <string.h>
@@ -219,7 +220,20 @@ static void ts_anchor(void)
 
 void dante_tx_poll(void)
 {
-    uint8_t want = g_ptpv1.locked;
+    // TRANSMIT ONLY WHEN SOMETHING HAS ASKED FOR A FLOW.
+    //
+    // We used to source all six multicast bundles the moment PTP locked,
+    // regardless of whether anyone had subscribed. Measured on the segment
+    // that was 65.5 Mbit/s of 69.6 Mbit/s total -- 94% of all traffic, 65% of
+    // a 100 Mbit link -- and an unmanaged switch floods every group to every
+    // port, so the A16R was filtering 65 Mbit/s in hardware while playing two
+    // channels. Sending audio nobody has requested is not free; it is most of
+    // the network.
+    // `active`, not `accepted`. Answering a request is not serving it: we reply
+    // OK to keep the receiver's state machine moving, but until a flow is
+    // actually built there is nothing to send, and enabling the talker would
+    // put all six multicast bundles back on the wire for nobody.
+    uint8_t want = g_ptpv1.locked && (g_flows_stats.active > 0);
 
     // Re-anchor when the emitted seconds drifts from PTP by more than a second.
     // The media clock is rate-disciplined by mcr, so this should never fire in

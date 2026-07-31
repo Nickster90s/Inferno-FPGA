@@ -61,23 +61,48 @@ static void flows_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     dante_msg_begin(&m, buf, req);
     uint16_t code = DANTE_CODE_OK;
 
-    if (op1 == OP_REQUEST_FLOW && clen >= 16) {
+    if (op1 == OP_REQUEST_FLOW && clen > 16) {
         uint32_t rate    = rd32(c + 2);
         uint32_t bits    = rd32(c + 6);
         uint16_t nch     = rd16(c + 12);
+        uint16_t rdo     = rd16(c + 14);        // remote socket descriptor
+
+        // fpp and the receiver's flow name sit AFTER the channel list, at
+        // 16 + nch*2 + 6 -- the six skipped bytes are unidentified.
+        uint16_t fpp = 0;
+        uint32_t fo  = 16u + (uint32_t)nch * 2u + 6u;
+        if (fo + 2 <= clen) fpp = rd16(c + fo);
+
+        // The receiver tells us WHERE to send, in a 0x0802 socket descriptor
+        // at an absolute offset. This is the piece a unicast flow needs and
+        // multicast never did: destination IP and port come from the request,
+        // not from a group we picked.
+        uint8_t  dst[4] = {0,0,0,0};
+        uint16_t dport  = 0;
+        if (rdo >= DANTE_HDR_LEN && rdo + 8 <= len) {
+            const uint8_t *rd = req + rdo;
+            if (rd[0] != 0x08 || rd[1] != 0x02)
+                printf("[flow] warn: expected 0x0802, got 0x%02x%02x\n", rd[0], rd[1]);
+            dport = (uint16_t)((rd[2] << 8) | rd[3]);
+            dst[0]=rd[4]; dst[1]=rd[5]; dst[2]=rd[6]; dst[3]=rd[7];
+        }
 
         g_flows_stats.requests++;
-        printf("[flow] request from %u.%u.%u.%u: rate=%lu bits=%lu nch=%u\n",
-               src_ip[0], src_ip[1], src_ip[2], src_ip[3],
-               (unsigned long)rate, (unsigned long)bits, nch);
+        printf("[flow] %u.%u.%u.%u wants %u ch, %lu Hz %lu bit, fpp=%u -> %u.%u.%u.%u:%u\n",
+               src_ip[0], src_ip[1], src_ip[2], src_ip[3], nch,
+               (unsigned long)rate, (unsigned long)bits, fpp,
+               dst[0], dst[1], dst[2], dst[3], dport);
+        for (unsigned i = 0; i < nch && 16u + i*2u + 2u <= clen; i++)
+            printf("[flow]   slot %u -> tx channel %u\n", i, rd16(c + 16 + i*2));
 
-        // Reject what we cannot actually carry, rather than accepting and then
-        // sending nothing. inferno answers a rate mismatch with a specific
-        // error code; the same idea applies here.
+        // Error codes are the real ones from flows_control.rs, not invented:
+        //   0x0301 sample rate mismatch, 0x0315 too many TX flows,
+        //   0x0103 flow not found / expired. This previously answered 0x0016,
+        //   which means nothing to a Dante receiver.
         if (rate != g_dante.sample_rate || bits != g_dante.bits_per_sample) {
             printf("[flow] rejected: we are %lu Hz / %u bit\n",
                    (unsigned long)g_dante.sample_rate, g_dante.bits_per_sample);
-            code = 0x0016;                      // sample-rate / format mismatch
+            code = 0x0301;
             g_flows_stats.rejected++;
         } else {
             // Accepted, but no unicast flow is built yet -- see the scope note
@@ -90,7 +115,7 @@ static void flows_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         printf("[flow] unhandled opcode1 %#06x len=%lu from %u.%u.%u.%u\n",
                op1, (unsigned long)clen,
                src_ip[0], src_ip[1], src_ip[2], src_ip[3]);
-        code = 0x0022;                          // not supported, but ANSWERED
+        code = 0x0103;                          // not supported, but ANSWERED
         g_flows_stats.unknown++;
     }
 

@@ -5,6 +5,7 @@
 
 typedef struct {
     uint32_t rx, tx, requests, accepted, rejected, unknown;
+    uint32_t active;      // flows actually BUILT, not merely answered
 } dante_flows_stats_t;
 extern dante_flows_stats_t g_flows_stats;
 
