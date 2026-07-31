@@ -146,24 +146,22 @@ proportional to actual subscriptions (0.03 Mbit/s idle).
 
 ## Open bugs
 
-**Unicast reaches only one receiver.** With two receivers subscribed, both flows
-bind correctly and the transmit side looks right by every available measurement:
+**Unicast reaches only one receiver** — *root cause found, fix flashed, awaiting
+confirmation.* No flow request ever arrived from the second receiver, so this
+was never a transmit-side fault: the rate was already exactly 9001 pps
+(6000 + 3000) with both contexts emitting correctly.
 
-    flows_active 2, f0_in_use 1, f1_in_use 1, rebinds 1 and 1
-    packets +135019 / 15 s = 9001 pps  = 6000 (fpp 8) + 3000 (fpp 16)
-    underrun delta 0, overrun delta 0, fifo_level 66 (centre 64)
+The cause was a **stale `b.<flow>=` key**. Creating a multicast flow adds
+`b.32=1` to the channel's TXT record; deleting the flow removes it. But TXT
+carried a 4500 s TTL and no cache-flush bit, so resolvers — and the receivers —
+kept the old record for over an hour. They followed it to a multicast group that
+no longer existed instead of falling through to the unicast flow server, so no
+request was sent and no audio played.
 
-The combined rate is exactly right, so this is **not** a scheduling or due-gating
-fault — both contexts are emitting at their own correct rates. The fault is more
-likely in per-context header state: destination MAC, IP checksum, or UDP port
-for the second context. Note `write_ctx()` selects the context and then writes
-several CSRs before `flow_cfg` latches; anything that touches `ctx_select`
-in between would corrupt the binding.
-
-Hard to observe: unicast to a receiver is forwarded only to that port by the
-bench switch, so the build host cannot see it. Next diagnostic is to bind a
-multicast flow carrying the same channels — multicast is flooded and therefore
-visible — and compare the two contexts' emitted headers byte for byte.
+Fixed by setting the mDNS cache-flush bit (RFC 6762 §10.2) on the records we are
+the unique authority for (A, SRV, TXT — never shared PTRs), and dropping the TXT
+TTL to 120 s since it is now dynamic. Verified: `b.32=1` no longer appears on a
+channel with no active multicast flow.
 
 **`mac_writer_err` climbs at ~25/s.** Received frames dropped because the CPU
 cannot drain two RX slots against flooded multicast. This is the documented

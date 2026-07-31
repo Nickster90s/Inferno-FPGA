@@ -33,7 +33,10 @@
 // Both were 10, which is far shorter than anything real Dante hardware uses.
 // At TTL 10 avahi expired our records every ten seconds, so a resolver had to
 // re-query constantly and any gap in answering read as the channel vanishing.
-#define MDNS_TTL        4500    // PTR and TXT
+// TXT carries b.<flow>=, which changes when a multicast flow is created or
+// deleted, so it cannot use the A16R's 4500 s. PTR is static and keeps it.
+#define MDNS_TTL        4500    // PTR
+#define MDNS_TTL_TXT    120     // TXT -- dynamic, see b.<flow>= in build_txt_chan
 #define MDNS_TTL_A      120     // A, and SRV
 
 #define DNS_T_A         1
@@ -43,6 +46,17 @@
 #define DNS_T_ANY       255
 
 #define DNS_C_IN        1
+// CACHE-FLUSH (RFC 6762 s10.2): tells a resolver to REPLACE what it holds for
+// this name+type rather than add to it. Legal only on records we are the unique
+// authority for -- A, SRV, TXT -- never on shared PTRs.
+//
+// Without it our channel TXT is immutable for its 4500 s TTL, and that broke
+// subscription: a b.<flow>= key advertised while a multicast flow existed kept
+// pointing receivers at that group long after the flow was gone. They joined a
+// dead group instead of falling through to the unicast flow server, so no flow
+// request ever arrived and no audio played. The key is dynamic now -- it appears
+// and disappears with the flow -- so the records carrying it must be replaceable.
+#define DNS_C_IN_FLUSH  0x8001
 #define DNS_CACHE_FLUSH 0x8000
 
 static const uint8_t mdns_group[4] = {224, 0, 0, 251};
@@ -305,7 +319,7 @@ static uint32_t put_rr_head(uint8_t *p, uint32_t n, const char *name,
 
 static uint32_t put_a(uint8_t *p, uint32_t n)
 {
-    n = put_rr_head(p, n, n_host, DNS_T_A, DNS_C_IN, MDNS_TTL_A);
+    n = put_rr_head(p, n, n_host, DNS_T_A, DNS_C_IN_FLUSH, MDNS_TTL_A);
     p[n++] = 0; p[n++] = 4;
     memcpy(p + n, g_net_ip, 4); n += 4;
     return n;
@@ -323,7 +337,7 @@ static uint32_t put_ptr(uint8_t *p, uint32_t n, const char *svc, const char *ins
 
 static uint32_t put_srv(uint8_t *p, uint32_t n, const char *inst, uint16_t port)
 {
-    n = put_rr_head(p, n, inst, DNS_T_SRV, DNS_C_IN, MDNS_TTL_A);  // SRV 120, like A
+    n = put_rr_head(p, n, inst, DNS_T_SRV, DNS_C_IN_FLUSH, MDNS_TTL_A);  // SRV 120, like A
     uint32_t lp = n; n += 2;
     uint32_t s0 = n;
     p[n++] = 0; p[n++] = 0;                        // priority
@@ -337,7 +351,7 @@ static uint32_t put_srv(uint8_t *p, uint32_t n, const char *inst, uint16_t port)
 
 static uint32_t put_txt(uint8_t *p, uint32_t n, const char *inst, int is_arc)
 {
-    n = put_rr_head(p, n, inst, DNS_T_TXT, DNS_C_IN, MDNS_TTL);
+    n = put_rr_head(p, n, inst, DNS_T_TXT, DNS_C_IN_FLUSH, MDNS_TTL_TXT);
     uint32_t lp = n; n += 2;
     uint32_t l  = is_arc ? build_txt_arc(p + n) : build_txt_cmc(p + n);
     p[lp] = (uint8_t)(l >> 8); p[lp + 1] = (uint8_t)l;
@@ -697,7 +711,7 @@ static void send_response(uint32_t want)
         char inst[MDNS_INST_MAX];
         chan_inst(inst, sizeof(inst), want_idx);
         n = put_srv(p, n, inst, DANTE_PORT_FLOWS); answers++;   // SRV port 4455
-        n = put_rr_head(p, n, inst, DNS_T_TXT, DNS_C_IN, MDNS_TTL);
+        n = put_rr_head(p, n, inst, DNS_T_TXT, DNS_C_IN_FLUSH, MDNS_TTL_TXT);
         { uint32_t lp = n; n += 2;
           uint32_t l = build_txt_chan(p + n, want_idx);
           p[lp] = (uint8_t)(l >> 8); p[lp+1] = (uint8_t)l; n += l; }
@@ -707,7 +721,7 @@ static void send_response(uint32_t want)
         char inst[MDNS_INST_MAX];
         bund_inst(inst, sizeof(inst), want_idx);
         n = put_srv(p, n, inst, DANTE_PORT_MEDIA); answers++;   // SRV port 4321
-        n = put_rr_head(p, n, inst, DNS_T_TXT, DNS_C_IN, MDNS_TTL);
+        n = put_rr_head(p, n, inst, DNS_T_TXT, DNS_C_IN_FLUSH, MDNS_TTL_TXT);
         { uint32_t lp = n; n += 2;
           uint32_t l = build_txt_bund(p + n, want_idx);
           p[lp] = (uint8_t)(l >> 8); p[lp+1] = (uint8_t)l; n += l; }
