@@ -187,6 +187,48 @@ static void send_heartbeat(void)
     put_u32(p, n, 0);       n += 4;
     put_u32(p, n, 0);       n += 4;
 
+    // 0x8003 / 0x8004: emitted LAST, deliberately.
+    //
+    // Both begin with a count that scales the record. That count was why these
+    // were left out earlier -- guessing it wrong makes a receiver mis-parse
+    // every record AFTER it, because records are length-delimited and read in
+    // sequence. Putting them at the end bounds that risk to themselves.
+    //
+    // The count now has evidence behind it rather than being a guess: the A16R
+    // is a 16-channel device and sends 2, and 16/8 = 2 flows (Dante's
+    // MAX_CHANNELS_IN_FLOW is 8). The other device on the bench sends 32, which
+    // is consistent with the same rule for a larger box. Our 48 channels give 6.
+    //
+    // 0x8003 carries the sample rate (the A16R's 0x0000bb80 = 48000) followed
+    // by one word per flow; 0x8004 is one word per flow with no preamble. Both
+    // are all-zero past those on real hardware.
+    const uint16_t nflows = DANTE_TX_CHANNELS / 8;
+
+    put_u16(p, n, (uint16_t)(12 + 8 + 4 + 4 * nflows)); n += 2;
+    put_u16(p, n, 0x8003);  n += 2;
+    put_u16(p, n, 4);       n += 2;
+    put_u16(p, n, (uint16_t)(8 + 4 + 4 * nflows)); n += 2;
+    put_u16(p, n, seqnum);  n += 2;
+    put_u16(p, n, 0);       n += 2;
+    put_u16(p, n, nflows);  n += 2;
+    put_u16(p, n, 0);       n += 2;
+    put_u16(p, n, 0x0018);  n += 2;
+    put_u16(p, n, 0);       n += 2;
+    put_u32(p, n, 48000);   n += 4;                  // sample rate
+    for (uint16_t i = 0; i < nflows; i++) { put_u32(p, n, 0); n += 4; }
+
+    put_u16(p, n, (uint16_t)(12 + 8 + 4 * nflows)); n += 2;
+    put_u16(p, n, 0x8004);  n += 2;
+    put_u16(p, n, 4);       n += 2;
+    put_u16(p, n, (uint16_t)(8 + 4 * nflows)); n += 2;
+    put_u16(p, n, seqnum);  n += 2;
+    put_u16(p, n, 0);       n += 2;
+    put_u16(p, n, nflows);  n += 2;
+    put_u16(p, n, 0);       n += 2;
+    put_u16(p, n, 0x0014);  n += 2;
+    put_u16(p, n, 0);       n += 2;
+    for (uint16_t i = 0; i < nflows; i++) { put_u32(p, n, 0); n += 4; }
+
     put_u16(p, 2, (uint16_t)n);          // total_length
 
     if (net_udp_commit(grp_heartbeat, DANTE_PORT_HEARTBEAT,
