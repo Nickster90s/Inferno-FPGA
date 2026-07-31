@@ -444,6 +444,13 @@ static int match_bund_inst(const char *q, unsigned *idx)
 #define W_BUND_ONE  (1u << 11)
 static unsigned want_idx;          // 1-based channel or bundle for W_*_ONE
 
+// The question to echo back, captured from the query. Real devices DO echo it:
+// a working A16R channel reply carries qdcount=1, while ours carried 0. mDNS
+// responses usually omit the question, but we are matching what actually
+// resolves on this network rather than what the RFC permits.
+static const uint8_t *echo_q;
+static uint32_t       echo_q_len;
+
 static void send_response(uint32_t want)
 {
     if (!want) return;
@@ -454,11 +461,17 @@ static void send_response(uint32_t want)
 
     p[0] = 0; p[1] = 0;                   // transaction id: 0 for mDNS
     p[2] = 0x84; p[3] = 0x00;             // response + authoritative
-    p[4] = 0; p[5] = 0;                   // qdcount
+    p[4] = 0; p[5] = 0;                   // qdcount, patched below
     p[6] = 0; p[7] = 0;                   // ancount, patched below
     p[8] = 0; p[9] = 0;                   // nscount
-    p[10] = 0; p[11] = 0;                 // arcount
+    p[10] = 0; p[11] = 0;                 // arcount, patched below
     n = 12;
+
+    if (echo_q && echo_q_len && echo_q_len < 300) {
+        memcpy(p + n, echo_q, echo_q_len);
+        n += echo_q_len;
+        p[4] = 0; p[5] = 1;               // qdcount = 1
+    }
 
     if (want & W_SERVICES) { n = put_ptr(p, n, n_services, n_arc_svc); answers++;
                              n = put_ptr(p, n, n_services, n_cmc_svc); answers++; }
@@ -468,7 +481,12 @@ static void send_response(uint32_t want)
     if (want & W_CMC_PTR)  { n = put_ptr(p, n, n_cmc_svc, n_cmc_inst); answers++; }
     if (want & W_CMC_SRV)  { n = put_srv(p, n, n_cmc_inst, DANTE_PORT_CMC); answers++; }
     if (want & W_CMC_TXT)  { n = put_txt(p, n, n_cmc_inst, 0); answers++; }
-    if (want & W_A)        { n = put_a(p, n); answers++; }
+    // The A record goes in ADDITIONAL, not ANSWERS. The A16R answers a channel
+    // query with 2 answers (SRV + TXT) and 1 additional (A); we were putting
+    // all three in ANSWERS, and a resolver that expects the address as
+    // supporting data can reject the record it came with -- which reads on the
+    // far side as "cannot find this channel on the network".
+    uint16_t additional = 0;
 
     // Channel / bundle records, synthesised on demand.
     //
@@ -511,7 +529,10 @@ static void send_response(uint32_t want)
         answers++;
     }
 
-    p[6] = (uint8_t)(answers >> 8); p[7] = (uint8_t)answers;
+    if (want & W_A) { n = put_a(p, n); additional++; }
+
+    p[6]  = (uint8_t)(answers >> 8);    p[7]  = (uint8_t)answers;
+    p[10] = (uint8_t)(additional >> 8); p[11] = (uint8_t)additional;
 
     if (net_udp_commit(mdns_group, MDNS_PORT, MDNS_PORT, n, NET_TOS_BEST_EFFORT) == 0)
         g_mdns_stats.tx_responses++;
@@ -543,12 +564,19 @@ static void mdns_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     uint32_t off  = 12;
     uint32_t want = 0;
     char     qname[128];
+    echo_q = 0; echo_q_len = 0;
 
     for (uint16_t q = 0; q < qdcount && off < len; q++) {
         off = name_decode(msg, len, off, qname, sizeof(qname));
         if (!off || off + 4 > len) return;
         uint16_t qtype = (uint16_t)((msg[off] << 8) | msg[off + 1]);
+        uint32_t qstart = 0;
+        { /* the whole question record, for the echo */
+            uint32_t nlen = off - 12;
+            (void)nlen; qstart = 12;
+        }
         off += 4;                                   // qtype + qclass
+        if (!echo_q_len) { echo_q = msg + qstart; echo_q_len = off - qstart; }
 
         int any = (qtype == DNS_T_ANY);
 
