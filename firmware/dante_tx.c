@@ -328,6 +328,7 @@ typedef struct {
     uint8_t  mcast;        // 1 = multicast bundle, 0 = unicast to a receiver
     uint16_t ext_id;       // flow id Dante Controller uses for this flow
     uint16_t chans[8];     // slot -> tx channel, 1-based, 0 = silent slot
+    uint8_t  dmac[6];      // what we actually bound as the destination MAC
 } flow_slot_t;
 static flow_slot_t flows[N_FLOWS];
 
@@ -441,6 +442,7 @@ int dante_tx_bind_unicast(const uint8_t peer_ip[4], const uint8_t dst_ip[4],
                f, dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3], dst_port, nslots, fpp);
     }
     for (int i = 0; i < 4; i++) flows[f].dst[i] = dst_ip[i];
+    for (int i = 0; i < 6; i++) flows[f].dmac[i] = dmac[i];
     flows[f].dport  = dst_port;
     flows[f].nslots = nslots;
     flows[f].fpp    = fpp;
@@ -613,4 +615,13 @@ int dante_tx_mcast_enum(unsigned n, uint16_t *id)
         if (k++ == n) { *id = flows[i].ext_id; return 1; }
     }
     return 0;
+}
+
+// Report the destination MAC a context was bound with. Two flows emitting at
+// exactly the right combined rate but only one receiver hearing audio points at
+// per-context header state, and this is the field that cannot be checked from
+// the build host: unicast is forwarded only to its destination port.
+void dante_tx_flow_mac(unsigned f, uint8_t mac[6])
+{
+    for (int i = 0; i < 6; i++) mac[i] = (f < N_FLOWS) ? flows[f].dmac[i] : 0;
 }

@@ -12,6 +12,7 @@
 #include "dante_tx.h"
 #include "ptpv1.h"
 #include "dante_flows.h"
+#include "dante_tx.h"
 #include <generated/csr.h>
 #include <stdio.h>
 
@@ -56,6 +57,12 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         put32(p, n, iu);  n += 4;
         put32(p, n, age); n += 4;
         put32(p, n, rb);  n += 4;
+        uint8_t mac[6]; dante_tx_flow_mac(f, mac);
+        put32(p, n, ((uint32_t)mac[0]<<24)|((uint32_t)mac[1]<<16)|
+                    ((uint32_t)mac[2]<<8)|mac[3]);          n += 4;
+        put32(p, n, ((uint32_t)mac[4]<<8)|mac[5]);          n += 4;
+        uint8_t iu2; uint32_t a2, r2;
+        (void)iu2; (void)a2; (void)r2;
     }
 
     net_udp_commit(src_ip, src_port, STATS_PORT, n, NET_TOS_BEST_EFFORT);
