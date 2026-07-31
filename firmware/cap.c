@@ -28,7 +28,7 @@
 // 64 x 256 B ~= 16.6 KB. 256 bytes holds a full ARC response header plus the
 // start of its payload, which is what identifies an exchange; the recorded
 // length field still reports the true on-wire size when truncated.
-#define CAP_N      64
+#define CAP_N      128
 #define CAP_BYTES  256
 
 // Trigger and delivery ports. The host sends anything to CAP_REQ_PORT and the
@@ -127,8 +127,26 @@ void cap_record(uint8_t dir, const uint8_t *frame, uint32_t len)
         }
     }
 
-    int inbound_unicast = (!dir && len >= 34 && frame[30] < 224);
-    if (!inbound_unicast && !cap_is_control(frame, len)) return;
+    // IPv4 ONLY, and this check must come FIRST.
+    //
+    // The two tests below used to read frame[30] -- an IP destination byte --
+    // without ever checking the ethertype. On a non-IP frame that byte is
+    // arbitrary payload, so it was almost always < 224: every L2 frame passed
+    // the inbound-unicast catch-all AND missed the multicast exclusion. An AVB
+    // device on the bench emits gPTP (0x88f7) and MVRP/MMRP (0x88f5/0x88f6)
+    // faster than 1 Hz, so the ring held 62 of those out of 64 entries and
+    // wrapped every ~20 s. Every "the receiver sent us nothing" reading taken
+    // through this ring was measuring an empty ring, not an idle network.
+    //
+    // The whole Dante control plane is IPv4/UDP, so nothing of interest is lost.
+    if (len < 34 || frame[12] != 0x08 || frame[13] != 0x00) return;
+
+    // L2 group bit, not a guess at the IP address. frame[0] bit 0 is set for
+    // every multicast and broadcast destination MAC, which is the actual
+    // question being asked and cannot be fooled by payload bytes.
+    int unicast = (frame[0] & 0x01) == 0;
+
+    if (!(!dir && unicast) && !cap_is_control(frame, len)) return;
 
     // UNICAST ONLY, in both directions.
     //
@@ -141,7 +159,7 @@ void cap_record(uint8_t dir, const uint8_t *frame, uint32_t len)
     // What the host CANNOT see is unicast between the controller and this
     // board, because the switch forwards it only to the destination port. That
     // is the entire reason this ring exists, so that is all it now keeps.
-    if (len >= 34 && frame[30] >= 224 && frame[30] <= 239) return;
+    if (!unicast) return;
 
     // RING, not stop-when-full. The old first-N behaviour was right for a boot
     // handshake; here the interesting traffic happens when someone clicks in
