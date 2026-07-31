@@ -179,10 +179,12 @@ a bit-exact MSB-justified truncation with no gain stage, so it cannot create
 clipping that is not already in the source — but this has not been verified at
 high level, because it needs a multicast flow to make the payload visible.
 
-**USB has not been retested** on the current gateware. The packetizer changed
-substantially during the unicast work (per-flow channel maps, slot counts and
-fpp); the USB ingress path did not, but the plan calls for a hardware USB check
-at every gateware change and that has not been done.
+**USB is only partly retested** on the current gateware. The device enumerates
+as `N-Series USB 48CH` and 2 channels were verified end to end after the unicast
+gateware work. All 48 have NOT been exercised on this bitstream — the historical
+failure mode in this lineage was 48-channel-specific (channel rotation after a
+dropped sample, fixed by channel-addressed ingress), so a 2-channel pass does
+not clear it.
 
 ---
 
