@@ -513,7 +513,18 @@ static void info_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     case 0x60: case 0x61: send_device_info (src_ip, src_port); break;
     case 0xc0: case 0xc1: send_product_info(src_ip, src_port); break;
     case 0x13:            send_network_info(src_ip, src_port); break;
-    case 0x21:            send_clock_stats (src_ip, src_port, req); break;
+    // Clock stats goes to the DEVICE-INFO MULTICAST GROUP, not back to the
+    // requester. inferno sends it to device_info_destination like every other
+    // info message, and this deviated from that by replying unicast.
+    //
+    // Which matters, because it explains the whole symptom. Our device/product/
+    // network info reach DC as the 3 s multicast ANNOUNCEMENTS -- and those DC
+    // ingests happily, the Device Info tab is fully populated. Clock stats is
+    // the one message we only ever sent unicast on request, and it is the one
+    // DC never acted on: the exchange completed, the content was correct
+    // (LOCKED, right ppb, right master clock id), and the clock columns stayed
+    // at PTPv2 Domain 0 / Priority 0/0 with v1 N/A.
+    case 0x21:            send_clock_stats (grp_devinfo, DANTE_PORT_INFO, req); break;
     default:
         // Log unknowns: DC's requests to us are unicast and therefore invisible
         // to host-side capture, so the console is the only place they show up.
