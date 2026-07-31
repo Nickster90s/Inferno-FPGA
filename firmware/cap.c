@@ -72,9 +72,10 @@ static int cap_is_control(const uint8_t *f, uint32_t len)
         4440,   // ARC   — routing/control, where DC asks the questions
         8800,   // CMC
         8700,   // info request / clock stats
-        4455,   // flow control
+        4455,   // flow control -- the unicast setup lands here
         319, 320 // PTPv1 event/general
     };
+
     int hit = 0;
     for (unsigned i = 0; i < sizeof(ports) / sizeof(ports[0]); i++)
         if (sp == ports[i] || dp == ports[i]) { hit = 1; break; }
@@ -102,7 +103,14 @@ static int cap_is_control(const uint8_t *f, uint32_t len)
 
 void cap_record(uint8_t dir, const uint8_t *frame, uint32_t len)
 {
-    if (!cap_is_control(frame, len)) return;
+    // Anything INBOUND UNICAST is worth recording regardless of port: a
+    // transmitter setting up a unicast flow may use a port we do not bind and
+    // therefore would not think to look for, and missing the one packet that
+    // explains the negotiation defeats the point of capturing. Multicast is
+    // excluded below, so this cannot flood the ring; outbound still goes
+    // through the control-plane port filter.
+    int inbound_unicast = (!dir && len >= 34 && frame[30] < 224);
+    if (!inbound_unicast && !cap_is_control(frame, len)) return;
 
     // UNICAST ONLY, in both directions.
     //

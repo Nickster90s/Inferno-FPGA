@@ -304,7 +304,9 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     }
 
     case OP_GET_RX_CHANNELS: {
-        // Transmit-only device: an empty page, not an error.
+        // Empty page, not an error. The 2-channel version of this crashed Dante
+        // Controller -- see dante_dev.h. Restore only after diffing a real
+        // device's 0x3000 reply.
         page_t pg;
         page_begin(&m, &pg, 8, 0);
         page_end(&m, &pg);
@@ -334,6 +336,18 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     case OP_UNKNOWN_1102:
         dante_msg_bytes(&m, arc_1102_body, sizeof(arc_1102_body));
         break;
+
+    // 0x3010 / 0x3014 -- RX channel subscription state. These only appear once
+    // a device advertises RX channels, which is why a transmit-only build never
+    // saw them and the plan said not to implement them.
+    //
+    // DC shows "Null@" and refuses to patch when they error. The correct answer
+    // is OK with NO content, which is exactly what DVS returns (measured with
+    // tools/arc_query.py: 0x3010 -> OK len=0, 0x3014 -> OK len=0). An empty
+    // subscription list is a valid answer; an error is not.
+    case 0x3010:
+    case 0x3014:
+        break;                      // code stays DANTE_CODE_OK, zero content
 
     case OP_UNKNOWN_2320:
         code = 0x30;
