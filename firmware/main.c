@@ -535,17 +535,19 @@ static void check_uart_cmd(void)
                    (unsigned long)((uint64_t)(cepo - pr_epo) * 1000u / dms));
             pr_rxb = crxb; pr_epo = cepo; pr_ms = now; pr_pkts = cpkts;
             }
-            uint32_t gw_pres = aaf_pkt_dbg_last_pres_read();
-            uint32_t gw_gptp = aaf_pkt_dbg_emit_gptp_read();
-            int32_t  eff_off = (int32_t)(gw_pres - gw_gptp);
+            // Dante stamps a SAMPLE INDEX, not a presentation time, so the
+            // old pres-vs-gPTP instrument has no meaning here. What matters now
+            // is that the emitted index advances by exactly fpp per packet.
+            uint32_t gw_ts  = aaf_pkt_dbg_last_ts_read();
+            uint32_t gw_sec = aaf_pkt_dbg_last_sec_read();
             // Gateware packetizer + USB ingress health. The firmware-side AAF
             // software TX/RX counters are gone with aaf.c; what remains is the
             // authoritative view: what the gateware actually put on the wire
             // and how the USB ring is tracking. Phase 5 renames aaf_pkt_* to
             // dante_pkt_* and drops pres/gptp (Dante stamps sec+subsec instead).
             printf("\n[PKT] gw: en=%d pkts=%lu underrun=%lu ovr=%lu fifo=%lu\n"
-                   "  usb: fifo_ovf=%lu level=%ld fbovr=0x%lx step=0x%lx inc=%lu calls=%lu\n"
-                   "  pres(gw)=%08lx gptp@emit=%08lx eff_offset=%ld ns (expect ~%d)\n",
+                   "  usb: fifo_ovf=%lu level=%ld fbovr=0x%lx inc=%lu calls=%lu\n"
+                   "  dante ts = %lu.%lu (sec.subsec_samples)\n",
                    aaf_gw_enabled,
                    (unsigned long)aaf_pkt_packet_count_read(),
                    (unsigned long)aaf_pkt_underrun_count_read(),
@@ -554,13 +556,9 @@ static void check_uart_cmd(void)
                    (unsigned long)main_usb_sample_overflow_read(),
                    (long)mcr.usb_last_level,
                    (unsigned long)main_usb_fb_ovr_read(),
-                   (unsigned long)aaf_pkt_src_step_read(),
                    (unsigned long)mcr.current_increment,
                    (unsigned long)usb_lock_calls,
-                   (unsigned long)gw_pres,
-                   (unsigned long)gw_gptp,
-                   (long)eff_off,
-                   AAF_PRESENTATION_OFFSET_NS);
+                   (unsigned long)gw_sec, (unsigned long)gw_ts);
             break;
         case 'f': {
             usb_nco_freeze = !usb_nco_freeze;
@@ -666,15 +664,16 @@ static void check_uart_cmd(void)
             printf("[CFG] stale AVB CRF binding cleared from NV + MCR unbound.\n");
             break;
         case 'P': {
-            // Sweep the AAF presentation-time offset (ns) to chase AxC "Late
-            // Timestamp": +1 ms per press, wrap 2..10 ms. Larger offset = more
-            // listener headroom (absorbs bridge queuing under the 6-stream load).
-            static uint32_t po = AAF_PRESENTATION_OFFSET_NS;   // 2 ms reset
-            po += 1000000;
-            if (po > 10000000) po = 2000000;
-            aaf_pkt_pres_offset_write(po);
-            printf("[AAF] pres_offset = %lu ns (%lu ms)\n",
-                   (unsigned long)po, (unsigned long)(po / 1000000));
+            // Sweep the Dante timestamp offset, in SAMPLES (was the AAF
+            // presentation offset in ns). Steps by a quarter packet and wraps
+            // through zero; deliberately spans NEGATIVE values, because
+            // flows_tx.rs:44 wants our clock in the past, not the future.
+            static int32_t ts_off = DANTE_TX_TS_OFFSET;
+            ts_off -= 4;
+            if (ts_off < -64) ts_off = 0;
+            aaf_pkt_ts_offset_write((uint32_t)ts_off);
+            printf("[dtx] ts_offset = %ld samples (%ld us)\n",
+                   (long)ts_off, (long)ts_off * 1000000 / 48000);
             break;
         }
         case 'h':
@@ -713,40 +712,12 @@ static void check_uart_cmd(void)
 // 8-entry channel map, instead of {dst_mac, stream_id}.
 static void aaf_gw_push_binding(void)
 {
-    // Shared across all 6 time-mux streams: src_mac + VLAN TCI.
-    // PCP 3 / VID 2 = AVB Class A, as the bridge expects.
-    aaf_pkt_src_mac_hi_write(((uint32_t)mac_addr[0] << 8) | mac_addr[1]);
-    aaf_pkt_src_mac_lo_write(((uint32_t)mac_addr[2] << 24) |
-                             ((uint32_t)mac_addr[3] << 16) |
-                             ((uint32_t)mac_addr[4] <<  8) |
-                              (uint32_t)mac_addr[5]);
-    aaf_pkt_vlan_tci_write((3u << 13) | 2u);
-
-    // Per-stream dst_mac + stream_id, written into the gateware's indirect
-    // context (ctx_select=s, then the data regs). The packetizer latches
-    // dmac[s] on the dst_mac_lo write and stream_id[s] on the stream_id_lo
-    // write, so those must come LAST in each context.
-    //
-    // stream_id[s] = MAC + 00:s          (unique per stream)
-    // dst_mac[s]   = 91:E0:F0:00:FE:(mac[5] & 0xF8 | s)   (6 SR multicasts)
-    for (int s = 0; s < N_AAF_STREAMS; s++) {
-        uint8_t dmac5 = (uint8_t)((mac_addr[5] & 0xF8) | s);
-        aaf_pkt_ctx_select_write(s);
-        aaf_pkt_dst_mac_hi_write(((uint32_t)0x91 << 8) | 0xE0);
-        aaf_pkt_dst_mac_lo_write(((uint32_t)0xF0 << 24) |
-                                 ((uint32_t)0x00 << 16) |
-                                 ((uint32_t)0xFE <<  8) |
-                                  (uint32_t)dmac5);
-        aaf_pkt_stream_id_hi_write(((uint32_t)mac_addr[0] << 24) |
-                                   ((uint32_t)mac_addr[1] << 16) |
-                                   ((uint32_t)mac_addr[2] <<  8) |
-                                    (uint32_t)mac_addr[3]);
-        aaf_pkt_stream_id_lo_write(((uint32_t)mac_addr[4] << 24) |
-                                   ((uint32_t)mac_addr[5] << 16) |
-                                   ((uint32_t)0x00       <<  8) |
-                                    (uint32_t)s);
-    }
-    // pres_offset keeps its 2 ms CSR reset value (= AAF_PRESENTATION_OFFSET_NS).
+    // DANTE PHASE 5: the flow binding moved to dante_tx.c, which knows the
+    // multicast groups, computes each IPv4 header checksum and writes the
+    // per-flow contexts. What used to live here -- AVTP stream_id, the SR-class
+    // 91:E0:F0 destination MACs and the Class A VLAN TCI -- has no Dante
+    // equivalent and the CSRs no longer exist.
+    dante_tx_init();
 }
 
 static void aaf_gw_set(uint8_t on)

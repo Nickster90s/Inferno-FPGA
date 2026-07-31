@@ -958,7 +958,7 @@ def main():
     parser.add_argument("--build",        action="store_true", help="Build bitstream.")
     parser.add_argument("--soft-only",    action="store_true", help="Generate software headers only (no P&R).")
     parser.add_argument("--load",         action="store_true", help="Load bitstream.")
-    parser.add_argument("--seed", default=5, type=int, help="nextpnr P&R seed. "
+    parser.add_argument("--seed", default=8, type=int, help="nextpnr P&R seed. "
         "PINNED to 5 for the CURRENT netlist (Phase 0.5 loader with phy_wait_link, "
         "loader.bin 8268 B). Chosen on WORST-CASE margin against the real "
         "requirements (sys>=50 with a >=55 build-reject floor, usb>=60, "
