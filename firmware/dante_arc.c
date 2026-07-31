@@ -469,8 +469,11 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
             dante_msg_u16(&m, 1);
             dante_msg_u16(&m, ns);                      // channels in this flow
             dante_msg_u16(&m, sock_off);
+            // The REAL map, not (ctx*8 + slot + 1). Deriving it from the
+            // context index reported a flow created for channels 1 and 2 as
+            // channels 9 and 10, because it landed in context 1.
             for (unsigned c = 0; c < ns; c++)
-                dante_msg_u16(&m, (uint16_t)((f - 1) * 8 + c + 1));   // 1-based
+                dante_msg_u16(&m, dante_tx_flow_chan(f - 1, c));
             dante_msg_u16(&m, names_off);               // footer
 
             put_u16_at(page_slot(&m, &pg), 0, descr_off);

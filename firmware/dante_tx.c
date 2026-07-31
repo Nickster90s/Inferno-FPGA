@@ -327,6 +327,7 @@ typedef struct {
     uint8_t  fpp;
     uint8_t  mcast;        // 1 = multicast bundle, 0 = unicast to a receiver
     uint16_t ext_id;       // flow id Dante Controller uses for this flow
+    uint16_t chans[8];     // slot -> tx channel, 1-based, 0 = silent slot
 } flow_slot_t;
 static flow_slot_t flows[N_FLOWS];
 
@@ -444,6 +445,7 @@ int dante_tx_bind_unicast(const uint8_t peer_ip[4], const uint8_t dst_ip[4],
     flows[f].nslots = nslots;
     flows[f].fpp    = fpp;
     flows[f].mcast  = 0;
+    for (unsigned i = 0; i < 8; i++) flows[f].chans[i] = (i < nslots) ? chans[i] : 0;
     flows[f].last_ms = now_ms;
     return f;
 }
@@ -503,6 +505,7 @@ int dante_tx_bind_multicast(uint16_t ext_id, const uint16_t *chans, uint8_t n)
     flows[f].dport = DANTE_PORT_MEDIA;
     flows[f].nslots = n; flows[f].fpp = 16; flows[f].mcast = 1;
     flows[f].ext_id = ext_id;
+    for (unsigned i = 0; i < 8; i++) flows[f].chans[i] = (i < n) ? chans[i] : 0;
     flows[f].last_ms = gptp_uptime_ms();
     printf("[dtx] multicast flow %u (ctx %d) -> %u.%u.%u.%u, %u ch\n",
            ext_id, f, dip[0], dip[1], dip[2], dip[3], n);
@@ -561,5 +564,53 @@ int dante_tx_unbind(unsigned f)
     aaf_pkt_ctx_select_write(f);
     aaf_pkt_flow_cfg_write(0);
     printf("[dtx] flow %u deleted\n", f);
+    return 0;
+}
+
+// The actual slot map, so 0x2200 reports what a flow really carries. It used to
+// report (ctx * 8 + slot + 1) -- derived from the CONTEXT INDEX -- so a flow
+// created for channels 1 and 2 in context 1 was reported as channels 9 and 10.
+uint16_t dante_tx_flow_chan(unsigned f, unsigned slot)
+{
+    if (f >= N_FLOWS || slot >= 8) return 0;
+    return flows[f].chans[slot];
+}
+
+// Is this tx channel carried by an active MULTICAST flow, and at which slot?
+// mdns.c needs it to advertise b.<flow>=<pos+1>, which is what makes a receiver
+// join the group instead of asking us for a unicast flow.
+int dante_tx_chan_bundle(uint16_t ch1, uint16_t *id, uint8_t *pos)
+{
+    for (unsigned i = 0; i < N_FLOWS; i++) {
+        if (!flows[i].in_use || !flows[i].mcast) continue;
+        for (unsigned c = 0; c < flows[i].nslots; c++)
+            if (flows[i].chans[c] == ch1) {
+                *id = flows[i].ext_id; *pos = (uint8_t)(c + 1); return 1;
+            }
+    }
+    return 0;
+}
+
+// Look up an active multicast flow by the id Dante Controller gave it, for the
+// _netaudio-bund record a receiver resolves after reading b.<flow>=.
+int dante_tx_mcast_by_id(uint16_t id, uint8_t ip[4], uint8_t *nslots)
+{
+    for (unsigned i = 0; i < N_FLOWS; i++) {
+        if (!flows[i].in_use || !flows[i].mcast || flows[i].ext_id != id) continue;
+        for (int k = 0; k < 4; k++) ip[k] = flows[i].dst[k];
+        *nslots = flows[i].nslots;
+        return 1;
+    }
+    return 0;
+}
+
+// Enumerate active multicast flow ids (for the bundle PTR sweep).
+int dante_tx_mcast_enum(unsigned n, uint16_t *id)
+{
+    unsigned k = 0;
+    for (unsigned i = 0; i < N_FLOWS; i++) {
+        if (!flows[i].in_use || !flows[i].mcast) continue;
+        if (k++ == n) { *id = flows[i].ext_id; return 1; }
+    }
     return 0;
 }

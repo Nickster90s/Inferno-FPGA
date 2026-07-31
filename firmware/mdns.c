@@ -419,11 +419,14 @@ static void chan_inst(char *dst, int max, unsigned ch1)   // ch1 = 1..48
     inst_name(dst, max, label, n_chan_svc);
 }
 
-static void bund_inst(char *dst, int max, unsigned b1)    // b1 = 1..6
+// b1 here is the DANTE CONTROLLER flow id, not a 1..6 bundle index, so the
+// record a receiver resolves from b.<flow>= matches what DC created.
+static void bund_inst(char *dst, int max, unsigned b1)
 {
     char label[8];
     int n = 0;
-    if (b1 >= 10) label[n++] = (char)('0' + b1 / 10);
+    if (b1 >= 100) label[n++] = (char)('0' + (b1 / 100) % 10);
+    if (b1 >= 10)  label[n++] = (char)('0' + (b1 / 10) % 10);
     label[n++] = (char)('0' + b1 % 10);
     label[n] = 0;
     inst_name(dst, max, label, n_bund_svc);
@@ -461,7 +464,32 @@ static uint32_t build_txt_chan(uint8_t *p, unsigned ch1)
     // advertising 48, which would have a receiver negotiate a 48-channel flow
     // against a device whose flows carry 8.
     n = txt_put_kv_u(p, n, "nchan=", 8);
-    // b.<bundle>=<pos> IS DELIBERATELY ABSENT -- this device is now unicast.
+    // b.<flow>=<pos> ONLY WHEN A MULTICAST FLOW ACTUALLY CARRIES THIS CHANNEL.
+    //
+    // mdns_client.rs takes the multicast path the moment ANY key starts with
+    // "b.", so this key must appear exactly when there is a real group to join
+    // and never otherwise. Advertising it unconditionally is what forced every
+    // subscription to multicast and put 65.5 Mbit/s of unwanted audio on the
+    // segment; omitting it entirely is why patching a channel that IS in a
+    // multicast flow still produced a unicast request.
+    //
+    // The id is the flow id Dante Controller assigned, so the bundle record a
+    // receiver resolves next is named the same thing DC shows in its UI.
+    {
+        uint16_t bid; uint8_t bpos;
+        if (dante_tx_chan_bundle((uint16_t)ch1, &bid, &bpos)) {
+            char kv[24]; int i = 0;
+            kv[i++] = 'b'; kv[i++] = '.';
+            if (bid >= 10) kv[i++] = (char)('0' + (bid / 10) % 10);
+            kv[i++] = (char)('0' + bid % 10);
+            kv[i++] = '=';
+            kv[i++] = (char)('0' + bpos);
+            kv[i] = 0;
+            n = txt_put(p, n, kv);
+        }
+    }
+
+    // Historical note -- this key used to be emitted unconditionally:
     //
     // mdns_client.rs takes the multicast path the moment ANY TXT key starts
     // with "b.", so advertising it forces every subscription to multicast.
@@ -480,13 +508,18 @@ static uint32_t build_txt_chan(uint8_t *p, unsigned ch1)
     return n;
 }
 
+// b1 is Dante Controller's flow id. The group address and channel count come
+// from the flow that is actually transmitting, not from a fixed bundle table --
+// a multicast flow can now carry any 1..8 channels, so nchan varies.
 static uint32_t build_txt_bund(uint8_t *p, unsigned b1)
 {
-    const uint8_t *ip = dante_tx_flow_ip(b1 - 1);
+    uint8_t ipbuf[4] = {0,0,0,0}; uint8_t ns = 8;
+    dante_tx_mcast_by_id((uint16_t)b1, ipbuf, &ns);
+    const uint8_t *ip = ipbuf;
     uint32_t n = 0;
     n = txt_put(p, n, "txtvers=1");
     n = txt_put_kv_u(p, n, "id=", b1);
-    n = txt_put(p, n, "nchan=8");
+    n = txt_put_kv_u(p, n, "nchan=", ns);
     n = txt_put(p, n, "latency_ns=1000000");
     n = txt_put(p, n, "fpp=16");
     n = txt_put(p, n, "rate=48000");
@@ -552,10 +585,12 @@ static int match_chan_inst(const char *q, unsigned *idx)
 static int match_bund_inst(const char *q, unsigned *idx)
 {
     if (!has_suffix(q, "._netaudio-bund._udp.local")) return 0;
+    // Only ACTIVE multicast flows have bundle records now.
     char inst[MDNS_INST_MAX];
-    for (unsigned b = 1; b <= N_BUNDLES; b++) {
-        bund_inst(inst, sizeof(inst), b);
-        if (ieq(q, inst)) { *idx = b; return 1; }
+    uint16_t id;
+    for (unsigned i = 0; dante_tx_mcast_enum(i, &id); i++) {
+        bund_inst(inst, sizeof(inst), id);
+        if (ieq(q, inst)) { *idx = id; return 1; }
     }
     return 0;
 }
@@ -647,8 +682,9 @@ static void send_response(uint32_t want)
     }
     if (want & W_BUND_PTR) {
         char inst[MDNS_INST_MAX];
-        for (unsigned b = 1; b <= N_BUNDLES; b++) {
-            bund_inst(inst, sizeof(inst), b);
+        uint16_t bid;
+        for (unsigned i = 0; dante_tx_mcast_enum(i, &bid); i++) {
+            bund_inst(inst, sizeof(inst), bid);
             n = put_ptr(p, n, n_bund_svc, inst); answers++;
         }
     }
