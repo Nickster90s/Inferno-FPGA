@@ -17,8 +17,9 @@ driver stack, no Dante Virtual Soundcard, no licensed Audinate module.
 > `fpp` and channel counts, sustained at exactly 9001 pps with zero underruns or
 > overruns. Multicast flows can be created and deleted from Dante Controller.
 >
-> **Known open bug:** with two receivers subscribed only ONE gets usable audio —
-> see [Open bugs](#open-bugs). Long-run hardening (Phase 6) has not been done.
+> Two receivers stream simultaneously at different `fpp` and channel counts.
+> Long-run hardening (Phase 6) has not been done; see [Open bugs](#open-bugs)
+> for what remains.
 
 ---
 
@@ -146,8 +147,13 @@ proportional to actual subscriptions (0.03 Mbit/s idle).
 
 ## Open bugs
 
-**Unicast reaches only one receiver** — *root cause found, fix flashed, awaiting
-confirmation.* No flow request ever arrived from the second receiver, so this
+**Unicast reaches only one receiver** — *FIXED and confirmed on the bench.*
+Two receivers now bind separate contexts and both play:
+
+    ctx 0: 00:1d:c1:a1:72:3c   ctx 1: 00:1d:c1:2d:4a:18
+    flows_active 2, rejected 0, 9015 pps, underrun +0, overrun +0
+
+ No flow request ever arrived from the second receiver, so this
 was never a transmit-side fault: the rate was already exactly 9001 pps
 (6000 + 3000) with both contexts emitting correctly.
 
