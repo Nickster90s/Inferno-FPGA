@@ -507,6 +507,9 @@ class DantePacketizer(LiteXModule):
         # from us go mad and fart" -- which is what ts_offset is for.
         ts_sec_emit = Signal(32)
         ts_sub_emit = Signal(32)
+        # Which half of a 16-sample period this tick is, latched at send_req.
+        # due_mask is derived from it further down, once cfg_arr exists.
+        tick_hi     = Signal()
 
         underruns = Signal(32)
         self.comb += [self.underrun_count.status.eq(underruns),
@@ -537,9 +540,16 @@ class DantePacketizer(LiteXModule):
                     # Latch the timestamp for THIS packet: the counter is about
                     # to land on the first sample of the NEXT packet, so the
                     # packet we are about to build starts fpp samples earlier.
-                    # Latch the RAW counter; each flow subtracts its own fpp-1
-                    # at build time, because flows of different fpp cover
-                    # different windows ending at this same instant.
+                    # DUE MASK. Pacing runs at the finest fpp (8), so a flow with
+                    # fpp=8 is due on every tick and one with fpp=16 only on the
+                    # tick where ts_sub[0:4] == 15 -- which, given the tick fires
+                    # at ts_sub[0:3] == 7, is exactly ts_sub[3] == 1.
+                    #
+                    # Without this every enabled flow emitted on every tick: an
+                    # fpp=16 flow transmitted at 6000 pps instead of 3000, in
+                    # overlapping 16-sample windows. The commit that introduced
+                    # per-flow fpp described this gating but did not contain it.
+                    tick_hi.eq(ts_sub[3]),
                     ts_sec_emit.eq(ts_sec),
                     ts_sub_emit.eq(ts_sub + self.ts_offset.storage),
                 ),
@@ -592,6 +602,14 @@ class DantePacketizer(LiteXModule):
         # TOTAL % 4 == 3. LAST_BE therefore stays the constant 0b0100 for every
         # flow shape, and N_WORDS = 13 + pay_len/4 needs no divider. That is luck
         # worth stating: had it not held, both would have been per-flow logic.
+        # A flow with fpp=8 is due on every tick; one with fpp=16 only on the
+        # tick where ts_sub[0:4] == 15, i.e. tick_hi. Stable for the whole block
+        # because tick_hi is latched at send_req.
+        # An Array, not a Signal: Migen cannot index a Signal with a Signal, and
+        # stream_idx is one.
+        due_arr = Array([Signal() for _ in range(streams)])
+        self.comb += [due_arr[i].eq((cfg_arr[i][0:4] != 0) & (~cfg_arr[i][4] | tick_hi))
+                      for i in range(streams)]
         cfg_now   = cfg_arr[stream_idx]
         nslots    = Signal(4)
         fpp16     = Signal()
@@ -869,7 +887,12 @@ class DantePacketizer(LiteXModule):
         # One state to look at the newly selected context before committing to
         # build it. stream_idx changed only last cycle, so flow_off is valid now.
         fsm.act("CHECK",
-            If(flow_off, NextState("SKIP")).Else(NextState("BUILD")),
+            # Skip a context that is unconfigured OR not due on this tick.
+            If(flow_off | ~due_arr[stream_idx],
+                NextState("SKIP"),
+            ).Else(
+                NextState("BUILD"),
+            ),
         )
         fsm.act("BUILD",
             Case(lane, {

@@ -414,6 +414,29 @@ int dante_tx_bind_unicast(const uint8_t peer_ip[4], const uint8_t dst_ip[4],
 void dante_tx_expire(void)
 {
     uint32_t now = gptp_uptime_ms();
+
+    // A PTP STEP IS NOT A TIMEOUT.
+    //
+    // gptp_uptime_ms() is derived from the PTP clock. It is meant to be
+    // monotonic across a step -- gptp_step_time() adds the jump to a bias -- but
+    // any residual discontinuity makes timestamps recorded BEFORE the step look
+    // arbitrarily old after it. The console showed exactly that: both flows
+    // expiring in the same instant, immediately after "[ptpv1] LOCKED" and a
+    // fresh anchor, with keepalives arriving normally 5 s apart.
+    //
+    // This poll runs far more often than once a second, so a gap that large is
+    // a clock event, not elapsed time. Re-stamp every flow and skip this round
+    // rather than tearing down healthy flows.
+    static uint32_t prev_now;
+    static uint8_t  have_prev;
+    if (have_prev && (now - prev_now) > 5000u) {
+        printf("[dtx] clock discontinuity (+%lu ms) -- not expiring flows\n",
+               (unsigned long)(now - prev_now));
+        for (unsigned i = 0; i < N_FLOWS; i++) flows[i].last_ms = now;
+        prev_now = now;
+        return;
+    }
+    prev_now = now; have_prev = 1;
     for (unsigned i = 0; i < N_FLOWS; i++) {
         if (!flows[i].in_use) continue;
         if ((now - flows[i].last_ms) < FLOW_TIMEOUT_MS) continue;
