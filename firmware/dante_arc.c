@@ -339,12 +339,39 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         code = 0x30;
         break;
 
+    // 0x2204 and 0x4100 are the two opcodes Dante Controller asks us for when
+    // the Clock Status tab is refreshed (seen in the board console; DC's
+    // requests are unicast, so no host-side capture can show them).
+    //
+    // Real hardware does NOT implement these either -- queried directly with
+    // tools/arc_query.py, both RedNets answer 0x2204 with code 0x0022 and
+    // 0x4100 with code 0x0030. What they do is ANSWER. We returned silence.
+    //
+    // That distinction is the bug. An error reply says "asked and answered, not
+    // supported"; no reply at all leaves DC waiting on a request that never
+    // completes, and it falls back to defaults -- which is what put PTPv2
+    // Domain 0 / Priority 0/0 in our row while the RedNets showed v1
+    // Leader/Follower.
+    case 0x2204:
+        code = 0x22;
+        break;
+
+    case 0x4100:
+        code = 0x30;
+        break;
+
     default:
+        // Answer anyway. The previous "silence beats a wrong answer" here was
+        // the wrong instinct for this protocol: every real device replies to
+        // every request, and a client cannot distinguish a dropped packet from
+        // a deliberate silence. 0x22 is what real hardware returns for an
+        // unsupported opcode.
         g_arc_stats.unknown++;
         if (g_arc_stats.unknown <= 12)
-            printf("[arc] unhandled opcode %#06x from %u.%u.%u.%u\n",
+            printf("[arc] unhandled opcode %#06x from %u.%u.%u.%u (answering 0x22)\n",
                    opcode, src_ip[0], src_ip[1], src_ip[2], src_ip[3]);
-        return;                                  // silence beats a wrong answer
+        code = 0x22;
+        break;
     }
 
     uint32_t total = dante_msg_finish(&m, code);
