@@ -403,13 +403,26 @@ int dante_tx_bind_unicast(const uint8_t peer_ip[4], const uint8_t dst_ip[4],
     // Re-bind an existing flow from the same peer rather than allocating a new
     // context: the ~5 s keepalive is the SAME request repeated, and treating
     // each one as a new flow would exhaust all six contexts in half a minute.
+    uint32_t now_ms = gptp_uptime_ms();
     int f = -1;
     for (unsigned i = 0; i < N_FLOWS; i++)
         if (flows[i].in_use && (flows[i].peer[0]==peer_ip[0] && flows[i].peer[1]==peer_ip[1] && flows[i].peer[2]==peer_ip[2] && flows[i].peer[3]==peer_ip[3])) { f = (int)i; break; }
     if (f < 0)
         for (unsigned i = 0; i < N_FLOWS; i++)
             if (!flows[i].in_use) { f = (int)i; break; }
-    if (f < 0) return -1;
+    if (f < 0) {
+        // All six taken by other peers: evict the least-recently-bound rather
+        // than refusing. This replaces timer expiry -- it reclaims a context
+        // only when one is actually needed, so it cannot fire spuriously the
+        // way a PTP-derived timeout did.
+        uint32_t oldest = 0; f = 0;
+        for (unsigned i = 0; i < N_FLOWS; i++) {
+            uint32_t age = now_ms - flows[i].last_ms;
+            if (age >= oldest) { oldest = age; f = (int)i; }
+        }
+        printf("[dtx] all contexts busy -- evicting %d\n", f);
+        flows[f].in_use = 0;
+    }
 
     write_ctx((unsigned)f, dst_ip, dmac, dst_port, chans, nslots, fpp);
 
@@ -420,44 +433,34 @@ int dante_tx_bind_unicast(const uint8_t peer_ip[4], const uint8_t dst_ip[4],
         printf("[dtx] flow %d -> %u.%u.%u.%u:%u, %u slots, fpp %u\n",
                f, dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3], dst_port, nslots, fpp);
     }
-    flows[f].last_ms = gptp_uptime_ms();
+    flows[f].last_ms = now_ms;
     return f;
 }
 
 void dante_tx_expire(void)
 {
-    uint32_t now = gptp_uptime_ms();
-
-    // A PTP STEP IS NOT A TIMEOUT.
+    // DELIBERATELY DOES NOTHING. Flows are never expired on a timer.
     //
-    // gptp_uptime_ms() is derived from the PTP clock. It is meant to be
-    // monotonic across a step -- gptp_step_time() adds the jump to a bias -- but
-    // any residual discontinuity makes timestamps recorded BEFORE the step look
-    // arbitrarily old after it. The console showed exactly that: both flows
-    // expiring in the same instant, immediately after "[ptpv1] LOCKED" and a
-    // fresh anchor, with keepalives arriving normally 5 s apart.
+    // Every timer-based version of this was wrong, because the only clock we
+    // have is derived from PTP and PTP steps. The console showed the cost
+    // plainly: at lock, both flows expired in the same instant, active dropped
+    // to zero, and the talker went ENABLED -> OFF -> ENABLED within seconds.
+    // Each toggle re-anchors the media clock and re-primes the ring, and THAT
+    // is the mangled audio at stream start -- not the ring level, which now
+    // sits at its centre through the whole hold-off. Multicast never showed it
+    // because multicast never gated on flows.
     //
-    // This poll runs far more often than once a second, so a gap that large is
-    // a clock event, not elapsed time. Re-stamp every flow and skip this round
-    // rather than tearing down healthy flows.
-    static uint32_t prev_now;
-    static uint8_t  have_prev;
-    if (have_prev && (now - prev_now) > 5000u) {
-        printf("[dtx] clock discontinuity (+%lu ms) -- not expiring flows\n",
-               (unsigned long)(now - prev_now));
-        for (unsigned i = 0; i < N_FLOWS; i++) flows[i].last_ms = now;
-        prev_now = now;
-        return;
-    }
-    prev_now = now; have_prev = 1;
-    for (unsigned i = 0; i < N_FLOWS; i++) {
-        if (!flows[i].in_use) continue;
-        if ((now - flows[i].last_ms) < FLOW_TIMEOUT_MS) continue;
-        flows[i].in_use = 0;
-        aaf_pkt_ctx_select_write(i);
-        aaf_pkt_flow_cfg_write(0);          // nslots = 0 -> builder skips it
-        printf("[dtx] flow %u expired (no keepalive)\n", i);
-    }
+    // Raising the timeout (16 s -> 45 s -> 5 min) never addressed it: the
+    // apparent gap after a step is tens of thousands of seconds, not seconds.
+    // Nor did the discontinuity guard, which compared consecutive polls and
+    // still missed it.
+    //
+    // Expiry is not needed for correctness. A context is reclaimed by peer IP
+    // when the same receiver refreshes, and when all six are taken a NEW peer
+    // evicts the least-recently-bound one (see dante_tx_bind_unicast). A
+    // departed receiver therefore costs one idle context and nothing else --
+    // and an idle context transmits nothing, because nslots stays set but the
+    // talker only ever sends to bound destinations.
 }
 
 // Turn a multicast bundle on: 8 consecutive channels at fpp 16, to the group
