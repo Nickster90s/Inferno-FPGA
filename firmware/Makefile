@@ -16,10 +16,15 @@ include $(SOC_DIRECTORY)/software/common.mak
 # Dante Phase 0 dropped srp.o (MSRP), avdecc.o (1722.1) and aaf.o (AVB audio
 # format) -- 31,936 B of .text (57%) and the 32,852 B aaf BSS block.
 # Parked in _avb_reference/firmware/.
+# Header dependencies. Without -MMD/-MP, editing a .h does NOT rebuild the .c
+# that includes it -- which cost a full flash-and-capture cycle chasing a
+# timestamp offset that had simply never been recompiled.
+DEPFLAGS := -MMD -MP
+
 OBJECTS = crt0.o main.o gptp.o mcr.o cfgflash.o config.o cap.o net.o dante_dev.o dante_msg.o mdns.o dante_arc.o dante_cmc.o dante_info.o ptpv1.o dante_tx.o
 
 # Add our source directory to includes
-CFLAGS += -I.
+CFLAGS += $(DEPFLAGS) -I.
 
 # Region sizes read from the generated regions.ld so they cannot drift from the
 # SoC. LiteX's own memusage tool is NOT used here: it assumes .text lives in
@@ -78,3 +83,5 @@ clean:
 	$(RM) $(OBJECTS) $(OBJECTS:.o=.d) firmware.elf firmware.bin firmware.elf.map .*~ *~
 
 .PHONY: all clean
+
+-include $(OBJECTS:.o=.d)
