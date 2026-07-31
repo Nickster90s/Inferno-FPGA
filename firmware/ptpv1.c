@@ -64,6 +64,7 @@
 // reason about. Slower than Sync on purpose -- path delay changes far more
 // slowly than offset.
 #define DELAY_REQ_MS        4000
+#define DELAY_REQ_FAST_MS   1000         // until the path delay is measured
 
 // Servo. Same shape as gptp.c's, retuned for the lower Sync rate.
 #define SERVO_KP_NUM        72
@@ -99,6 +100,12 @@
 // The addend is deliberately left UNTOUCHED during the window: the estimate is
 // only valid if our rate is constant across it.
 #define ACQ_WINDOW_NS       8000000000LL
+
+// How long to wait for a first path-delay measurement before locking without
+// one. Four DelayReq cadences: long enough that a healthy link always measures
+// it first, short enough that a device whose DelayResps never match still
+// becomes usable.
+#define PATH_DELAY_GRACE_MS 20000
 #define SERVO_INTEGRAL_MAX  100000000LL  // +-100 ms
 #define SERVO_STEP_NS       500000000LL  // step rather than slew beyond 500 ms
 #define LOCK_THRESHOLD_NS   500
@@ -140,6 +147,16 @@ static ptp_timestamp_t acq_t1_0, acq_t2_0;
 // calculation. Must stay RAW -- see the note in the DelayResp handler.
 static int64_t  last_t2_t1;
 static uint8_t  have_t2_t1;
+
+// TEMPORARY: why is mean_path_delay stuck at 0? Count each rejection path in
+// the DelayResp handler separately, so the answer is a number rather than a
+// theory. It measured 21.4-21.7 us earlier today, so something in the
+// acquisition rework regressed it.
+static uint32_t first_sync_ms;      // when we first heard the master
+
+static uint32_t dbg_dr_uuid, dbg_dr_port, dbg_dr_not3, dbg_dr_seq;
+static uint32_t dbg_dr_neg, dbg_dr_big, dbg_dr_ok;
+static int64_t  dbg_last_d, dbg_last_t4t3;
 
 // ---- TEMPORARY DIAGNOSTIC -- remove once RX timestamping is characterised ---
 //
@@ -355,13 +372,28 @@ static void servo_update(int64_t offset_ns)
     g_ptpv1.current_addend_full = (uint64_t)addend;
     gptp_set_addend_full(g_ptpv1.current_addend_full);
 
-    // NOTE: gating lock on mean_path_delay != 0 was tried here to suppress the
-    // single unlock/relock right after boot (the first DelayResp shifting the
-    // offset by the whole path delay). It prevented locking ENTIRELY, because
-    // mean_path_delay is currently stuck at 0 -- a separate bug, tracked below.
-    // Do not re-add this gate until the path delay is reliably measured.
+    // Hold lock off until the path delay is known -- but never indefinitely.
+    //
+    // mean_path_delay starts at 0, so the offset is computed without it and can
+    // look excellent until the first DelayResp lands and shifts it by the whole
+    // path delay at once. That is the single unlock/relock seen right after
+    // boot, and the size matches exactly:
+    //
+    //   [ptpv1] LOCKED, offset -60 ns
+    //   [ptpv1] unlocked, offset -13468 ns    <-- mean_path_delay 0 -> 13.6 us
+    //   [ptpv1] LOCKED, offset 413 ns
+    //
+    // A bare `mean_path_delay != 0` gate was tried first and was WRONG: when
+    // the delay estimate stalls at 0 the gate never opens and the device never
+    // locks at all. A clock that will not lock is far worse than one that
+    // flaps once, so the wait is now bounded -- past PATH_DELAY_GRACE_MS we
+    // lock anyway and accept the offset being short by the path delay, which
+    // is the behaviour we had before this gate existed.
     int64_t a = filtered < 0 ? -filtered : filtered;
-    if (a < LOCK_THRESHOLD_NS) {
+    uint32_t waited = gptp_uptime_ms() - first_sync_ms;
+    int delay_known = (g_ptpv1.mean_path_delay_ns != 0) ||
+                      (first_sync_ms && waited > PATH_DELAY_GRACE_MS);
+    if (a < LOCK_THRESHOLD_NS && delay_known) {
         if (++lock_streak >= LOCK_STREAK && !g_ptpv1.locked) {
             g_ptpv1.locked = 1;
             printf("[ptpv1] LOCKED, offset %lld ns\n", (long long)filtered);
@@ -468,6 +500,7 @@ static void ptpv1_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         memcpy(g_ptpv1.master_uuid, uuid, 6);
         g_ptpv1.master_port_id = rd16(p + 28);
         g_ptpv1.have_master    = 1;
+        if (!first_sync_ms) first_sync_ms = gptp_uptime_ms();
 
         // t2: our hardware RX timestamp for this frame, latched by the TSU and
         // popped by the dispatcher for this slot.
@@ -509,10 +542,10 @@ static void ptpv1_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         g_ptpv1.rx_delay_resp++;
         // Match on the requester fields, or we would consume another slave's
         // DelayResp -- they all arrive on the same multicast group.
-        if (!uuid_eq(body + 10, our_uuid)) return;
-        if (rd16(body + 16) != our_port_id) return;
-        if (!have_t3) return;
-        if (rd16(body + 18) != (uint16_t)(delay_req_seq - 1)) return;
+        if (!uuid_eq(body + 10, our_uuid)) { dbg_dr_uuid++; return; }
+        if (rd16(body + 16) != our_port_id)  { dbg_dr_port++; return; }
+        if (!have_t3)                        { dbg_dr_not3++; return; }
+        if (rd16(body + 18) != (uint16_t)(delay_req_seq - 1)) { dbg_dr_seq++; return; }
 
         t4.seconds     = rd32(body);
         t4.nanoseconds = rd32(body + 4);
@@ -530,8 +563,11 @@ static void ptpv1_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         int64_t t4_t3 = gptp_ts_diff_ns(t4, t3);
         if (!have_t2_t1) return;              // no Sync pair resolved yet
         int64_t d = (last_t2_t1 + t4_t3) / 2;
-        if (d < 0) d = 0;                     // negative delay is nonsense
+        dbg_last_d = d; dbg_last_t4t3 = t4_t3;
+        if (d < 0) { dbg_dr_neg++; d = 0; }   // negative delay is nonsense
+        if (d >= 10000000LL) dbg_dr_big++;
         if (d < 10000000LL) {                 // ignore absurd (>10 ms) outliers
+            dbg_dr_ok++;
             // SMOOTH, do not jump. The formula cancels our clock offset only if
             // that offset is the same at t2 and at t3, which holds once locked
             // but not while the servo is still moving -- so each raw estimate
@@ -570,7 +606,13 @@ void ptpv1_poll(void)
     uint32_t now = gptp_uptime_ms();
     if (!next_delay_req_ms || (int32_t)(now - next_delay_req_ms) >= 0) {
         if (g_ptpv1.have_master) send_delay_req();
-        next_delay_req_ms = now + DELAY_REQ_MS;
+        // Ask faster until the path delay is known. Lock now waits for that
+        // measurement (see servo_update), so at the steady 4 s cadence it
+        // gated lock at ~24 s; at 1 s it arrives during the frequency
+        // acquisition window and costs nothing. Path delay changes far more
+        // slowly than offset, so the fast rate is only for acquiring it.
+        next_delay_req_ms = now + (g_ptpv1.mean_path_delay_ns ? DELAY_REQ_MS
+                                                             : DELAY_REQ_FAST_MS);
     }
 
     // TEMPORARY: dump the (t1,t2) ring. See the note at dbg_ring.
@@ -593,12 +635,15 @@ void ptpv1_poll(void)
         // frame, which arrives on the sender's 3 kHz media-clock grid. That is
         // the shape of the 333.35 us quantisation we measured.
         {
-            extern uint32_t rx_ts_resyncs, g_lvl_pre, g_lvl_post;
-            const uint32_t v[4] = { g_lvl_pre,
-                                    g_lvl_post,
-                                    main_rx_ts_commit_count_read(),
-                                    rx_ts_resyncs };
-            for (int j = 0; j < 4; j++) {
+            const uint32_t v[8] = { g_ptpv1.rx_delay_resp,
+                                    dbg_dr_uuid | (dbg_dr_port << 16),
+                                    dbg_dr_not3,
+                                    dbg_dr_seq,
+                                    dbg_dr_neg | (dbg_dr_big << 16),
+                                    dbg_dr_ok,
+                                    (uint32_t)(int32_t)(dbg_last_d / 1000),
+                                    (uint32_t)(int32_t)(dbg_last_t4t3 / 1000) };
+            for (int j = 0; j < 8; j++) {
                 p[n++] = (uint8_t)(v[j] >> 24); p[n++] = (uint8_t)(v[j] >> 16);
                 p[n++] = (uint8_t)(v[j] >> 8);  p[n++] = (uint8_t)v[j];
             }
