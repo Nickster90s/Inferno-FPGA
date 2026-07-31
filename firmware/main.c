@@ -28,6 +28,7 @@
 #include "dante_cmc.h"
 #include "dante_info.h"
 #include "ptpv1.h"
+#include "dante_tx.h"
 
 // MAC address — locally administered, unique per device.
 // TODO: read from SPI flash or EEPROM in production.
@@ -866,6 +867,7 @@ int main(void)
     dante_info_set_gptp(&gptp);
     dante_info_init();
     ptpv1_init(mac_addr);
+    dante_tx_init();
     cap_init();
     mcr_init(&mcr, CONFIG_CLOCK_FREQUENCY, 48000);
     // Give MCR the gPTP handle so the free-running (cs=0) NCO is disciplined to
@@ -919,23 +921,11 @@ int main(void)
         // Gated on PTPv1 lock: our audio timestamps must sit on the same
         // timebase the receivers derive from the Dante Leader, or they cannot
         // align our packets and will drop them.
-        {
-            static uint8_t talker_on = 0;
-            uint8_t clock_ok = g_ptpv1.locked;
-            if (aaf_gw_enabled && clock_ok) {
-                if (!talker_on) {
-                    aaf_pkt_enable_write(1);
-                    talker_on = 1;
-                    printf("[main] clock locked -- talker enabled\n");
-                }
-            } else {
-                if (talker_on) {
-                    aaf_pkt_enable_write(0);
-                    talker_on = 0;
-                    printf("[main] talker OFF -- clock not locked\n");
-                }
-            }
-        }
+        // Owned by dante_tx.c now, which holds the same PTPv1-lock gate but
+        // also knows the flow bindings. aaf_gw_enabled still gates it, so the
+        // 'a' console command can still take the gateware out of the path.
+        if (aaf_gw_enabled) dante_tx_poll();
+        else if (dante_tx_enabled()) { aaf_pkt_enable_write(0); }
 
         // ---- USB rate matching ----------------------------------------------
         // Honest async feedback: the wrapper measures our own NCO-strobe-per-SOF

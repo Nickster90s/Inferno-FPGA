@@ -66,7 +66,7 @@ from rgmii_var_delay import LiteEthPHYRGMIIVar
 from liteeth.mac import LiteEthMAC
 from liteeth.core.ptp import LiteEthTSU
 
-from aaf_packetizer import AAFPacketizer, TXFrameArbiter
+from dante_packetizer import DantePacketizer, TXFrameArbiter
 
 from migen.genlib.fifo import SyncFIFO, AsyncFIFO
 
@@ -858,14 +858,20 @@ class AVBSoC(SoCCore):
         # stream — keeping the CPU out of the per-sample audio path. Paced by
         # mcr.sample_strobe, so when firmware servos the NCO to CRF (cs=1,
         # locked) the stream rate IS the CRF media clock (see module header).
-        self.submodules.aaf_pkt = aaf_pkt = AAFPacketizer(
+        # DANTE PHASE 5: the AAF packetizer becomes the Dante packetizer. Same
+        # 6x8 time-mux, same ring, same builder -- only the wire format differs.
+        # Kept as `aaf_pkt` so the surrounding USB feedback servo, arbiter wiring
+        # and CSR names are untouched; renaming it would churn every call site
+        # for no gain and break the firmware's csr accessors.
+        self.submodules.aaf_pkt = aaf_pkt = DantePacketizer(
             mcr               = self.mcr,
             tsu               = self.tsu.tsu,
             usb_sample_lo     = sample_lo_mux,   # A/B-muxed (Main/Backup)
             usb_sample_hi     = sample_hi_mux,
             usb_readable      = sample_rdy_mux,
-            channels          = 8,     # per AAF stream
-            streams           = 6,     # 6x8ch time-muxed = 48ch host -> 6 AAF talkers
+            channels          = 8,     # Dante MAX_CHANNELS_IN_FLOW
+            samples_per_packet= 16,    # fpp=16, as the bundle records advertise
+            streams           = 6,     # 6 multicast bundles = 48 ch
             fifo_depth        = 256,   # per-ring SRING_DEPTH = next_pow2(256*8) = 2048
                                        # samples = 5.3 ms. The old 64 (=512 samples=1.33ms)
                                        # was 8x SHALLOWER than the proven 8ch build's 10.7ms
