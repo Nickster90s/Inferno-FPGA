@@ -582,7 +582,30 @@ class DantePacketizer(LiteXModule):
         # =========================================================
         # 4) Builder FSM: bytes → frame_ram, then stream frame_ram → source
         # =========================================================
-        frame_ram = Array([Signal(32) for _ in range(N_WORDS)])
+        # FRAME RAM IN BRAM, not an Array of registers.
+        #
+        # AAF's 234-byte frame was 59 words; Dante's 435-byte frame is 109. As an
+        # Array that is a 109:1 32-bit read mux -- exactly the wide-mux structure
+        # that has repeatedly cost sys_clk on this flow, and it showed: the first
+        # seed sweep of this design put sys at 52.6/53.9 MHz against a 55 MHz
+        # build-reject floor, with 6 of 8 seeds stalling HeAP outright.
+        #
+        # One RAMB18 replaces the mux. The read is registered, so STREAM prefetches
+        # the next word rather than reading combinationally -- see rd_idx handling.
+        frame_mem = Memory(32, 128)
+        frame_wp  = frame_mem.get_port(write_capable=True)
+        frame_rp  = frame_mem.get_port(async_read=False)
+        self.specials += frame_mem, frame_wp, frame_rp
+        rd_idx_next = Signal(max=128)
+        fr_we   = Signal()
+        fr_adr  = Signal(max=128)
+        fr_dat  = Signal(32)
+        self.comb += [
+            frame_wp.adr.eq(fr_adr), frame_wp.dat_w.eq(fr_dat), frame_wp.we.eq(fr_we),
+            # Registered read: present rd_idx now, address rd_idx+1 so the next
+            # beat's data is already latched when source.ready consumes this one.
+            frame_rp.adr.eq(rd_idx_next),
+        ]
         byte_idx  = Signal(max=TOTAL + 1)
         wacc      = Signal(24)            # holds lanes 0..2 of the in-progress word
         rd_idx    = Signal(max=N_WORDS)
@@ -688,7 +711,7 @@ class DantePacketizer(LiteXModule):
                 2: NextValue(wacc[16:24], cur_byte),
             }),
             If(commit_full,
-                NextValue(frame_ram[widx], Cat(wacc, cur_byte)),
+                fr_we.eq(1), fr_adr.eq(widx), fr_dat.eq(Cat(wacc, cur_byte)),
             ),
             # BRAM ring read pipeline (verified sim_sring.py), overlapped with the
             # header so the first payload sample is ready at byte 42:
@@ -715,18 +738,31 @@ class DantePacketizer(LiteXModule):
             If(is_last,
                 # Final word (rem=3 → lanes 0,1,2 valid). wacc[0:8]=byte432,
                 # cur_byte=byte233; zero-pad the rest.
-                NextValue(frame_ram[LAST_IDX],
-                          Cat(wacc[0:8], cur_byte, Constant(0, 32 - rem * 8))
+                fr_we.eq(1), fr_adr.eq(LAST_IDX),
+                fr_dat.eq(Cat(wacc[0:8], cur_byte, Constant(0, 32 - rem * 8))
                           if rem else Cat(wacc, cur_byte)),
                 NextValue(rd_idx, 0),
-                NextState("STREAM"),
+                NextState("PREFETCH"),
             ).Else(
                 NextValue(byte_idx, byte_idx + 1),
             ),
         )
+        # One cycle to let the registered BRAM read land before the first beat.
+        fsm.act("PREFETCH",
+            NextState("STREAM"),
+        )
+        # Read address leads the presented word by one, except while PREFETCH is
+        # loading word 0 into the output register.
+        self.comb += If(fsm.ongoing("PREFETCH"),
+            rd_idx_next.eq(0),
+        ).Elif(fsm.ongoing("STREAM") & source.ready,
+            rd_idx_next.eq(rd_idx + 1),
+        ).Else(
+            rd_idx_next.eq(rd_idx),
+        )
         fsm.act("STREAM",
             source.valid.eq(1),
-            source.data.eq(frame_ram[rd_idx]),
+            source.data.eq(frame_rp.dat_r),
             source.last.eq(rd_idx == LAST_IDX),
             If(rd_idx == LAST_IDX,
                 source.last_be.eq(LAST_BE),
