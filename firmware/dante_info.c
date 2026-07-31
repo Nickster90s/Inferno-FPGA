@@ -341,6 +341,86 @@ static void send_product_info(const uint8_t *dst_ip, uint16_t dst_port)
 // the same value, which is easy to miss.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Clock stats (request opcode byte 0x21 -> reply 0x0020)
+//
+// THE MISSING PIECE behind Dante Controller showing us as a PTPv2 device.
+//
+// DC's Clock Status tab showed InfernoFPGA with "PTPv2 Domain 0 / Priority 0/0"
+// and N/A under Primary v1 Multicast, while the two RedNets showed v1
+// Leader/Follower with the PTPv2 columns N/A. Exactly inverted. DC was looking
+// for us in the v2 clock domain, where we do not participate -- which is why
+// getting the PTPv1 offset down to 290 ns (parity with the A16R's 218 ns)
+// changed nothing on screen, and why replaying a real device's ARC property
+// tables byte for byte changed nothing either.
+//
+// This reply is what tells DC we are a v1 FOLLOWER and *whose* follower: it
+// carries the master clock id. With no reply DC has no v1 clock state for us at
+// all and falls back to defaults -- which read as PTPv2, domain 0, priority 0/0.
+//
+// It is REQUEST-DRIVEN, never unsolicited: 45 s of multicast capture shows the
+// RedNets sending heartbeats and nothing else on 8702. DC's request is unicast
+// to us on 8700, which is precisely the traffic this host cannot sniff (the
+// switch forwards unicast only to the destination port), so the request never
+// appeared in any capture -- only in the board's own console.
+//
+// Layout from inferno info_mcast_server.rs:327-341.
+// ---------------------------------------------------------------------------
+
+static void send_clock_stats(const uint8_t *dst_ip, uint16_t dst_port)
+{
+    static const uint8_t op[8] = {0x07, 0x2a, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00};
+
+    if (!g_ptpv1.have_master) return;        // nothing meaningful to report yet
+
+    uint8_t *p = net_udp_payload_buf();
+    uint32_t n = put_hdr(p, 0xFFFF, op);
+    uint8_t *c = p + n;
+    uint32_t o = 0;
+
+    // Status. inferno hardcodes 0x0003/0x0003 and notes 0x01 = PLL not locked,
+    // so the second word tracks our actual servo state rather than a constant.
+    put_u16(c, o, 0x0003);                        o += 2;
+    put_u16(c, o, g_ptpv1.locked ? 0x0003 : 0x0001); o += 2;
+    put_u32(c, o, 0x0000009f);                    o += 4;
+
+    // Frequency offset in ppb -- the same number the heartbeat's 0x8001 reports.
+    int32_t ppb = 0;
+    if (g_ptpv1.base_addend_full) {
+        int64_t base = (int64_t)g_ptpv1.base_addend_full;
+        int64_t cur  = (int64_t)g_ptpv1.current_addend_full;
+        ppb = (int32_t)(((cur - base) * 1000000000LL) / base);
+    }
+    put_u32(c, o, (uint32_t)ppb); o += 4;
+
+    memcpy(c + o, g_dante.mac, 6); o += 6;
+    put_u16(c, o, 0);              o += 2;
+
+    // Master clock id: EUI-64 of the Leader's PTPv1 uuid (which is its MAC),
+    // the same MAC->EUI-64 expansion dante_dev.c uses for our own device id.
+    uint8_t mc[8];
+    mc[0] = g_ptpv1.master_uuid[0];
+    mc[1] = g_ptpv1.master_uuid[1];
+    mc[2] = g_ptpv1.master_uuid[2];
+    mc[3] = 0xFF;
+    mc[4] = 0xFE;
+    mc[5] = g_ptpv1.master_uuid[3];
+    mc[6] = g_ptpv1.master_uuid[4];
+    mc[7] = g_ptpv1.master_uuid[5];
+    memcpy(c + o, mc, 8); o += 8;             // grandmaster
+    memcpy(c + o, mc, 8); o += 8;             // parent (same: we follow directly)
+
+    memset(c + o, 0, 76); o += 76;
+
+    n += o;
+    put_u16(p, 2, (uint16_t)n);
+
+    if (net_udp_commit(dst_ip, dst_port, DANTE_PORT_INFO_REQ, n,
+                       NET_TOS_BEST_EFFORT) == 0)
+        g_info_stats.tx_info++;
+    seqnum++;
+}
+
 static void send_network_info(const uint8_t *dst_ip, uint16_t dst_port)
 {
     static const uint8_t op[8] = {0x07, 0x2a, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00};
@@ -399,7 +479,14 @@ static void info_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     case 0x60: case 0x61: send_device_info (src_ip, src_port); break;
     case 0xc0: case 0xc1: send_product_info(src_ip, src_port); break;
     case 0x13:            send_network_info(src_ip, src_port); break;
-    default:              g_info_stats.rx_unknown++;           break;
+    case 0x21:            send_clock_stats (src_ip, src_port); break;
+    default:
+        // Log unknowns: DC's requests to us are unicast and therefore invisible
+        // to host-side capture, so the console is the only place they show up.
+        g_info_stats.rx_unknown++;
+        printf("[info] unhandled query 0x%02x from %u.%u.%u.%u\n", q,
+               src_ip[0], src_ip[1], src_ip[2], src_ip[3]);
+        break;
     }
 }
 
