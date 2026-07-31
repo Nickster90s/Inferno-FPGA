@@ -30,6 +30,8 @@
 #include <string.h>
 #include <stdio.h>
 
+static void put_fixed(uint8_t *c, uint32_t at, uint32_t width, const char *s);
+
 #define MCAST_HDR_LEN     32
 #define HEARTBEAT_MS      1000
 
@@ -291,8 +293,12 @@ static void send_device_info(const uint8_t *dst_ip, uint16_t dst_port)
     c[0xbb] = 0x1f;
 
     // Board name at 12 (8 bytes) and again at 0x38 (16 bytes).
-    memcpy(c + 12,    "Inferno", 7);
-    memcpy(c + 0x38,  "InfernoFPGA", 11);
+    // put_fixed is defined below; forward-declared at the top of the file.
+    // Same names as send_product_info, kept in step so DC never sees two
+    // different models for one device. Lengths are the FIELD widths (8 and 16),
+    // and put_fixed zero-pads, which the raw memcpys here did not.
+    put_fixed(c, 12,   8,  "NSerUSB");
+    put_fixed(c, 0x38, 16, "N-Series USB 48");
 
     n += 200;
     put_u16(p, 2, (uint16_t)n);
@@ -332,10 +338,13 @@ static void send_product_info(const uint8_t *dst_ip, uint16_t dst_port)
     memset(c, 0, 336);
 
     put_fixed(c, 0x00, 8,  "Inferno");
-    put_fixed(c, 0x08, 8,  "InfrnFPG");
+    put_fixed(c, 0x08, 8,  "NSerUSB");   // 8-byte field, short model code
     c[0x1c] = 0; c[0x1d] = 0; c[0x1e] = 0; c[0x1f] = 1;      // firmware 0.0.0.1
     put_fixed(c, 0x2c, 16, "Inferno");
-    put_fixed(c, 0xac, 16, "InfernoFPGA 48ch");
+    // Model Name as Dante Controller displays it. 16-byte FIXED field, so the
+    // string must be <= 16 characters -- "N-Series USB 48" is 15 and fits;
+    // "N-Series USB 48CH" would be 17 and would silently truncate.
+    put_fixed(c, 0xac, 16, "N-Series USB 48");
 
     n += 336;
     put_u16(p, 2, (uint16_t)n);
