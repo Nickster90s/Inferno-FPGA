@@ -381,8 +381,25 @@ static int ieq(const char *a, const char *b)
     return lc(*a) == lc(*b);
 }
 
+// Both matchers MUST check the service suffix first. Without it a bundle query
+// falls into the channel loop and is answered with a channel record -- observed
+// on the wire: a query for 1@<host>._netaudio-bund._udp.local came back as the
+// CHAN record for index 2, which is exactly the "cannot find this channel"
+// a receiver reports when it tries to resolve b.N= to a group.
+static int has_suffix(const char *q, const char *suf)
+{
+    const char *e = q;
+    while (*e) e++;
+    const char *t = suf;
+    while (*t) t++;
+    if ((e - q) < (t - suf)) return 0;
+    const char *a = e - (t - suf);
+    return ieq(a, suf);
+}
+
 static int match_chan_inst(const char *q, unsigned *idx)
 {
+    if (!has_suffix(q, "._netaudio-chan._udp.local")) return 0;
     char inst[DANTE_MAX_NAME + 48];
     for (unsigned c = 1; c <= DANTE_TX_CHANNELS; c++) {
         chan_inst(inst, sizeof(inst), c);
@@ -395,6 +412,7 @@ static int match_chan_inst(const char *q, unsigned *idx)
 
 static int match_bund_inst(const char *q, unsigned *idx)
 {
+    if (!has_suffix(q, "._netaudio-bund._udp.local")) return 0;
     char inst[DANTE_MAX_NAME + 48];
     for (unsigned b = 1; b <= N_BUNDLES; b++) {
         bund_inst(inst, sizeof(inst), b);
