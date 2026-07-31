@@ -106,6 +106,11 @@
 // it first, short enough that a device whose DelayResps never match still
 // becomes usable.
 #define PATH_DELAY_GRACE_MS 20000
+
+// Accepted path-delay measurements required before the estimate is trusted
+// enough to lock against. One is not enough -- see the note in the DelayResp
+// handler.
+#define PD_MIN_SAMPLES      4
 #define SERVO_INTEGRAL_MAX  100000000LL  // +-100 ms
 #define SERVO_STEP_NS       500000000LL  // step rather than slew beyond 500 ms
 #define LOCK_THRESHOLD_NS   500
@@ -153,6 +158,7 @@ static uint8_t  have_t2_t1;
 // theory. It measured 21.4-21.7 us earlier today, so something in the
 // acquisition rework regressed it.
 static uint32_t first_sync_ms;      // when we first heard the master
+static uint32_t pd_samples;         // accepted path-delay measurements
 
 static uint32_t dbg_dr_uuid, dbg_dr_port, dbg_dr_not3, dbg_dr_seq;
 static uint32_t dbg_dr_neg, dbg_dr_big, dbg_dr_ok;
@@ -391,7 +397,7 @@ static void servo_update(int64_t offset_ns)
     // is the behaviour we had before this gate existed.
     int64_t a = filtered < 0 ? -filtered : filtered;
     uint32_t waited = gptp_uptime_ms() - first_sync_ms;
-    int delay_known = (g_ptpv1.mean_path_delay_ns != 0) ||
+    int delay_known = (pd_samples >= PD_MIN_SAMPLES) ||
                       (first_sync_ms && waited > PATH_DELAY_GRACE_MS);
     if (a < LOCK_THRESHOLD_NS && delay_known) {
         if (++lock_streak >= LOCK_STREAK && !g_ptpv1.locked) {
@@ -584,10 +590,25 @@ static void ptpv1_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
             // is not just a damper, it is the better estimator. alpha = 1/8
             // over a 4 s DelayReq cadence settles in ~30 s and keeps each step
             // well inside the 2 us unlock threshold.
-            if (g_ptpv1.mean_path_delay_ns == 0)
-                g_ptpv1.mean_path_delay_ns = d;   // first measurement
-            else
+            // Running MEAN for the first few samples, then the slow filter.
+            //
+            // Seeding from a single measurement and smoothing at alpha = 1/8
+            // from there converges far too slowly to lock against: the first
+            // accepted value can be well off (it is taken while the servo is
+            // still moving), and the estimate then crawls toward the truth,
+            // dragging the offset with it. That is the -13295 ns unlock seen
+            // right after a clean "LOCKED, offset -285 ns" -- the delay was
+            // non-zero, so the lock gate opened, but it had not SETTLED.
+            //
+            // A running average over the first PD_MIN_SAMPLES converges in
+            // those samples instead of asymptotically, and costs nothing.
+            if (pd_samples < PD_MIN_SAMPLES) {
+                pd_samples++;
+                g_ptpv1.mean_path_delay_ns +=
+                    (d - g_ptpv1.mean_path_delay_ns) / (int64_t)pd_samples;
+            } else {
                 g_ptpv1.mean_path_delay_ns += (d - g_ptpv1.mean_path_delay_ns) / 8;
+            }
         }
         have_t3 = 0;
         break;
@@ -611,8 +632,8 @@ void ptpv1_poll(void)
         // gated lock at ~24 s; at 1 s it arrives during the frequency
         // acquisition window and costs nothing. Path delay changes far more
         // slowly than offset, so the fast rate is only for acquiring it.
-        next_delay_req_ms = now + (g_ptpv1.mean_path_delay_ns ? DELAY_REQ_MS
-                                                             : DELAY_REQ_FAST_MS);
+        next_delay_req_ms = now + (pd_samples >= PD_MIN_SAMPLES ? DELAY_REQ_MS
+                                                                : DELAY_REQ_FAST_MS);
     }
 
     // TEMPORARY: dump the (t1,t2) ring. See the note at dbg_ring.
