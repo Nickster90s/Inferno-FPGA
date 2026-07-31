@@ -444,10 +444,20 @@ static void send_clock_stats(const uint8_t *dst_ip, uint16_t dst_port,
     // Only byte 3 changes, 0x21 (request) -> 0x20 (reply), which is the one
     // part of the opcode inferno's own dispatch treats as fixed; every other
     // byte, including the 0x3e family and the trailing 0x64, is carried back.
+    // req == NULL for the periodic announcement, which has nothing to echo.
+    // The 0x2a family byte is per-device (the RedNets use 0x38 and 0x32); ours
+    // is the one we already advertise on every other info message.
+    static const uint8_t op_default[8] = {0x07, 0x2a, 0x00, 0x20, 0, 0, 0, 0};
     uint8_t op[8];
-    memcpy(op, req + 24, 8);
-    op[3] = 0x20;
-    uint16_t rseq = (uint16_t)((req[4] << 8) | req[5]);
+    uint16_t rseq;
+    if (req) {
+        memcpy(op, req + 24, 8);
+        op[3] = 0x20;
+        rseq = (uint16_t)((req[4] << 8) | req[5]);
+    } else {
+        memcpy(op, op_default, 8);
+        rseq = seqnum;
+    }
 
     uint8_t *p = net_udp_payload_buf();
     uint32_t n = put_hdr_seq(p, 0xFFFF, op, rseq);
@@ -583,6 +593,19 @@ void dante_info_poll(void)
         send_device_info (grp_devinfo, DANTE_PORT_INFO);
         send_product_info(grp_devinfo, DANTE_PORT_INFO);
         send_network_info(grp_devinfo, DANTE_PORT_INFO);
+        // Announce clock state too, not only when asked.
+        //
+        // Dante Controller requests clock stats (0x21) only during a manual
+        // refresh, so at boot it caches our honest "not locked" -- we have not
+        // locked yet at that point -- and nothing updates it until the user
+        // clicks Refresh. Sync therefore came up red and needed a manual
+        // refresh to turn green, even though the clock had locked seconds
+        // after boot.
+        //
+        // Announcing it on the same 3 s cadence as the other info messages
+        // matches how DC consumes device state generally: it builds its view
+        // from what arrives on the info multicast group rather than by polling.
+        send_clock_stats (grp_devinfo, DANTE_PORT_INFO, 0);
         info_announce_next_ms = now + INFO_ANNOUNCE_MS;
         return;                          // don't also heartbeat this pass
     }
