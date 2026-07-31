@@ -71,6 +71,34 @@
 #define SERVO_KP_FAST_NUM   200          // when |offset| > 1 us
 #define SERVO_KI_NUM        900          // gPTP used 3600 at 8 Hz; /4 for ~2 Hz
 #define SERVO_KI_DEN        1000000
+
+// Frequency ACQUISITION by direct measurement, not by winding up the integral.
+//
+// Lock used to take 3-5 minutes. The cause was structural: proportional action
+// alone settles at a standing error of offset = crystal_offset / KP. With our
+// crystal at ~-4640 ppb and KP = 0.2 that is 23 us -- exactly the 17..35 us
+// plateau we sat on while the frequency looked perfectly stable. Only the
+// integral could remove it, and at 900/1e6 with ~4 Hz Sync that needs ~64 s
+// just to wind up to -4640.
+//
+// Raising the gains was tried and MADE IT WORSE: KP 0.5 / KI 0.02 rang badly
+// (+705668, -190902, -440991 ppb) and had not settled after 97 s. The 7-deep
+// median delays the measurement by ~1.75 s, and no gain choice both survives
+// that delay and converges in seconds.
+//
+// So measure the crystal offset instead of servoing to it. Over a window, the
+// master's elapsed time and ours differ by exactly our frequency error:
+//
+//     err_ppb = ((local_elapsed - master_elapsed) * 1e9) / master_elapsed
+//
+// That is a measurement, not a control action -- no loop dynamics, nothing to
+// destabilise. An 8 s window with ~1 us timestamps resolves ~125 ppb, which
+// leaves the servo a residual it can close with the gentle tracking gains that
+// were already proven on this hardware.
+//
+// The addend is deliberately left UNTOUCHED during the window: the estimate is
+// only valid if our rate is constant across it.
+#define ACQ_WINDOW_NS       8000000000LL
 #define SERVO_INTEGRAL_MAX  100000000LL  // +-100 ms
 #define SERVO_STEP_NS       500000000LL  // step rather than slew beyond 500 ms
 #define LOCK_THRESHOLD_NS   500
@@ -102,6 +130,11 @@ static uint8_t  median_count, median_pos;
 
 static int64_t  freq_integral;
 static uint32_t lock_streak;
+
+// Frequency-acquisition state. While acq_active the servo is held off and the
+// addend is left alone, so the rate stays constant across the measurement.
+static uint8_t         acq_active, acq_have_base;
+static ptp_timestamp_t acq_t1_0, acq_t2_0;
 
 // Raw (t2-t1) from the most recent resolved Sync pair, kept for the path-delay
 // calculation. Must stay RAW -- see the note in the DelayResp handler.
@@ -220,7 +253,21 @@ static void servo_update(int64_t offset_ns)
         target.nanoseconds = (uint32_t)ns;
         gptp_step_time(target);
 
-        freq_integral = 0;
+        // Deliberately KEEP freq_integral across a step.
+        //
+        // A step is a PHASE correction; the integral holds our crystal's
+        // frequency offset, which is a property of our own oscillator and does
+        // not change because the master's time jumped. Zeroing it here threw
+        // away every bit of frequency learning on each step and forced a full
+        // re-acquisition from scratch -- which is what happened when the leader
+        // jumped 1.87 s ("[ptpv1] step to 56947.4... was off -1869571162 ns")
+        // and re-locking then took minutes all over again.
+        //
+        // Phase state IS reset below, because it is now meaningless.
+        //
+        // Re-measure the frequency after a step as well: it costs one window
+        // and removes any doubt about whether the step also changed our rate.
+        acq_active = 1; acq_have_base = 0;
         lock_streak   = 0;
         g_ptpv1.locked = 0;
         median_count = 0; median_pos = 0;
@@ -230,16 +277,71 @@ static void servo_update(int64_t offset_ns)
         return;
     }
 
+    // ---- Frequency acquisition: measure our crystal offset directly --------
+    if (acq_active) {
+        if (!acq_have_base) {
+            acq_t1_0 = t1; acq_t2_0 = t2; acq_have_base = 1;
+            return;                       // servo held off; addend untouched
+        }
+        int64_t dm = gptp_ts_diff_ns(t1, acq_t1_0);   // master elapsed
+        int64_t dl = gptp_ts_diff_ns(t2, acq_t2_0);   // our elapsed
+        if (dm < ACQ_WINDOW_NS) return;               // keep accumulating
+
+        // Our rate error against the master, in ppb, over the whole window.
+        int64_t err_ppb = ((dl - dm) * 1000000000LL) / dm;
+
+        // What the addend is currently worth, so the correction is applied to
+        // the rate actually in force rather than to nominal.
+        int64_t applied = 0;
+        if (g_ptpv1.base_addend_full) {
+            int64_t base = (int64_t)g_ptpv1.base_addend_full;
+            int64_t cur  = (int64_t)g_ptpv1.current_addend_full;
+            applied = ((cur - base) * 1000000000LL) / base;
+        }
+        freq_integral = applied - err_ppb;
+        if (freq_integral >  SERVO_INTEGRAL_MAX) freq_integral =  SERVO_INTEGRAL_MAX;
+        if (freq_integral < -SERVO_INTEGRAL_MAX) freq_integral = -SERVO_INTEGRAL_MAX;
+
+        int64_t na = (int64_t)g_ptpv1.base_addend_full
+                   + (freq_integral * (int64_t)g_ptpv1.base_addend_full) / 1000000000LL;
+        if (na < 1) na = 1;
+        g_ptpv1.current_addend_full = (uint64_t)na;
+        gptp_set_addend_full(g_ptpv1.current_addend_full);
+
+        // Frequency is now right; remove the standing phase error in one go.
+        //
+        // RELATIVE, not an absolute step to t1 + path_delay. offset_ns is the
+        // difference between our clock and the master's AT THE SAME INSTANT, so
+        // subtracting it is correct whenever it is applied. An absolute step is
+        // not: it lands at main-loop processing time rather than at packet
+        // receipt, and is late by exactly that lag.
+        //
+        // That is what left ~13 us standing here -- (t2-t1) measured ~35 us
+        // against a 21.4 us path delay -- which the integral then removed at
+        // ~30 ns/s, i.e. minutes. The absolute step is still right for the cold
+        // -6.1e12 ns case, where a relative one cannot land at all: the TSU's
+        // offset correction only handles +-1 s (liteeth core/ptp.py).
+        gptp_adjust_offset(-offset_ns);
+
+        acq_active = 0;
+        median_count = 0; median_pos = 0;
+        lock_streak = 0;
+        printf("[ptpv1] freq acquired: %lld ppb (window %lld ms)\n",
+               (long long)freq_integral, (long long)(dm / 1000000));
+        return;
+    }
+
     int64_t filtered = median_of(offset_ns);
 
     int64_t kp_num = (filtered > 1000 || filtered < -1000)
                      ? SERVO_KP_FAST_NUM : SERVO_KP_NUM;
+    int64_t ki_num = SERVO_KI_NUM;
     int64_t p = (-filtered * kp_num) / SERVO_KP_DEN;
 
     // Anti-windup: only integrate inside a band, so a transient does not leave
     // a persistent frequency bias behind.
     if (filtered < 1000000 && filtered > -1000000) {
-        freq_integral += (-filtered * SERVO_KI_NUM) / SERVO_KI_DEN;
+        freq_integral += (-filtered * ki_num) / SERVO_KI_DEN;
         if (freq_integral >  SERVO_INTEGRAL_MAX) freq_integral =  SERVO_INTEGRAL_MAX;
         if (freq_integral < -SERVO_INTEGRAL_MAX) freq_integral = -SERVO_INTEGRAL_MAX;
     }
@@ -503,6 +605,7 @@ void ptpv1_init(const uint8_t mac[6])
     g_ptpv1.base_addend_full = (((uint64_t)1 << 52) + (CONFIG_CLOCK_FREQUENCY / 2))
                              / CONFIG_CLOCK_FREQUENCY;
     g_ptpv1.current_addend_full = g_ptpv1.base_addend_full;
+    acq_active = 1; acq_have_base = 0;    // measure the crystal before servoing
 
     net_udp_bind(PTP_EVENT_PORT,   ptpv1_rx);
     net_udp_bind(PTP_GENERAL_PORT, ptpv1_rx);
