@@ -9,11 +9,16 @@ driver stack, no Dante Virtual Soundcard, no licensed Audinate module.
 **SoC:** LiteX + VexRiscv, bare-metal C firmware
 **USB:** LUNA/Amaranth UAC2 high-speed device on a USB3300 ULPI PHY
 
-> ### Status: early. Phase 0 of 7 complete.
+> ### Status: audio works. Phases 0-5 and 7 complete on the bench.
 >
-> The inherited 48-channel USB→network pipeline works (it shipped audio as AVB).
-> The Dante transport itself is **not yet implemented**. See
-> [Roadmap](#roadmap). Do not expect this to talk to Dante hardware today.
+> The device appears in Dante Controller, locks to PTPv1, and streams audio to
+> real Dante hardware over **unicast flows** negotiated on port 4455 — verified
+> against a Focusrite RedNet A16R and a RedNet AM2 simultaneously, at different
+> `fpp` and channel counts, sustained at exactly 9001 pps with zero underruns or
+> overruns. Multicast flows can be created and deleted from Dante Controller.
+>
+> **Known open bug:** with two receivers subscribed only ONE gets usable audio —
+> see [Open bugs](#open-bugs). Long-run hardening (Phase 6) has not been done.
 
 ---
 
@@ -116,12 +121,12 @@ Two properties are load-bearing and must survive every future change:
 | 0 | Fork `avb-aes3`, strip the AVB stack | boots, clock locks, USB enumerates | **code complete**, HW check pending |
 | 0.5 | Frozen loader ROM + `coderam` + netload | firmware edit → running in seconds | **code complete**, HW check pending |
 | 1 | LiteDRAM on the 8 MB SDRAM (`--with-sdram`) | 8 MB memtest passes | planned |
-| 2 | `net.c` — IPv4 / UDP / ICMP / IGMP / ARP | **FPGA answers `ping`** | planned |
-| 3 | Dante discovery (mDNS + ARC + CMC + info) | **device appears in Dante Controller** | planned |
-| 4 | `ptpv1.c` — PTPv1 slave | locks to a PTPv1 master | planned |
-| 5 | `dante_packetizer.py` + `dante_tx.c` | **48 channels received bit-exact** | planned |
-| 6 | Hardening / long-run | 24 h, no dropouts | planned |
-| 7 | Unicast flows + subscriptions | subscribe from Dante Controller | stretch |
+| 2 | `net.c` — IPv4 / UDP / ICMP / IGMP / ARP | **FPGA answers `ping`** | **done** |
+| 3 | Dante discovery (mDNS + ARC + CMC + info) | **device appears in Dante Controller** | **done** |
+| 4 | `ptpv1.c` — PTPv1 slave | locks to a PTPv1 master | **done** — locks in ~30 s, offset sub-µs |
+| 5 | `dante_packetizer.py` + `dante_tx.c` | audio received by real hardware | **done** — clean audio on the bench |
+| 6 | Hardening / long-run | 24 h, no dropouts | not started |
+| 7 | Unicast flows + subscriptions | subscribe from Dante Controller | **done** — per-flow map, slots and fpp |
 
 Discovery deliberately precedes clock and audio: it is firmware-only, needs no
 PTP, and getting the device to appear in Dante Controller is the earliest
@@ -130,6 +135,50 @@ gateware is written against them.
 
 Milestone 1 is **48 channels out only**. USB capture (device→host) has never
 carried a sample in this lineage and is out of scope until the TX path is solid.
+
+Phase 7 was reached earlier than planned, because it turned out to be necessary
+rather than optional: multicast bundles sourced all six flows unconditionally,
+which measured **65.5 Mbit/s of 69.6 Mbit/s on the segment** — 94% of all
+traffic, flooded to every port by an unmanaged switch. Unicast made transmission
+proportional to actual subscriptions (0.03 Mbit/s idle).
+
+---
+
+## Open bugs
+
+**Unicast reaches only one receiver.** With two receivers subscribed, both flows
+bind correctly and the transmit side looks right by every available measurement:
+
+    flows_active 2, f0_in_use 1, f1_in_use 1, rebinds 1 and 1
+    packets +135019 / 15 s = 9001 pps  = 6000 (fpp 8) + 3000 (fpp 16)
+    underrun delta 0, overrun delta 0, fifo_level 66 (centre 64)
+
+The combined rate is exactly right, so this is **not** a scheduling or due-gating
+fault — both contexts are emitting at their own correct rates. The fault is more
+likely in per-context header state: destination MAC, IP checksum, or UDP port
+for the second context. Note `write_ctx()` selects the context and then writes
+several CSRs before `flow_cfg` latches; anything that touches `ctx_select`
+in between would corrupt the binding.
+
+Hard to observe: unicast to a receiver is forwarded only to that port by the
+bench switch, so the build host cannot see it. Next diagnostic is to bind a
+multicast flow carrying the same channels — multicast is flooded and therefore
+visible — and compare the two contexts' emitted headers byte for byte.
+
+**`mac_writer_err` climbs at ~25/s.** Received frames dropped because the CPU
+cannot drain two RX slots against flooded multicast. This is the documented
+collapse mode (risk 8); PTP stays locked despite it, but it is real frame loss
+and wants the `rx_gate` MAC allow-list.
+
+**Clipping at full source volume** is unconfirmed as ours. The digital path is
+a bit-exact MSB-justified truncation with no gain stage, so it cannot create
+clipping that is not already in the source — but this has not been verified at
+high level, because it needs a multicast flow to make the payload visible.
+
+**USB has not been retested** on the current gateware. The packetizer changed
+substantially during the unicast work (per-flow channel maps, slot counts and
+fpp); the USB ingress path did not, but the plan calls for a hardware USB check
+at every gateware change and that has not been done.
 
 ---
 
