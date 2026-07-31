@@ -339,7 +339,17 @@ static void send_product_info(const uint8_t *dst_ip, uint16_t dst_port)
 
     put_fixed(c, 0x00, 8,  "Inferno");
     put_fixed(c, 0x08, 8,  "NSerUSB");   // 8-byte field, short model code
-    c[0x1c] = 0; c[0x1d] = 0; c[0x1e] = 0; c[0x1f] = 1;      // firmware 0.0.0.1
+    // Product Version, the column Dante Controller shows next to Model Name.
+    // 4 bytes. The render is INFERRED, not confirmed: DVS shows 4.5.1.1 (four
+    // components) and the AM2 shows 0.0.1 (three), which fits DC dropping a
+    // leading zero byte -- so 00 00 01 00 should read "0.1.0". Neither device
+    // answers a synthetic 0x00c1 query, so this could not be checked against
+    // real hardware the way the rest of the layout was.
+    //
+    // It previously held 00 00 00 01 and DC rendered the column BLANK, so
+    // something beyond the raw bytes gates it; if this still shows blank, that
+    // is the thing to chase rather than the value.
+    c[0x1c] = 0; c[0x1d] = 0; c[0x1e] = 1; c[0x1f] = 0;      // product 0.1.0
     put_fixed(c, 0x2c, 16, "Inferno");
     // Model Name as Dante Controller displays it. 16-byte FIXED field, so the
     // string must be <= 16 characters -- "N-Series USB 48" is 15 and fits;
