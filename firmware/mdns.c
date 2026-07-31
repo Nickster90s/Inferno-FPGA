@@ -140,13 +140,39 @@ static void nc_add(const char *name, uint32_t off)
 static uint32_t name_put(uint8_t *p, uint32_t n, const char *name)
 {
     int off = nc_find(name);
-    if (off >= 0) {
+    if (off >= 0) {                       // whole name already written
         p[n++] = (uint8_t)(0xC0 | ((off >> 8) & 0x3F));
         p[n++] = (uint8_t)(off & 0xFF);
         return n;
     }
+
+    // SUFFIX compression. Write labels one at a time; at each label boundary
+    // check whether the REMAINDER has been written before and, if so, finish
+    // with a pointer to it. That is how the A16R fits an SRV target into 18
+    // bytes where our full name took 27: its ".local" is a pointer.
+    //
+    // Every suffix is registered as it is written, so a later name sharing any
+    // tail can point into this one.
     nc_add(name, n);
-    return n + name_encode(p + n, name);
+    const char *cur = name;
+    while (*cur) {
+        int soff = (cur != name) ? nc_find(cur) : -1;
+        if (soff >= 0) {
+            p[n++] = (uint8_t)(0xC0 | ((soff >> 8) & 0x3F));
+            p[n++] = (uint8_t)(soff & 0xFF);
+            return n;
+        }
+        if (cur != name) nc_add(cur, n);
+        const char *dot = cur;
+        while (*dot && *dot != '.') dot++;
+        uint32_t l = (uint32_t)(dot - cur);
+        if (l > 63) l = 63;
+        p[n++] = (uint8_t)l;
+        for (uint32_t i = 0; i < l; i++) p[n++] = (uint8_t)cur[i];
+        cur = *dot ? dot + 1 : dot;
+    }
+    p[n++] = 0;
+    return n;
 }
 
 static uint32_t name_encode(uint8_t *p, const char *name)
@@ -396,7 +422,11 @@ static uint32_t build_txt_chan(uint8_t *p, unsigned ch1)
     n = txt_put(p, n, "enc=24");
     n = txt_put(p, n, "latency_ns=500000");
     n = txt_put(p, n, "fpp=8,2");
-    n = txt_put_kv_u(p, n, "nchan=", DANTE_TX_CHANNELS);
+    // nchan is the channels in a FLOW, not the device's channel count.
+    // inferno: MAX_CHANNELS_IN_FLOW.min(tx_channels.len()) -> 8. We were
+    // advertising 48, which would have a receiver negotiate a 48-channel flow
+    // against a device whose flows carry 8.
+    n = txt_put_kv_u(p, n, "nchan=", 8);
     // THE KEY THAT MAKES MULTICAST SUBSCRIPTION WORK.
     {
         char kv[24]; int i = 0;
