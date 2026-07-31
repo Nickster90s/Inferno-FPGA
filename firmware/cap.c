@@ -104,6 +104,19 @@ void cap_record(uint8_t dir, const uint8_t *frame, uint32_t len)
 {
     if (!cap_is_control(frame, len)) return;
 
+    // UNICAST ONLY, in both directions.
+    //
+    // Multicast is flooded by the switch, so the build host can already see all
+    // of it -- our announcements AND other devices' heartbeats. Recording it
+    // here buys nothing and actively destroys the ring's value: our own 8
+    // announcements every 3 s filled all 64 entries in ~24 s, and once those
+    // were excluded the AM2's 1 Hz heartbeats did the same.
+    //
+    // What the host CANNOT see is unicast between the controller and this
+    // board, because the switch forwards it only to the destination port. That
+    // is the entire reason this ring exists, so that is all it now keeps.
+    if (len >= 34 && frame[30] >= 224 && frame[30] <= 239) return;
+
     // RING, not stop-when-full. The old first-N behaviour was right for a boot
     // handshake; here the interesting traffic happens when someone clicks in
     // Dante Controller, long after boot, so keep the most RECENT frames.

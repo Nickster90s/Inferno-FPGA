@@ -548,6 +548,37 @@ static void send_caps(const uint8_t *dst_ip, uint16_t dst_port)
         net_udp_commit(dst_ip, dst_port, DANTE_PORT_INFO_REQ, n, NET_TOS_BEST_EFFORT);
         seqnum++;
     }
+    // 0x0082: supported sample FORMATS (bit depths). DVS lists 0x10/0x18/0x20
+    // = 16/24/32-bit; both RedNets list 0x18 only. We are 24-bit only
+    // (dante_dev.c bits_per_sample, "pcm=3" on the wire), so we declare one.
+    {
+        static const uint8_t op[8] = {0x07, 0x2a, 0x00, 0x82, 0, 0, 0, 0};
+        uint8_t *p = net_udp_payload_buf();
+        uint32_t n = put_hdr(p, 0xFFFF, op);
+        uint8_t *c = p + n; uint32_t o = 0;
+        put_u16(c, o, 0x0018); o += 2;
+        put_u16(c, o, 1);      o += 2;        // one supported format
+        put_u32(c, o, 24);     o += 4;        // current: 24-bit
+        put_u32(c, o, 0);      o += 4;
+        put_u16(c, o, 2);      o += 2;
+        put_u16(c, o, 0);      o += 2;
+        put_u32(c, o, 24);     o += 4;        // the one format we support
+        n += o; put_u16(p, 2, (uint16_t)n);
+        net_udp_commit(dst_ip, dst_port, DANTE_PORT_INFO_REQ, n, NET_TOS_BEST_EFFORT);
+        seqnum++;
+    }
+    // 0x1009: DVS sends 16 zero bytes. Reproduced as-is -- the AM2's variant
+    // carries device ids and is clearly not device-independent, so the
+    // all-zero form is the safer of the two observed.
+    {
+        static const uint8_t op[8] = {0x07, 0x2a, 0x10, 0x09, 0, 0, 0, 0};
+        uint8_t *p = net_udp_payload_buf();
+        uint32_t n = put_hdr(p, 0xFFFF, op);
+        memset(p + n, 0, 16); n += 16;
+        put_u16(p, 2, (uint16_t)n);
+        net_udp_commit(dst_ip, dst_port, DANTE_PORT_INFO_REQ, n, NET_TOS_BEST_EFFORT);
+        seqnum++;
+    }
     // 0x0084 is byte-identical on the A16R, the AM2 and DVS, so it carries no
     // per-device state and is reproduced as-is.
     {
