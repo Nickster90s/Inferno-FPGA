@@ -507,6 +507,67 @@ static void send_clock_stats(const uint8_t *dst_ip, uint16_t dst_port,
     seqnum++;
 }
 
+// ---------------------------------------------------------------------------
+// Capability messages 0x0080 / 0x0082 / 0x0084 / 0x1009
+//
+// Real devices announce these; we announced none of them. The pattern
+// throughout this bring-up has been that DC falls back to a DEFAULT when a
+// device says nothing -- that is how we ended up displayed as PTPv2 Domain 0 --
+// and "Enable Sync To External" showing an enabled checkbox for us, while both
+// DVS and the AM2 show N/A, has the same shape.
+//
+// HONEST LIMIT: I could not isolate the field that controls that column. It is
+// not any of these on the evidence available: [12:14] of 0x0080 is 0x0002 on
+// BOTH the A16R (checkbox) and the AM2 (N/A), and 0x0084 is byte-identical on
+// all three devices. So this is declaring our real capabilities rather than a
+// targeted fix, and it may not move that column.
+//
+// 0x0080 is the supported-sample-rate table -- the tail is a list of rates
+// (0xac44 = 44100, 0xbb80 = 48000, 0x15888 = 88200, 0x17700 = 96000, and the
+// A16R adds 176400/192000). Ours declares ONE rate, 48000, because that is
+// what this design does. Copying DVS's six-rate table verbatim would have been
+// easier and would have advertised rates we cannot produce.
+// ---------------------------------------------------------------------------
+
+static void send_caps(const uint8_t *dst_ip, uint16_t dst_port)
+{
+    // 0x0080: item size, count, current rate, then one u32 per supported rate.
+    {
+        static const uint8_t op[8] = {0x07, 0x2a, 0x00, 0x80, 0, 0, 0, 0};
+        uint8_t *p = net_udp_payload_buf();
+        uint32_t n = put_hdr(p, 0xFFFF, op);
+        uint8_t *c = p + n; uint32_t o = 0;
+        put_u16(c, o, 0x0018); o += 2;
+        put_u16(c, o, 1);      o += 2;        // one supported rate
+        put_u32(c, o, 48000);  o += 4;        // current
+        put_u32(c, o, 0);      o += 4;
+        put_u16(c, o, 0);      o += 2;        // DVS has 0 here, the A16R 2
+        put_u16(c, o, 0);      o += 2;
+        put_u32(c, o, 48000);  o += 4;        // the one rate we support
+        n += o; put_u16(p, 2, (uint16_t)n);
+        net_udp_commit(dst_ip, dst_port, DANTE_PORT_INFO_REQ, n, NET_TOS_BEST_EFFORT);
+        seqnum++;
+    }
+    // 0x0084 is byte-identical on the A16R, the AM2 and DVS, so it carries no
+    // per-device state and is reproduced as-is.
+    {
+        static const uint8_t op[8] = {0x07, 0x2a, 0x00, 0x84, 0, 0, 0, 0};
+        static const uint8_t body[60] = {
+            0x00,0x30,0x00,0x05,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+            0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,
+            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,
+            0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x04,
+        };
+        uint8_t *p = net_udp_payload_buf();
+        uint32_t n = put_hdr(p, 0xFFFF, op);
+        memcpy(p + n, body, sizeof(body)); n += sizeof(body);
+        put_u16(p, 2, (uint16_t)n);
+        net_udp_commit(dst_ip, dst_port, DANTE_PORT_INFO_REQ, n, NET_TOS_BEST_EFFORT);
+        seqnum++;
+    }
+}
+
 static void send_network_info(const uint8_t *dst_ip, uint16_t dst_port)
 {
     static const uint8_t op[8] = {0x07, 0x2a, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00};
@@ -612,6 +673,7 @@ void dante_info_poll(void)
         // matches how DC consumes device state generally: it builds its view
         // from what arrives on the info multicast group rather than by polling.
         send_clock_stats (grp_devinfo, DANTE_PORT_INFO, 0);
+        send_caps        (grp_devinfo, DANTE_PORT_INFO);
         info_announce_next_ms = now + INFO_ANNOUNCE_MS;
         return;                          // don't also heartbeat this pass
     }
