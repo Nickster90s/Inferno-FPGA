@@ -134,6 +134,8 @@
 #define LOCK_THRESHOLD_NS   2000
 #define UNLOCK_THRESHOLD_NS 5000
 #define LOCK_STREAK         8
+// Consecutive out-of-band samples required before declaring loss of lock.
+#define UNLOCK_STREAK       4
 
 // Median filter. Widened from gPTP's 5 because each sample is ~4x more
 // expensive to acquire at this Sync rate.
@@ -159,6 +161,7 @@ static int64_t  median_buf[MEDIAN_N];
 static uint8_t  median_count, median_pos;
 
 static int64_t  freq_integral;
+static int       unlock_streak;
 static uint32_t lock_streak;
 
 // Frequency-acquisition state. While acq_active the servo is held off and the
@@ -406,6 +409,15 @@ static void servo_update(int64_t offset_ns)
         if (freq_integral < -SERVO_INTEGRAL_MAX) freq_integral = -SERVO_INTEGRAL_MAX;
     }
 
+    // Do not let a wild sample steer the rate. Once locked, steady state is
+    // sub-microsecond; anything an order of magnitude beyond the unlock
+    // threshold is a corrupt pairing, and integrating it corrupts the clock
+    // that every downstream receiver follows.
+    if (g_ptpv1.locked) {
+        int64_t mag = filtered < 0 ? -filtered : filtered;
+        if (mag > (int64_t)UNLOCK_THRESHOLD_NS * 4) return;
+    }
+
     int64_t adj = p + freq_integral;
     // Scale ns-of-error into addend LSBs: the addend is ~2^52/clk, so a 1 ppb
     // change is base/1e9. Keep the arithmetic in 64-bit throughout.
@@ -439,6 +451,7 @@ static void servo_update(int64_t offset_ns)
     int delay_known = (pd_samples >= PD_MIN_SAMPLES) ||
                       (first_sync_ms && waited > PATH_DELAY_GRACE_MS);
     if (a < LOCK_THRESHOLD_NS && delay_known) {
+        unlock_streak = 0;
         if (++lock_streak >= LOCK_STREAK && !g_ptpv1.locked) {
             g_ptpv1.locked = 1;
             // WARM START: remember the converged addend. The crystal error is a
@@ -456,10 +469,36 @@ static void servo_update(int64_t offset_ns)
         }
     } else if (a > UNLOCK_THRESHOLD_NS) {
         lock_streak = 0;
-        if (g_ptpv1.locked) {
-            g_ptpv1.locked = 0;
-            printf("[ptpv1] unlocked, offset %lld ns\n", (long long)filtered);
+        // UNLOCK HYSTERESIS. A single bad sample must not drop lock.
+        //
+        // The console showed this cycling continuously: lock at sub-microsecond,
+        // then one sample at +5 to +10 us trips the 5 us threshold, unlock,
+        // relock at sub-microsecond, repeat. Every unlock turns the talker OFF
+        // and every relock RE-ANCHORS the media clock, so the stream was being
+        // stopped and restarted every few tens of seconds. That -- not drift,
+        // not underruns -- is what was killing the audio.
+        //
+        // Steady state is sub-microsecond, so an excursion 10x larger is a bad
+        // measurement, not a real clock movement: our own crystal cannot move
+        // 10 us between two Syncs. The most likely source is a lost FollowUp or
+        // DelayResp pairing with the wrong Sync, which is plausible given
+        // mac_writer_err climbing ~25/s under multicast flood.
+        //
+        // Requiring several consecutive bad samples keeps a genuine loss of
+        // sync detected (4 samples is a few seconds at PTPv1 rates) while
+        // ignoring isolated outliers.
+        if (++unlock_streak >= UNLOCK_STREAK) {
+            if (g_ptpv1.locked) {
+                g_ptpv1.locked = 0;
+                printf("[ptpv1] unlocked, offset %lld ns (%d consecutive)\n",
+                       (long long)filtered, unlock_streak);
+            }
+        } else if (g_ptpv1.locked) {
+            printf("[ptpv1] outlier %lld ns ignored (%d/%d)\n",
+                   (long long)filtered, unlock_streak, UNLOCK_STREAK);
         }
+    } else {
+        unlock_streak = 0;      // inside the band again
     }
 }
 

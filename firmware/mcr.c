@@ -179,8 +179,12 @@ static uint32_t mcr_compute_gptp_base(const mcr_state_t *m)
     // why correcting the NCO rate starves a ring whose level looks correct.
     // The 5.3 s divergence seen when the trim was applied is very likely the
     // same underlying fault seen from another angle.
-    const ptpv1_state_t *g = &g_ptpv1;      // EXPERIMENT: discipline re-enabled
-    if (!g->locked || g->base_addend_full == 0) {
+    // Back to the gPTP source. The experiment produced ZERO [inc] lines, i.e.
+    // the increment never changed once -- so the discipline never reached the
+    // NCO at all and there is nothing to keep here. Whatever the media clock
+    // needs, it is not this gate.
+    const gptp_t *g = m->gptp;
+    if (!g || !g->servo_locked || g->base_addend_full == 0) {
         // TRIM APPLIES HERE TOO. This early return is the path actually taken
         // under PTPv1 -- the gptp servo_locked flag belongs to the 802.1AS
         // servo, which this device no longer runs -- so a trim applied only
