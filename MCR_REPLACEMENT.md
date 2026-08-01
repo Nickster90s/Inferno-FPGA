@@ -64,11 +64,44 @@ the config fields, the `cs` media-clock-source selector.
 3. **Deadband interaction.** The gPTP-base deadband suppresses rewrites; combined
    with a watchdog reset the effective rate could latch to the wrong value.
 
+## Reference: statime's overlay clock (`origin/inferno-dev`)
+
+That branch is the **PTPv1** fork, not upstream PTPv2 — I got this wrong once and
+the operator corrected it. `statime/src/overlay_clock.rs` is directly relevant:
+
+    pub struct ClockOverlay {
+        pub last_sync: Time,   // underlying clock's timestamp of last sync
+        pub shift: Duration,   // add to OS clock -> virtual clock
+        pub freq_scale: f64,   // + accelerates the virtual clock
+    }
+    pub trait ClockOverlayExporter {
+        fn export(&mut self, overlay: &ClockOverlay);
+    }
+
+Two things to take from it:
+
+1. **Rate and phase are separate, explicit state.** `freq_scale` is the standing
+   rate correction; `shift` is phase. Our servo conflates them inside one addend,
+   which is why "follow the integral" and "follow the full addend" both went
+   wrong in different ways — neither is cleanly one or the other.
+2. **One owner, one export point.** The overlay is the single writer, and
+   consumers are *told* when it changes via the exporter callback. Our
+   `mcr_increment_write()` is called from three sites (`mcr.c:53, 388, 442`) with
+   independently computed values. If two of them disagree the NCO alternates
+   between rates — which starves a ring while its AVERAGE level still reads
+   centre, matching the one observation nothing else explains.
+
+The replacement should therefore be shaped as: PTPv1 owns `(shift, freq_scale)`,
+exports `freq_scale` on change, and the NCO has exactly ONE writer that consumes
+it. That is a stronger constraint than "slave the NCO to g_ptpv1" and is probably
+the actual fix.
+
 ## Suggested order
 
 1. Instrument before changing: log every `mcr_increment_write()` with its value
    and caller for 30 s with the clock disciplined. If the value oscillates,
-   suspect 1 or 2 is confirmed and the rewrite is straightforward.
+   suspect 1 or 2 is confirmed and the rewrite is straightforward. This is the
+   cheapest decisive experiment available and should come before any new code.
 2. Write `mcr_dante.c`: NCO slaved to `g_ptpv1`, nothing else. ~50-80 lines.
 3. Keep `mcr.c` in `_avb_reference/` — it is still the reference for the NCO
    arithmetic and the USB feedback servo scaling.
