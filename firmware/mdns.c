@@ -860,7 +860,8 @@ void mdns_init(void)
     for (char *s = lcq_arc_inst; *s; s++) *s = lc(*s);
     for (char *s = lcq_cmc_inst; *s; s++) *s = lc(*s);
 
-    net_udp_bind(MDNS_PORT, mdns_rx);
+    if (net_udp_bind(MDNS_PORT, mdns_rx) != 0)
+        printf("[net] BIND FAILED on port %u -- udp table full\n", MDNS_PORT);
     net_igmp_join(mdns_group);
     mdns_announce();
 

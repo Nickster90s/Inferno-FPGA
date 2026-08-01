@@ -131,6 +131,19 @@ static void flows_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
             } else {
                 g_flows_stats.accepted++;
                 printf("[flow] bound context %d\n", f);
+
+                // RETURN A FLOW HANDLE. We answered OK with EMPTY content;
+                // inferno returns a 6-byte handle -- flow index as u32 BE then
+                // a u16 cookie (flows_tx.rs:631-633). A receiver that cannot
+                // identify the flow it was just given has nothing to reference
+                // in a refresh, which is the best available explanation for
+                // keepalives arriving every 20-30 MINUTES here against ~5 s
+                // while we were still rejecting requests -- and for
+                // subscriptions going stale until manually re-made.
+                static uint16_t cookie;
+                cookie++;
+                dante_msg_u32(&m, (uint32_t)f);
+                dante_msg_u16(&m, cookie);
             }
         }
     } else {

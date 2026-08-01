@@ -49,6 +49,7 @@ static void cmc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
 
 void dante_cmc_init(void)
 {
-    net_udp_bind(DANTE_PORT_CMC, cmc_rx);
+    if (net_udp_bind(DANTE_PORT_CMC, cmc_rx) != 0)
+        printf("[net] BIND FAILED on port %u -- udp table full\n", DANTE_PORT_CMC);
     printf("[cmc] listening on %u\n", DANTE_PORT_CMC);
 }

@@ -223,7 +223,8 @@ static void cap_req_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
 
 void cap_init(void)
 {
-    net_udp_bind(CAP_REQ_PORT, cap_req_rx);
+    if (net_udp_bind(CAP_REQ_PORT, cap_req_rx) != 0)
+        printf("[net] BIND FAILED on port %u -- udp table full\n", CAP_REQ_PORT);
     printf("[cap] control-plane capture: %u frames, request on :%u -> :%u\n",
            CAP_N, CAP_REQ_PORT, CAP_OUT_PORT);
 }

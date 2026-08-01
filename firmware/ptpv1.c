@@ -34,6 +34,7 @@
 //     scaled accordingly and the median filter is widened.
 
 #include "ptpv1.h"
+#include "config.h"
 #include "net.h"
 #include "dante_dev.h"
 #include <generated/soc.h>
@@ -438,6 +439,17 @@ static void servo_update(int64_t offset_ns)
     if (a < LOCK_THRESHOLD_NS && delay_known) {
         if (++lock_streak >= LOCK_STREAK && !g_ptpv1.locked) {
             g_ptpv1.locked = 1;
+            // WARM START: remember the converged addend. The crystal error is a
+            // property of this board, not of this boot, so re-deriving it from
+            // scratch every time costs ~10-20 s of the ~30 s lock for no new
+            // information. Saved once per lock edge, not per update, to avoid
+            // writing flash continuously.
+            if (!g_cfg.ptp_addend_valid ||
+                g_cfg.ptp_addend_full != g_ptpv1.current_addend_full) {
+                g_cfg.ptp_addend_valid = 1;
+                g_cfg.ptp_addend_full  = g_ptpv1.current_addend_full;
+                cfg_save();
+            }
             printf("[ptpv1] LOCKED, offset %lld ns\n", (long long)filtered);
         }
     } else if (a > UNLOCK_THRESHOLD_NS) {
@@ -740,14 +752,51 @@ void ptpv1_init(const uint8_t mac[6])
     memset(&g_ptpv1, 0, sizeof(g_ptpv1));
 
     // Nominal 52-bit addend, same formula as gptp.c:918 and the gateware reset.
+    // (base is the nominal addend; the warm-start value below overrides the
+    //  STARTING point of the servo, not this reference.)
     g_ptpv1.base_addend_full = (((uint64_t)1 << 52) + (CONFIG_CLOCK_FREQUENCY / 2))
                              / CONFIG_CLOCK_FREQUENCY;
     g_ptpv1.current_addend_full = g_ptpv1.base_addend_full;
     acq_active = 1; acq_have_base = 0;    // measure the crystal before servoing
 
-    net_udp_bind(PTP_EVENT_PORT,   ptpv1_rx);
-    net_udp_bind(PTP_GENERAL_PORT, ptpv1_rx);
-    net_udp_bind(PROBE_PORT,       probe_rx);   // TEMPORARY diagnostic
+    // WARM START. If a converged addend survived from the last run, start the
+    // servo there and SKIP frequency acquisition entirely -- the 8 s window
+    // exists only to learn this board's crystal error, which has not changed
+    // since the last boot. Lock then costs only the phase pull-in and the
+    // LOCK_STREAK confirmation instead of 8 s of measurement first.
+    //
+    // Sanity-bounded: a stored value more than 200 ppm from nominal is treated
+    // as corrupt rather than trusted, since accepting a wild addend would send
+    // the clock somewhere it may never recover from.
+    if (g_cfg.ptp_addend_valid && g_cfg.ptp_addend_full) {
+        int64_t base = (int64_t)g_ptpv1.base_addend_full;
+        int64_t warm = (int64_t)g_cfg.ptp_addend_full;
+        int64_t lim  = base / 5000;                  // 200 ppm
+        if (warm > base - lim && warm < base + lim) {
+            // Seed the INTEGRATOR, not current_addend_full. The servo
+            // recomputes the addend every update as
+            //     base + (p + freq_integral) * base / 1e9
+            // so a warm value written straight into current_addend_full is
+            // discarded on the first Sync. The integral is what carries the
+            // standing rate correction, so that is what must be restored.
+            freq_integral = ((warm - base) * 1000000000LL) / base;
+            g_ptpv1.current_addend_full = (uint64_t)warm;
+            gptp_set_addend_full(g_ptpv1.current_addend_full);
+            acq_active = 0;                          // skip acquisition
+            printf("[ptpv1] warm start: addend %llu (%+lld ppb from nominal)\n",
+                   (unsigned long long)warm,
+                   (long long)((warm - base) * 1000000000LL / base));
+        } else {
+            printf("[ptpv1] stored addend out of range, ignoring\n");
+        }
+    }
+
+    if (net_udp_bind(PTP_EVENT_PORT,   ptpv1_rx) != 0)
+        printf("[net] BIND FAILED on port %u -- udp table full\n", PTP_EVENT_PORT);
+    if (net_udp_bind(PTP_GENERAL_PORT, ptpv1_rx) != 0)
+        printf("[net] BIND FAILED on port %u -- udp table full\n", PTP_GENERAL_PORT);
+    if (net_udp_bind(PROBE_PORT,       probe_rx) != 0)
+        printf("[net] BIND FAILED on port %u -- udp table full\n", PROBE_PORT);   // TEMPORARY diagnostic
     net_igmp_join(ptp_group);
 
     printf("[ptpv1] slave on 224.0.1.129:%u/%u, uuid %02x%02x%02x%02x%02x%02x\n",

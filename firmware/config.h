@@ -8,7 +8,7 @@
 #include <stdint.h>
 
 #define CFG_MAGIC    0xCFA50701u
-#define CFG_VERSION  2          // v2 adds osc_ip/osc_prefix; v1 blobs still load (cs/crf kept)
+#define CFG_VERSION  3          // v3 adds the PTPv1 warm-start addend; v1/v2 blobs still load
 
 typedef struct {
     uint32_t magic;
@@ -29,7 +29,15 @@ typedef struct {
     uint8_t  _pad3[3];
     // ---- room for future AVDECC params (entity name, talker fast-connect
     //      bindings, stream formats, pres_offset, chan_rot, ...) ----
-    uint8_t  reserved[72];
+    // ---- PTPv1 warm start ----
+    // The addend the servo converged on last time. Restoring it at boot skips
+    // most of frequency acquisition: the crystal error is a property of THIS
+    // board and does not change between runs, so re-measuring it from scratch
+    // every boot costs ~10-20 s of the ~30 s lock time for no new information.
+    uint8_t  ptp_addend_valid;
+    uint8_t  _pad4[3];
+    uint64_t ptp_addend_full;   // last converged 52-bit TSU addend
+    uint8_t  reserved[60];
     uint32_t crc;              // checksum over all bytes above
 } cfg_t;
 

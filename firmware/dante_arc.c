@@ -688,7 +688,8 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
 
 void dante_arc_init(void)
 {
-    net_udp_bind(DANTE_PORT_ARC, arc_rx);
+    if (net_udp_bind(DANTE_PORT_ARC, arc_rx) != 0)
+        printf("[net] BIND FAILED on port %u -- udp table full\n", DANTE_PORT_ARC);
     printf("[arc] listening on %u, %u tx / %u rx channels\n",
            DANTE_PORT_ARC, DANTE_TX_CHANNELS, DANTE_RX_CHANNELS);
 }

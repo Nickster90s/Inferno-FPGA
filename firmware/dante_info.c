@@ -735,7 +735,8 @@ void dante_info_poll(void)
 
 void dante_info_init(void)
 {
-    net_udp_bind(DANTE_PORT_INFO_REQ, info_rx);
+    if (net_udp_bind(DANTE_PORT_INFO_REQ, info_rx) != 0)
+        printf("[net] BIND FAILED on port %u -- udp table full\n", DANTE_PORT_INFO_REQ);
     net_igmp_join(grp_heartbeat);
     net_igmp_join(grp_devinfo);
     next_heartbeat_ms = 0;                       // fire on the next poll
