@@ -9,7 +9,7 @@ NAMES = ["talker","packets","underrun","overrun","fifo_level","last_sec","last_t
 for _f in range(6):
     NAMES += [f"f{_f}_in_use", f"f{_f}_age_ms", f"f{_f}_rebinds",
               f"f{_f}_mac_hi", f"f{_f}_mac_lo"]
-SIGNED = {"offset_ns","path_delay_ns"}
+SIGNED = {"offset_ns","path_delay_ns","trim_ppb","drift_samples"}
 def read(board):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(3)
     s.sendto(b"?", (board, 7779))

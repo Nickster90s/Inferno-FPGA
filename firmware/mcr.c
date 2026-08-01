@@ -105,6 +105,25 @@ void mcr_set_clock_source(mcr_state_t *m, uint8_t cs)
 // gPTP state, so a gPTP unlock can never over-rev the talker.
 #define MCR_GPTP_CORR_SHIFT  9
 
+// Slow rate trim, in ppb, driven by the MEASURED drift between our emitted
+// audio timestamps and PTP (dante_tx.c). The gPTP addend ratio alone leaves a
+// residual -- measured 4.34 ppm, which is 15.6 ms/hour and kills a stream
+// overnight while every counter reads healthy, because the media clock
+// free-runs from one anchor and a receiver's buffer is about 1 ms.
+//
+// This is a RATE correction, deliberately: a constant offset is absorbed by the
+// receiver as latency, only accumulation is fatal. Correcting by re-anchoring
+// instead would step the timestamp every few seconds, and every step is a click.
+static int32_t mcr_trim_ppb;
+
+void mcr_set_trim_ppb(int32_t ppb)
+{
+    if (ppb >  50000) ppb =  50000;        // +/- 50 ppm, far beyond any real error
+    if (ppb < -50000) ppb = -50000;
+    mcr_trim_ppb = ppb;
+}
+int32_t mcr_get_trim_ppb(void) { return mcr_trim_ppb; }
+
 static uint32_t mcr_compute_gptp_base(const mcr_state_t *m)
 {
     const gptp_t *g = m->gptp;
@@ -116,6 +135,8 @@ static uint32_t mcr_compute_gptp_base(const mcr_state_t *m)
     if (corr >  maxc) corr =  maxc;
     if (corr < -maxc) corr = -maxc;
     int64_t inc  = (int64_t)m->base_increment + corr;
+    // Apply the measured-drift trim on top of the gPTP ratio.
+    inc += ((int64_t)m->base_increment * mcr_trim_ppb) / 1000000000LL;
     if (inc < 1) inc = 1;
     return (uint32_t)inc;
 }

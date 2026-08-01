@@ -57,6 +57,12 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         put32(p, n, (uint32_t)t.seconds);                      n += 4;
         put32(p, n, (uint32_t)((t.nanoseconds * 3u) / 62500u)); n += 4;
     }
+    // trim_ppb/drift removed from this reply: adding them killed the port
+    // outright (no response at all, while ARC 4440 and flow control 4455 kept
+    // answering and ping was clean). Cause not identified. The servo still runs
+    // and still applies the trim -- only the reporting is backed out, so the
+    // endpoint stays usable for measuring drift, which is the thing that
+    // actually matters here.
     put32(p, n, dante_tx_active());                 n += 4;   // 15
     put32(p, n, g_flows_stats.requests);               n += 4;   // 16
     put32(p, n, g_flows_stats.rejected);               n += 4;   // 17

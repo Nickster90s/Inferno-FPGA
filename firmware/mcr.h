@@ -230,4 +230,9 @@ void mcr_usb_lock_reset(mcr_state_t *m);
 // `now_ms` is monotonic ms (e.g. gptp_uptime_ms()).
 void mcr_watchdog_tick(mcr_state_t *m, uint32_t now_ms);
 
+// Slow rate trim in ppb, applied on top of the gPTP-derived NCO base.
+// Driven by dante_tx from the measured timestamp-vs-PTP drift.
+void    mcr_set_trim_ppb(int32_t ppb);
+int32_t mcr_get_trim_ppb(void);
+
 #endif

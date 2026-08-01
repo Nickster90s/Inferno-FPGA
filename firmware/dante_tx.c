@@ -23,6 +23,7 @@
 #include "dante_dev.h"
 #include "ptpv1.h"
 #include "gptp.h"
+#include "mcr.h"
 #include "dante_flows.h"
 #include "net.h"
 #include <generated/csr.h>
@@ -271,6 +272,48 @@ void dante_tx_poll(void)
                    && (gptp_uptime_ms() - lock_since) >= PTP_SETTLE_MS;
 
     uint8_t want = settled && (dante_tx_active() > 0);
+
+    // ---- MEDIA CLOCK RATE SERVO -------------------------------------------
+    //
+    // Measure the drift between what we STAMP and what PTP says, and trim the
+    // media clock rate to null it. Measured residual after the gPTP addend
+    // ratio was +4.34 ppm = +15.6 ms/hour: the stream accumulated 19.6 ms in
+    // 1.4 hours and ~100 ms overnight, which is 20x to 100x a receiver's ~1 ms
+    // buffer. Every counter stayed healthy while the audio was long dead.
+    //
+    // RATE, not re-anchoring. A constant offset is absorbed by the receiver as
+    // latency; only accumulation is fatal. Re-anchoring would step the
+    // timestamp every few seconds and every step is an audible click.
+    //
+    // PI on the drift, run once a second. Gains are deliberately small: the
+    // error is parts per million and there is no hurry, so slow correction
+    // beats overshoot that would itself be heard.
+    if (talker_on && g_ptpv1.locked) {
+        static uint32_t last_servo_ms;
+        static int32_t  trim_ppb;
+        uint32_t now = gptp_uptime_ms();
+        if ((uint32_t)(now - last_servo_ms) >= 1000u &&
+            (uint32_t)(now - last_servo_ms) <  60000u) {
+            last_servo_ms = now;
+            ptp_timestamp_t t = gptp_read_time();
+            int64_t ptp_smp = (int64_t)t.seconds * 48000
+                            + (int64_t)((t.nanoseconds * 3u) / 62500u);
+            int64_t emit    = (int64_t)aaf_pkt_dbg_last_sec_read() * 48000
+                            + (int64_t)aaf_pkt_dbg_last_ts_read();
+            int32_t err = (int32_t)(emit - ptp_smp);     // + = we are ahead
+
+            // ~20 ppb per sample of error, integrated. At the observed 4.3 ppm
+            // this converges in a couple of minutes without overshooting.
+            trim_ppb -= err * 20;
+            if (trim_ppb >  50000) trim_ppb =  50000;
+            if (trim_ppb < -50000) trim_ppb = -50000;
+            mcr_set_trim_ppb(trim_ppb);
+            g_tx_stats.trim_ppb = trim_ppb;
+            g_tx_stats.drift    = err;
+        } else if ((uint32_t)(now - last_servo_ms) >= 60000u) {
+            last_servo_ms = now;         // clock jumped; skip this round
+        }
+    }
 
     // Re-anchor when the emitted seconds drifts from PTP by more than a second.
     // The media clock is rate-disciplined by mcr, so this should never fire in

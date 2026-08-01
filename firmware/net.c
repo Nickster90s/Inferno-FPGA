@@ -301,7 +301,11 @@ static void igmp_rx(const uint8_t *p, uint32_t len)
 // failed SILENTLY and the port simply never answered. net_udp_bind returns a
 // status nobody checks, which is how a full table looks identical to a working
 // one until something stops responding.
-#define UDP_BINDINGS  12
+// 16. This table has now silently overflowed TWICE -- once when 4455 was added
+// and again when the stats port 7779 was, each time presenting as "that one
+// port is dead while everything else works". net_udp_bind returns a status,
+// but on a board whose UART belongs to someone else the failure is invisible.
+#define UDP_BINDINGS  16
 
 typedef struct { uint16_t port; net_udp_handler_t fn; } udp_binding_t;
 static udp_binding_t udp_bindings[UDP_BINDINGS];
