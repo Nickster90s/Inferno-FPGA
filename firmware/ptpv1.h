@@ -32,6 +32,11 @@ typedef struct {
 
     uint64_t base_addend_full;
     uint64_t current_addend_full;
+    // Rate estimate ONLY, in ppb -- the servo integral, without the
+    // proportional term. This is what a media clock should follow: the
+    // proportional term is phase correction, and feeding it into an audio
+    // sample rate is audible wander, not drift correction.
+    int32_t  rate_ppb;
 } ptpv1_state_t;
 extern ptpv1_state_t g_ptpv1;
 

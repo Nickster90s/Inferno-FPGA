@@ -147,29 +147,36 @@ proportional to actual subscriptions (0.03 Mbit/s idle).
 
 ## Open bugs
 
-**Fixed: media clock drifted away from PTP and the stream died silently.**
-Left running overnight the device reported everything healthy — talker on, PTP
-locked, flows bound, 9019 pps, zero underrun and overrun, fifo at centre — and
-produced no audio.
+**Media clock is UNDISCIPLINED under PTPv1 — drifts ~15 ms/hour.** Still open,
+and the most serious issue. Left running the stream dies silently: every counter
+reads healthy while the timestamp walks out of the receiver's ~1 ms buffer.
 
-Root cause was not a mistuned servo but an **unconnected** one. `mcr` derived
-the media-clock rate from `m->gptp->current_addend_full / base_addend_full`,
-gated on `g->servo_locked` — a flag set only by `gptp_servo_update()`, the
-**802.1AS** servo. This device runs PTPv1, which keeps its addend state in
-`g_ptpv1` and writes nothing to the gPTP struct. The gate was therefore never
-true, `mcr_compute_gptp_base()` always returned the undisciplined
-`base_increment`, and the media clock free-ran at the raw crystal rate.
+Root cause is understood. `mcr_compute_gptp_base()` takes its rate from
+`m->gptp`, gated on `g->servo_locked` — a flag set only by `gptp_servo_update()`,
+the **802.1AS** servo. This device runs PTPv1, which keeps its addend state in
+`g_ptpv1` and writes nothing to the gPTP struct, so the gate is never true and
+the function always returns the undisciplined `base_increment`. The +4.34 ppm is
+the raw crystal error.
 
-    before   +4.34 ppm   +15.6 ms/hour   (~100 ms overnight)
-    after    +0.17 ppm   +0.61 ms/hour
+**Pointing `mcr` at `g_ptpv1` fixes the drift and breaks the audio.** Measured
+both ways:
 
-against a receiver buffer of ~1 ms. `mcr` now reads `g_ptpv1` directly.
+    drift     4.34 ppm -> 0.17 ppm     (25x better)
+    underrun  ~130 total -> 40547 in 4 minutes (~170/s, sustained)
 
-Two wrong turns before finding it, both recorded in git: a rate-trim servo added
-to `mcr` that was dead code (applied only after an early return that is the live
-path under PTPv1), then one that diverged catastrophically when applied on that
-path (timestamp fell 5.3 s behind in 115 s). `mcr_set_trim_ppb()` remains in the
-tree with its call commented out; with the real fix in place it is not needed.
+The packetizer emits silence on an underrun, so the audible result was worse
+than the slow drift it cured — and `fifo_level` still read centre throughout,
+which nobody has explained. Reverted; the tree is back to clean audio that
+drifts.
+
+**Start the next attempt from the underrun, not the drift.** The question is why
+correcting the NCO rate starves a ring whose level looks correct. Two other
+unexplained observations are probably the same fault seen from different angles:
+applying a rate trim made the timestamp fall 5.3 s behind in 115 s (a thousand
+times more than the ±50 ppm clamp permits), and following the servo integral
+alone instead of the full addend produced the same underrun storm. All three say
+something in the media-clock/USB-feedback loop reacts far more violently to an
+NCO change than the arithmetic suggests it should.
 
 **Fixed:** *audio was mangled for the first seconds of every stream.* Two
 separate causes, both now addressed. The talker used to toggle ON → OFF → ON at

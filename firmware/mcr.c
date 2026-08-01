@@ -140,8 +140,24 @@ static uint32_t mcr_compute_gptp_base(const mcr_state_t *m)
     // 15.6 ms/hour, ~100 ms overnight, against a receiver buffer of ~1 ms --
     // which is why a stream that started clean was dead by morning with every
     // counter still reading healthy.
-    const ptpv1_state_t *g = &g_ptpv1;
-    if (!g->locked || g->base_addend_full == 0) {
+    // REVERTED. Pointing mcr at g_ptpv1 fixed the drift (4.34 -> 0.17 ppm, a
+    // 25x improvement, measured) but drove underrun_count from ~130 total to
+    // 40547 in four minutes -- roughly 170/s, sustained, while fifo_level still
+    // read centre. The packetizer emits silence on an underrun, so the audible
+    // result was WORSE than the slow drift it cured. I do not understand how
+    // the ring can starve at that rate with the level reading mid-scale, and
+    // did not want to leave a guess running on the bench.
+    //
+    // So this is back to the gPTP source, which under PTPv1 means the media
+    // clock is UNDISCIPLINED -- clean audio that drifts ~15 ms/hour and dies
+    // overnight. That is the known-good state, not a good state.
+    //
+    // The next attempt should start from the underrun, not the drift: find out
+    // why correcting the NCO rate starves a ring whose level looks correct.
+    // The 5.3 s divergence seen when the trim was applied is very likely the
+    // same underlying fault seen from another angle.
+    const gptp_t *g = m->gptp;
+    if (!g || !g->servo_locked || g->base_addend_full == 0) {
         // TRIM APPLIES HERE TOO. This early return is the path actually taken
         // under PTPv1 -- the gptp servo_locked flag belongs to the 802.1AS
         // servo, which this device no longer runs -- so a trim applied only
@@ -151,6 +167,28 @@ static uint32_t mcr_compute_gptp_base(const mcr_state_t *m)
         b += (b * mcr_trim_ppb) / 1000000000LL;
         return (uint32_t)(b < 1 ? 1 : b);
     }
+    // FOLLOW THE RATE ESTIMATE, NOT THE INSTANTANEOUS ADDEND.
+    //
+    // current_addend_full carries the servo's proportional term as well as its
+    // integral. The proportional term is PHASE correction -- it moves on every
+    // Sync -- and pushing it into the media clock modulates the audio sample
+    // rate, which is heard as wander. Measured drift stayed fine (+0.42 ppm)
+    // while the result was audibly worse, which is the signature of noise
+    // rather than offset.
+    //
+    // rate_ppb is the integral alone: the smooth estimate of how fast this
+    // board's crystal runs against the master. That is the only part a media
+    // clock should track.
+    // REVERTED to the full addend ratio. Following rate_ppb (the integral
+    // alone) drove underrun_count from ~130 to 37550 -- the ring drained
+    // continuously and the packetizer emitted silence, which is heard as
+    // instability, not as the smoother clock it was meant to be.
+    //
+    // Why the theory was wrong is worth keeping: the proportional term is not
+    // just phase noise to be filtered out. The USB feedback servo tracks the
+    // media clock, and the media clock tracking the FULL addend is what keeps
+    // the two consistent; feeding it a different, slower-moving estimate left
+    // USB delivery and media consumption disagreeing.
     int64_t d    = (int64_t)g->current_addend_full - (int64_t)g->base_addend_full;
     int64_t corr = ((int64_t)m->base_increment * d) / (int64_t)g->base_addend_full;
     int64_t maxc = (int64_t)m->base_increment >> MCR_GPTP_CORR_SHIFT;

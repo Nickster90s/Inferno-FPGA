@@ -413,6 +413,8 @@ static void servo_update(int64_t offset_ns)
                    + (int64_t)((adj * (int64_t)g_ptpv1.base_addend_full) / 1000000000LL);
     if (addend < 1) addend = 1;
     g_ptpv1.current_addend_full = (uint64_t)addend;
+    // Publish the INTEGRAL alone as the rate estimate. mcr follows this.
+    g_ptpv1.rate_ppb = (int32_t)freq_integral;
     gptp_set_addend_full(g_ptpv1.current_addend_full);
 
     // Hold lock off until the path delay is known -- but never indefinitely.
@@ -780,6 +782,7 @@ void ptpv1_init(const uint8_t mac[6])
             // discarded on the first Sync. The integral is what carries the
             // standing rate correction, so that is what must be restored.
             freq_integral = ((warm - base) * 1000000000LL) / base;
+            g_ptpv1.rate_ppb = (int32_t)freq_integral;
             g_ptpv1.current_addend_full = (uint64_t)warm;
             gptp_set_addend_full(g_ptpv1.current_addend_full);
             acq_active = 0;                          // skip acquisition
