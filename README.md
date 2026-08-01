@@ -163,6 +163,25 @@ never self-correct while every counter stays perfect.
 timestamp, so the drift is directly measurable. Fresh after an anchor it reads
 about −18 samples (−0.38 ms), which is the intended offset rather than drift.
 
+**A rate-trim servo was attempted and REVERTED.** `mcr_set_trim_ppb()` exists
+and is wired to a slow integrator on the measured drift, but the call is
+commented out. Two things went wrong, both recorded so the next attempt does not
+repeat them:
+
+1. The trim was first applied only after the early return in
+   `mcr_compute_gptp_base()`, which tests `g->servo_locked` — the **802.1AS**
+   servo flag, on a device that runs PTPv1. That early return is the live path,
+   so the trim was dead code. Measured proof: rate stayed at +4.83 ppm against
+   +4.34 ppm before, i.e. no effect at all.
+2. Applying it on that path too made things far worse — the emitted timestamp
+   fell 256617 samples (5.3 s) behind PTP in 115 s. That is a thousand times
+   more than the ±50 ppm the trim can produce, so the media clock or the talker
+   stops rather than merely running slow. Cause not identified.
+
+Reverted to the known-good +4.3 ppm rather than left in a state that breaks
+audio outright. The measurement path still runs, so drift stays observable via
+`tools/stats.py`.
+
 **The fix is rate, not periodic re-anchoring.** A constant offset is harmless —
 the receiver absorbs it as latency — it is *accumulation* that eventually
 exceeds the buffer. Tightening the threshold would re-anchor every few minutes

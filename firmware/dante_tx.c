@@ -307,7 +307,16 @@ void dante_tx_poll(void)
             trim_ppb -= err * 20;
             if (trim_ppb >  50000) trim_ppb =  50000;
             if (trim_ppb < -50000) trim_ppb = -50000;
-            mcr_set_trim_ppb(trim_ppb);
+            // DISABLED. Enabling this made things far worse than the drift it
+            // was meant to fix: the emitted timestamp fell 256617 samples
+            // (5.3 s) behind PTP in 115 s -- a thousand times more than the
+            // +/-50 ppm this trim can even produce, so the media clock or the
+            // talker stops rather than merely running slow. Cause not found.
+            // Reverted to the known-good behaviour (steady +4.3 ppm) rather
+            // than left in a state that breaks audio outright.
+            //
+            // The measurement below still runs, so drift stays observable.
+            // mcr_set_trim_ppb(trim_ppb);
             g_tx_stats.trim_ppb = trim_ppb;
             g_tx_stats.drift    = err;
         } else if ((uint32_t)(now - last_servo_ms) >= 60000u) {

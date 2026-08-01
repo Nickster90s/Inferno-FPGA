@@ -127,8 +127,16 @@ int32_t mcr_get_trim_ppb(void) { return mcr_trim_ppb; }
 static uint32_t mcr_compute_gptp_base(const mcr_state_t *m)
 {
     const gptp_t *g = m->gptp;
-    if (!g || !g->servo_locked || g->base_addend_full == 0)
-        return m->base_increment;
+    if (!g || !g->servo_locked || g->base_addend_full == 0) {
+        // TRIM APPLIES HERE TOO. This early return is the path actually taken
+        // under PTPv1 -- the gptp servo_locked flag belongs to the 802.1AS
+        // servo, which this device no longer runs -- so a trim applied only
+        // below was dead code. Measured proof: the rate stayed at +4.83 ppm
+        // against +4.34 ppm before the servo was added, i.e. no effect at all.
+        int64_t b = (int64_t)m->base_increment;
+        b += (b * mcr_trim_ppb) / 1000000000LL;
+        return (uint32_t)(b < 1 ? 1 : b);
+    }
     int64_t d    = (int64_t)g->current_addend_full - (int64_t)g->base_addend_full;
     int64_t corr = ((int64_t)m->base_increment * d) / (int64_t)g->base_addend_full;
     int64_t maxc = (int64_t)m->base_increment >> MCR_GPTP_CORR_SHIFT;
