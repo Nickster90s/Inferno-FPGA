@@ -147,27 +147,48 @@ proportional to actual subscriptions (0.03 Mbit/s idle).
 
 ## Open bugs
 
-**Unicast reaches only one receiver** — *FIXED and confirmed on the bench.*
-Two receivers now bind separate contexts and both play:
+**Media clock drifts away from PTP and the stream dies silently.** The most
+serious one. Left running overnight the device reported everything healthy —
+talker on, PTP locked, flows bound, 9019 pps, zero underrun and overrun, fifo at
+centre, keepalives current — and produced no audio.
 
-    ctx 0: 00:1d:c1:a1:72:3c   ctx 1: 00:1d:c1:2d:4a:18
-    flows_active 2, rejected 0, 9015 pps, underrun +0, overrun +0
+The media clock free-runs from a **single anchor** taken when the talker is
+enabled, and `dante_tx_poll` only re-anchors when emitted seconds differ from
+PTP by more than **one second**. Measured drift between the two is **3.6 ppm** —
+about 13 ms per hour, ~100 ms overnight. That is two orders of magnitude past a
+receiver's ~1 ms buffer and two orders *below* the re-anchor threshold, so it can
+never self-correct while every counter stays perfect.
 
- No flow request ever arrived from the second receiver, so this
-was never a transmit-side fault: the rate was already exactly 9001 pps
-(6000 + 3000) with both contexts emitting correctly.
+`tools/stats.py` now reports `ptp_now_sec`/`ptp_now_sub` beside the last emitted
+timestamp, so the drift is directly measurable. Fresh after an anchor it reads
+about −18 samples (−0.38 ms), which is the intended offset rather than drift.
 
-The cause was a **stale `b.<flow>=` key**. Creating a multicast flow adds
-`b.32=1` to the channel's TXT record; deleting the flow removes it. But TXT
-carried a 4500 s TTL and no cache-flush bit, so resolvers — and the receivers —
-kept the old record for over an hour. They followed it to a multicast group that
-no longer existed instead of falling through to the unicast flow server, so no
-request was sent and no audio played.
+**The fix is rate, not periodic re-anchoring.** A constant offset is harmless —
+the receiver absorbs it as latency — it is *accumulation* that eventually
+exceeds the buffer. Tightening the threshold would re-anchor every few minutes
+and each re-anchor is a step discontinuity, i.e. an audible click. The correct
+fix is to null the 3.6 ppm by trimming the media-clock NCO in `mcr` against the
+drift now being measured. Firmware-only; no gateware rebuild.
 
-Fixed by setting the mDNS cache-flush bit (RFC 6762 §10.2) on the records we are
-the unique authority for (A, SRV, TXT — never shared PTRs), and dropping the TXT
-TTL to 120 s since it is now dynamic. Verified: `b.32=1` no longer appears on a
-channel with no active multicast flow.
+Not yet confirmed by a second overnight run: the first night's evidence was
+destroyed by reflashing to add the instrumentation before capturing it.
+
+**Fixed:** *audio was mangled for the first seconds of every stream.* Two
+separate causes, both now addressed. The talker used to toggle ON → OFF → ON at
+startup because flows expired on a PTP-derived timer that jumps when PTP steps;
+expiry is gone entirely (contexts are reclaimed by peer IP, or by evicting the
+least-recently-bound when all six are taken). And the talker was enabled on the
+*first* PTP lock edge, which is not trustworthy — PTP locks, drops out, relocks,
+then applies its path delay and a phase correction. It now waits for the lock to
+hold 4 s **and** the path delay to be known before anchoring: `enables 1,
+disables 0, anchors 1`, against 3/2/3 before.
+
+**Fixed:** *unicast reached only one receiver.* Never a transmit-side fault —
+the rate was already exactly 9001 pps with both contexts emitting correctly. A
+stale `b.<flow>=` key from a deleted multicast flow kept receivers chasing a
+group that no longer existed, so they never asked for a unicast flow. TXT
+records now carry the mDNS cache-flush bit (RFC 6762 §10.2) and a 120 s TTL.
+Confirmed: two receivers, separate contexts, both playing.
 
 **`mac_writer_err` climbs at ~25/s.** Received frames dropped because the CPU
 cannot drain two RX slots against flooded multicast. This is the documented
