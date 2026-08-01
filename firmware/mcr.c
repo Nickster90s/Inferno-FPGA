@@ -39,6 +39,22 @@ static inline void crf_pull_frac(uint8_t pull, uint32_t *num, uint32_t *den) {
     }
 }
 
+static uint32_t inc_last;
+static uint32_t inc_writes[4];
+static void inc_write_dbg(uint32_t v, int who)
+{
+    inc_writes[who & 3]++;
+    if (v != inc_last) {
+        printf("[inc] site%d %lu -> %lu (delta %+ld, %+ld ppb)  counts %lu/%lu/%lu\n",
+               who, (unsigned long)inc_last, (unsigned long)v,
+               (long)v - (long)inc_last,
+               inc_last ? (long)(((int64_t)v - (int64_t)inc_last) * 1000000000LL / inc_last) : 0L,
+               (unsigned long)inc_writes[0], (unsigned long)inc_writes[1],
+               (unsigned long)inc_writes[2]);
+        inc_last = v;
+    }
+}
+
 void mcr_init(mcr_state_t *m, uint32_t sys_clk_freq, uint32_t fs)
 {
     memset(m, 0, sizeof(*m));
@@ -51,7 +67,7 @@ void mcr_init(mcr_state_t *m, uint32_t sys_clk_freq, uint32_t fs)
     m->current_increment = (uint32_t)inc;
     // Write the default to the NCO so it starts at the right rate even
     // before a CRF stream binds.
-    mcr_increment_write(m->base_increment);
+    inc_write_dbg(m->base_increment, 0); mcr_increment_write(m->base_increment);
     m->watchdog_reset_active = 1;
     m->gptp_locked_base = m->base_increment;
 }
@@ -125,6 +141,13 @@ void mcr_set_trim_ppb(int32_t ppb)
 }
 int32_t mcr_get_trim_ppb(void) { return mcr_trim_ppb; }
 
+// EXPERIMENT (temporary): who writes the NCO increment, and does it oscillate?
+//
+// Three call sites write mcr_increment_write() with independently computed
+// values. If two of them disagree the NCO alternates between rates, which would
+// starve the ring while fifo_level still reads centre -- the one observation
+// nothing else explains. Logs only on CHANGE, so a steady clock prints nothing
+// and an oscillating one prints a visible ping-pong.
 static uint32_t mcr_compute_gptp_base(const mcr_state_t *m)
 {
     // READ THE SERVO THAT IS ACTUALLY RUNNING.
@@ -156,8 +179,8 @@ static uint32_t mcr_compute_gptp_base(const mcr_state_t *m)
     // why correcting the NCO rate starves a ring whose level looks correct.
     // The 5.3 s divergence seen when the trim was applied is very likely the
     // same underlying fault seen from another angle.
-    const gptp_t *g = m->gptp;
-    if (!g || !g->servo_locked || g->base_addend_full == 0) {
+    const ptpv1_state_t *g = &g_ptpv1;      // EXPERIMENT: discipline re-enabled
+    if (!g->locked || g->base_addend_full == 0) {
         // TRIM APPLIES HERE TOO. This early return is the path actually taken
         // under PTPv1 -- the gptp servo_locked flag belongs to the 802.1AS
         // servo, which this device no longer runs -- so a trim applied only
@@ -466,7 +489,7 @@ void mcr_process_rx(mcr_state_t *m, const uint8_t *frame, uint32_t len)
                     int64_t inc  = (int64_t)m->gptp_locked_base - corr;
                     if (inc < 1) inc = 1;
                     m->current_increment = (uint32_t)inc;
-                    mcr_increment_write(m->current_increment);
+                    inc_write_dbg(m->current_increment, 1); mcr_increment_write(m->current_increment);
                     m->servo_locked = 1;
                 }
             }
@@ -520,7 +543,7 @@ void mcr_usb_lock(mcr_state_t *m, int fifo_level, int center)
     if (inc < 1) inc = 1;
     if (inc > 0xFFFFFFFFLL) inc = 0xFFFFFFFFLL;
     m->current_increment = (uint32_t)inc;
-    mcr_increment_write(m->current_increment);
+    inc_write_dbg(m->current_increment, 2); mcr_increment_write(m->current_increment);
 }
 
 void mcr_servo_update(mcr_state_t *m)
