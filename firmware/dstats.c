@@ -10,9 +10,11 @@
 #include "net.h"
 #include "dante_dev.h"
 #include "dante_tx.h"
+#include "gptp.h"
 #include "ptpv1.h"
 #include "dante_flows.h"
 #include "dante_tx.h"
+#include "gptp.h"
 #include <generated/csr.h>
 #include <stdio.h>
 
@@ -47,6 +49,14 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     put32(p, n, ethmac_sram_writer_errors_read());     n += 4;   // 13
     put32(p, n, ethmac_rx_datapath_crc_errors_read()); n += 4;   // 14
 
+    // PTP time alongside the last EMITTED timestamp, so drift between the media
+    // clock and PTP can be measured directly. The media clock free-runs from a
+    // single anchor; nothing here reported how far it had wandered.
+    {
+        ptp_timestamp_t t = gptp_read_time();
+        put32(p, n, (uint32_t)t.seconds);                      n += 4;
+        put32(p, n, (uint32_t)((t.nanoseconds * 3u) / 62500u)); n += 4;
+    }
     put32(p, n, dante_tx_active());                 n += 4;   // 15
     put32(p, n, g_flows_stats.requests);               n += 4;   // 16
     put32(p, n, g_flows_stats.rejected);               n += 4;   // 17
