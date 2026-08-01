@@ -31,6 +31,10 @@
 
 dante_tx_stats_t g_tx_stats;
 
+// How long PTP must stay locked before the media clock is anchored to it.
+// The first lock edge is not trustworthy -- see dante_tx_poll.
+#define PTP_SETTLE_MS    4000
+
 #define N_FLOWS         (DANTE_TX_CHANNELS / 8)     // 6
 #define FPP             16
 #define BYTES_PER_SAMP  3
@@ -239,7 +243,34 @@ void dante_tx_poll(void)
     // OK to keep the receiver's state machine moving, but until a flow is
     // actually built there is nothing to send, and enabling the talker would
     // put all six multicast bundles back on the wire for nobody.
-    uint8_t want = g_ptpv1.locked && (dante_tx_active() > 0);
+    // WAIT FOR THE CLOCK TO SETTLE, not just to report locked once.
+    //
+    // The console shows why: the first lock is not stable. PTP locks, drops out
+    // again (offset -21406 ns), relocks, and only afterwards applies its path
+    // delay and a phase correction:
+    //
+    //   [ptpv1] LOCKED, offset -29 ns
+    //   [dtx] media clock anchored ... / talker ENABLED     <- audio starts BAD
+    //   [ptpv1] unlocked, offset -21406 ns
+    //   [ptpv1] LOCKED, offset 1138 ns
+    //   [ptpv1] path delay 21250 ns, phase corrected -1175 ns
+    //                                                       <- ~1 s later, clean
+    //
+    // Anchoring on that first edge samples a clock that then moves underneath
+    // it, and the media clock free-runs from the anchor, so it keeps whatever
+    // error was present at that instant. Requiring the lock to HOLD, and the
+    // path delay to have been measured, costs a few seconds of silence at
+    // startup and starts clean instead of starting wrong and recovering.
+    static uint32_t lock_since;
+    static uint8_t  was_locked;
+    if (g_ptpv1.locked && !was_locked) lock_since = gptp_uptime_ms();
+    was_locked = g_ptpv1.locked;
+
+    uint8_t settled = g_ptpv1.locked
+                   && g_ptpv1.mean_path_delay_ns != 0
+                   && (gptp_uptime_ms() - lock_since) >= PTP_SETTLE_MS;
+
+    uint8_t want = settled && (dante_tx_active() > 0);
 
     // Re-anchor when the emitted seconds drifts from PTP by more than a second.
     // The media clock is rate-disciplined by mcr, so this should never fire in
@@ -353,6 +384,7 @@ static flow_slot_t flows[N_FLOWS];
 // timeout does is release a context when a receiver goes away for good, so
 // erring long costs nothing and erring short costs audio.
 #define FLOW_TIMEOUT_MS  300000
+
 
 
 static void write_ctx(unsigned f, const uint8_t dst_ip[4], const uint8_t dmac[6],
