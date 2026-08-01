@@ -147,50 +147,29 @@ proportional to actual subscriptions (0.03 Mbit/s idle).
 
 ## Open bugs
 
-**Media clock drifts away from PTP and the stream dies silently.** The most
-serious one. Left running overnight the device reported everything healthy —
-talker on, PTP locked, flows bound, 9019 pps, zero underrun and overrun, fifo at
-centre, keepalives current — and produced no audio.
+**Fixed: media clock drifted away from PTP and the stream died silently.**
+Left running overnight the device reported everything healthy — talker on, PTP
+locked, flows bound, 9019 pps, zero underrun and overrun, fifo at centre — and
+produced no audio.
 
-The media clock free-runs from a **single anchor** taken when the talker is
-enabled, and `dante_tx_poll` only re-anchors when emitted seconds differ from
-PTP by more than **one second**. Measured drift between the two is **3.6 ppm** —
-about 13 ms per hour, ~100 ms overnight. That is two orders of magnitude past a
-receiver's ~1 ms buffer and two orders *below* the re-anchor threshold, so it can
-never self-correct while every counter stays perfect.
+Root cause was not a mistuned servo but an **unconnected** one. `mcr` derived
+the media-clock rate from `m->gptp->current_addend_full / base_addend_full`,
+gated on `g->servo_locked` — a flag set only by `gptp_servo_update()`, the
+**802.1AS** servo. This device runs PTPv1, which keeps its addend state in
+`g_ptpv1` and writes nothing to the gPTP struct. The gate was therefore never
+true, `mcr_compute_gptp_base()` always returned the undisciplined
+`base_increment`, and the media clock free-ran at the raw crystal rate.
 
-`tools/stats.py` now reports `ptp_now_sec`/`ptp_now_sub` beside the last emitted
-timestamp, so the drift is directly measurable. Fresh after an anchor it reads
-about −18 samples (−0.38 ms), which is the intended offset rather than drift.
+    before   +4.34 ppm   +15.6 ms/hour   (~100 ms overnight)
+    after    +0.17 ppm   +0.61 ms/hour
 
-**A rate-trim servo was attempted and REVERTED.** `mcr_set_trim_ppb()` exists
-and is wired to a slow integrator on the measured drift, but the call is
-commented out. Two things went wrong, both recorded so the next attempt does not
-repeat them:
+against a receiver buffer of ~1 ms. `mcr` now reads `g_ptpv1` directly.
 
-1. The trim was first applied only after the early return in
-   `mcr_compute_gptp_base()`, which tests `g->servo_locked` — the **802.1AS**
-   servo flag, on a device that runs PTPv1. That early return is the live path,
-   so the trim was dead code. Measured proof: rate stayed at +4.83 ppm against
-   +4.34 ppm before, i.e. no effect at all.
-2. Applying it on that path too made things far worse — the emitted timestamp
-   fell 256617 samples (5.3 s) behind PTP in 115 s. That is a thousand times
-   more than the ±50 ppm the trim can produce, so the media clock or the talker
-   stops rather than merely running slow. Cause not identified.
-
-Reverted to the known-good +4.3 ppm rather than left in a state that breaks
-audio outright. The measurement path still runs, so drift stays observable via
-`tools/stats.py`.
-
-**The fix is rate, not periodic re-anchoring.** A constant offset is harmless —
-the receiver absorbs it as latency — it is *accumulation* that eventually
-exceeds the buffer. Tightening the threshold would re-anchor every few minutes
-and each re-anchor is a step discontinuity, i.e. an audible click. The correct
-fix is to null the 3.6 ppm by trimming the media-clock NCO in `mcr` against the
-drift now being measured. Firmware-only; no gateware rebuild.
-
-Not yet confirmed by a second overnight run: the first night's evidence was
-destroyed by reflashing to add the instrumentation before capturing it.
+Two wrong turns before finding it, both recorded in git: a rate-trim servo added
+to `mcr` that was dead code (applied only after an early return that is the live
+path under PTPv1), then one that diverged catastrophically when applied on that
+path (timestamp fell 5.3 s behind in 115 s). `mcr_set_trim_ppb()` remains in the
+tree with its call commented out; with the real fix in place it is not needed.
 
 **Fixed:** *audio was mangled for the first seconds of every stream.* Two
 separate causes, both now addressed. The talker used to toggle ON → OFF → ON at

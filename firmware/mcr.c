@@ -8,7 +8,8 @@
 
 #include "mcr.h"
 #include "avtp_const.h"   // AVTP_SUBTYPE_CRF
-#include "gptp.h"   // gptp_read_rx_timestamp()
+#include "gptp.h"
+#include "ptpv1.h"   // gptp_read_rx_timestamp()
 #include <generated/csr.h>
 #include <string.h>
 #include <stdio.h>
@@ -126,8 +127,21 @@ int32_t mcr_get_trim_ppb(void) { return mcr_trim_ppb; }
 
 static uint32_t mcr_compute_gptp_base(const mcr_state_t *m)
 {
-    const gptp_t *g = m->gptp;
-    if (!g || !g->servo_locked || g->base_addend_full == 0) {
+    // READ THE SERVO THAT IS ACTUALLY RUNNING.
+    //
+    // This used to take its ratio from m->gptp, whose servo_locked flag is set
+    // only by gptp_servo_update() -- the 802.1AS servo. This device runs PTPv1,
+    // which keeps its own addend state in g_ptpv1 and writes NOTHING to the gPTP
+    // struct. So the gate was never true, the function always returned the
+    // undisciplined base_increment, and the media clock ran at the raw crystal
+    // rate with no correction at all.
+    //
+    // That is the whole 4.34 ppm: not a mistuned servo, an unconnected one.
+    // 15.6 ms/hour, ~100 ms overnight, against a receiver buffer of ~1 ms --
+    // which is why a stream that started clean was dead by morning with every
+    // counter still reading healthy.
+    const ptpv1_state_t *g = &g_ptpv1;
+    if (!g->locked || g->base_addend_full == 0) {
         // TRIM APPLIES HERE TOO. This early return is the path actually taken
         // under PTPv1 -- the gptp servo_locked flag belongs to the 802.1AS
         // servo, which this device no longer runs -- so a trim applied only
