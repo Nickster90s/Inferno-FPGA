@@ -541,6 +541,14 @@ Hard-won, each one cost real debugging time. Read before changing gateware.
 
 ## Related projects
 
+- [TerminalDanteControl](https://github.com/Nickster90s/TerminalDanteControl) —
+  `dantectl`, a terminal Dante controller: Discover, Sync and a Routing
+  patchbay. Python 3 stdlib only. Written against this firmware and the captures
+  in `captures/`, and it is how the device's control plane, PTP lock and
+  subscriptions get checked from the bench without Dante Controller. Its README
+  records the measurement showing this firmware drops ARC requests that arrive
+  in a burst with info queries (0/12, against 12/12 on a RedNet A16R under the
+  same load)
 - [inferno](https://gitlab.com/lumifaza/inferno) — Dante for Linux, in Rust
 - [statime](https://github.com/pendulum-project/statime) — `no_std` PTP in Rust
 - [network-audio-controller](https://github.com/chris-ritsen/network-audio-controller) —
