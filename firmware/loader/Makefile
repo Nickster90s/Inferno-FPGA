@@ -20,6 +20,18 @@ OBJECTS = crt0.o loader.o cfgflash.o
 
 CFLAGS += -I. -I.. -Os
 
+# Header dependency tracking. Without -MMD/-MP AND the -include at the bottom,
+# editing a header -- or regenerating csr.h, which is the dangerous one -- does
+# NOT rebuild the .c that includes it. The main firmware Makefile fixed this;
+# this one had the flags' effect but never included the .d files, so it silently
+# kept a stale loader.o. Caught 2026-08-01 when adding rx_gate shifted the UART
+# and TSU CSR windows (rx_gate sorts before timer0/tsu/uart): an incremental
+# build produced a loader.bin with the OLD addresses, which would have been
+# baked into the ROM and broken the loader's console on a bitstream that
+# otherwise looked fine.
+DEPFLAGS := -MMD -MP
+CFLAGS   += $(DEPFLAGS)
+
 # ROM budget is read from the generated regions.ld, not hardcoded, so it cannot
 # drift from integrated_rom_size in avb_soc.py.
 # sed out the hex length, then let the shell evaluate it ($(( )) understands 0x).
@@ -74,3 +86,5 @@ clean:
 	$(RM) $(OBJECTS) $(OBJECTS:.o=.d) loader.elf loader.bin loader.elf.map .*~ *~
 
 .PHONY: all clean
+
+-include $(OBJECTS:.o=.d)

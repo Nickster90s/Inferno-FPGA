@@ -65,6 +65,43 @@ and drives `core.sink` through a frame-atomic `TXFrameArbiter`
 (firmware SRAM reader + gateware AAF packetizer) — see `aaf_packetizer.py`.
 This is the injection seam for the gateware USB→AAF talker (#67).
 
+## 5. mac/sram.py — `discard_in` on the SRAM writer (pre-existing, undocumented)
+`LiteEthMACSRAMWriter` gained a user-driven `discard_in` input (sram.py:32).
+When it is high on the cycle of `sink.last`, the FSM goes to DISCARD instead
+of TERMINATE, so the frame:
+
+  * never pushes the status FIFO -> no `ev_pending`, CPU never sees it;
+  * never advances the slot pointer -> **never consumes an RX slot**;
+  * never reaches `stat_fifo.sink.valid` -> the `rx_ts` ring in avb_soc.py is
+    not pushed either, so the RX-timestamp ring stays in lock-step for free.
+
+The frame's bytes still land in the current (uncommitted) slot RAM and are
+overwritten by the next frame. Added originally for the AVB `AVTPSampleExtractor`
+(now parked in `_avb_reference/`); it was left in place and undocumented after
+Dante Phase 0. `rx_gate.py` uses it — see patch #6.
+
+## 6. mac/\_\_init\_\_.py — hybrid block restored to `__init__` (2026-08-01)
+Patch #4 moved the wishbone TX connect into `do_finalize()` and accidentally
+swept the **Hybrid Mode** block along with it, nested inside the
+`not tx_wired` guard. That was broken two ways at once:
+
+  * hybrid mode never sets `_wishbone_tx` (it is set only in the `"wishbone"`
+    branch), so the block was unreachable;
+  * it referenced `interface`, `dw` and `hw_mac` — `__init__` parameters, not in
+    scope inside `do_finalize` — so it would have raised `NameError` if reached.
+
+Moved back into `__init__` where it belongs. The TX seam is wishbone-only by
+construction: in hybrid mode `LiteEthMACCoreCrossbar` owns `core.sink` through
+its own TX arbiter FSM. Backup: `__init__.py.nen-bak`.
+
+**No `rx_wired` seam was needed.** The plan (risk 8) assumed `rx_gate` would have
+to sit *in* the RX stream between `core.source` and `interface.sink`, mirroring
+`tx_wired`. It does not: patch #5's `discard_in` already drops a frame at the
+point that matters — before it takes one of the 2 RX slots — so `rx_gate.py` is a
+pure **observer** on `core.source` driving one wire into the writer. The RX
+datapath is not re-plumbed, which also means the RX-timestamp ring and the
+`eth_rx` timing closure are untouched. One less patch to a vendored dependency.
+
 ## (historical) NEXT LEVER notes — superseded by patch #3
 region-constrain the USB block via nextpnr --pre-place (floorplan_usb.py);
 recovered 114 MHz only. Kept for context.

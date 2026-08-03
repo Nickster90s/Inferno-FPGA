@@ -30,6 +30,8 @@
 #include "ptpv1.h"
 #include "dante_tx.h"
 #include "dante_flows.h"
+#include "rx_gate.h"
+#include "mcr_dante.h"
 void dante_stats_init(void);
 
 // MAC address — locally administered, unique per device.
@@ -49,7 +51,13 @@ static mcr_state_t    mcr;
 
 // RX EtherType counters for link-debug
 static uint32_t rx_total, rx_ptp, rx_avtp, rx_msrp, rx_other;
-static uint32_t rx_filtered;         // frames early-dropped by the MAC allow-list
+static uint32_t rx_filtered;         // frames early-dropped by the SOFTWARE MAC allow-list
+// Exposed for the rx_gate readout: the software filter runs AFTER the frame has
+// taken an RX slot, so this counter and rx_gate's discard_count measure the same
+// traffic at two different points. Once the gate is armed this should go flat
+// while rx_gate's discard_count picks the frames up instead -- which is how you
+// tell the gateware is actually doing the dropping.
+uint32_t rx_gate_sw_filtered(void) { return rx_filtered; }
 uint32_t rx_pops;                    // TEMPORARY: total ts-ring pops issued by firmware
 uint32_t rx_ts_resyncs;              // TEMPORARY: stale ts-ring entries dropped
 uint32_t g_lvl_pre, g_lvl_post;      // TEMPORARY: ts-ring level around the resync
@@ -665,6 +673,67 @@ static void check_uart_cmd(void)
             mcr_unbind(&mcr);
             printf("[CFG] stale AVB CRF binding cleared from NV + MCR unbound.\n");
             break;
+        case 'g': {
+            // RX MAC allow-list state. The counters run whether or not the
+            // filter is armed, so with it OFF this is a dry run: nomatch is
+            // exactly what WOULD be dropped, and last_drop is the address it
+            // last saw -- read it before arming anything.
+            rx_gate_status_t g;
+            rx_gate_get_status(&g);
+            printf("\n[rxgate] armed=%u match=%lu nomatch=%lu discarded=%lu\n",
+                   g.enabled,
+                   (unsigned long)g.match,
+                   (unsigned long)g.nomatch,
+                   (unsigned long)g.discarded);
+            printf("  last dropped dst=%02x:%02x:%02x:%02x:%02x:%02x\n",
+                   g.last_drop_mac[0], g.last_drop_mac[1], g.last_drop_mac[2],
+                   g.last_drop_mac[3], g.last_drop_mac[4], g.last_drop_mac[5]);
+            if (g.pending_revert)
+                printf("  auto-revert in %lu ms (press x, or send commit, to keep)\n",
+                       (unsigned long)g.revert_in_ms);
+            printf("  sw-filtered=%lu (dispatch_rx, AFTER the slot was taken)\n",
+                   (unsigned long)rx_gate_sw_filtered());
+            printf("  mac writer_errors=%u  (this is what the filter is for)\n",
+                   ethmac_sram_writer_errors_read());
+            break;
+        }
+        case 'x': {
+            // Arm/disarm from the console. No auto-revert here: a MAC filter
+            // cannot lock the UART out, so the console is the escape hatch, not
+            // the thing that needs one.
+            rx_gate_status_t g;
+            rx_gate_get_status(&g);
+            rx_gate_set(!g.enabled, 0);
+            break;
+        }
+        case 'c': {
+            // Media-clock state. With discipline DISABLED this is a dry run:
+            // target_ppb is what PTP says the crystal error is, drift is what
+            // it independently measures. They should agree in magnitude and be
+            // opposite in sign -- that agreement is the check to make BEFORE
+            // arming, not after.
+            mcr_dante_status_t m;
+            mcr_dante_get_status(&m);
+            printf("\n[mclk] enabled=%u ptp_locked=%u\n", m.enabled, m.ptp_locked);
+            printf("  target=%ld ppb  applied=%ld ppb  (slew-limited)\n",
+                   (long)m.target_ppb, (long)m.applied_ppb);
+            printf("  inc base=%lu applied=%lu writes=%lu trips=%lu\n",
+                   (unsigned long)m.base_inc, (unsigned long)m.applied_inc,
+                   (unsigned long)m.nco_writes, (unsigned long)m.trips);
+            printf("  ring level min=%u avg=%u max=%u   underrun=%lu/s\n",
+                   m.lvl_min, m.lvl_avg, m.lvl_max,
+                   (unsigned long)m.underrun_per_s);
+            printf("  drift = %ld samples (emitted - PTP)\n",
+                   (long)m.drift_samples);
+            break;
+        }
+        case 'd': {
+            // Arm / disarm the media-clock discipline.
+            mcr_dante_status_t m;
+            mcr_dante_get_status(&m);
+            mcr_dante_set_enabled(!m.enabled);
+            break;
+        }
         case 'P': {
             // Sweep the Dante timestamp offset, in SAMPLES (was the AAF
             // presentation offset in ns). Steps by a quarter packet and wraps
@@ -691,6 +760,8 @@ static void check_uart_cmd(void)
                      "  u   step ULPI IDELAY tap (re-plug USB to test)\n"
                      "  P   sweep presentation offset (AVB only; goes in Phase 5)\n"
                      "  N   clear stale AVB CRF binding from NV\n"
+                     "  g   RX MAC allow-list state    x  arm/disarm it\n"
+                     "  c   media-clock state          d  arm/disarm discipline\n"
                      "  v   toggle verbose debug prints - default OFF\n"
                      "  G   dump PTP convergence ring-log (boot->lock curve)\n"
                      "  C   dump media-clock convergence ring-log\n"
@@ -826,6 +897,13 @@ int main(void)
         net_init(mac_addr, ip, prefix);
     }
 
+    // RX MAC allow-list (plan risk 8). Programs our unicast MAC into the
+    // gateware and leaves the filter DISABLED -- arming is always explicit,
+    // via the 'x' console command or the UDP control on the stats port. The
+    // gateware classifies frames either way, so 'g' reports a dry run of what
+    // arming would drop before anything is at risk.
+    rx_gate_init(mac_addr);
+
     // PTPv1 lives on 224.0.1.129. Joining is what makes a snooping switch
     // forward it to our port; the Dante control groups are all in 224.0.0.0/24
     // (link-local scope) and are never pruned, so they need no join.
@@ -848,6 +926,10 @@ int main(void)
     // Give MCR the gPTP handle so the free-running (cs=0) NCO is disciplined to
     // the network media rate (exactly 48000 gPTP-Hz) instead of the raw crystal.
     mcr_set_gptp(&mcr, &gptp);
+    // The Dante media clock takes ownership of the NCO from here. Starts
+    // DISABLED: it reports what it would write so the sign and magnitude can be
+    // checked against measured drift before anything touches the clock.
+    mcr_dante_init(CONFIG_CLOCK_FREQUENCY, 48000);
     // Start the gateware talker from boot so the USB ring always has a
     // consumer and the async-feedback servo has a real rate to measure.
     // The talker itself stays gated on clock lock inside the main loop.
@@ -877,6 +959,7 @@ int main(void)
         // servo against the TSU addend that ptpv1.c now owns. gptp.c is still
         // linked for its TSU accessors, uptime and servo helpers.
         net_poll();
+        rx_gate_poll();     // auto-revert a provisional, network-requested arm
         mdns_poll();
         dante_info_poll();
         ptpv1_poll();
@@ -887,7 +970,20 @@ int main(void)
         // actually runs. Phase 4 repoints this at the PTPv1 servo output.
         mcr_pump_hw(&mcr);
         mcr_servo_update(&mcr);
-        mcr_watchdog_tick(&mcr, gptp_uptime_ms());
+        // mcr_watchdog_tick() REMOVED as the NCO owner (2026-08-03).
+        //
+        // Under Dante its `cs != 1 || !bound` branch was the ONLY live writer
+        // of the media-clock increment, and it ran EVERY iteration (~4 kHz)
+        // with a 2-unit (~0.5 ppm) deadband -- an AVB CRF-loss watchdog setting
+        // the Dante sample rate. Its other live effect (tracking
+        // gptp_locked_base) is meaningless with no 802.1AS servo running.
+        // mcr_dante.c is the single owner now; see MCR_REPLACEMENT.md.
+        //
+        // mcr.c stays linked for the NCO arithmetic and the USB feedback
+        // scaling. Its remaining write sites are all dead under Dante:
+        // mcr_servo_update() is gated on cs==1 && crf_rate_valid (no CRF ever
+        // arrives -- mcr_pump_hw is a no-op) and mcr_usb_lock() has no callers.
+        mcr_dante_poll();
 
         // ---- Talker gate ----------------------------------------------------
         // Enable the gateware talker only once the clock is locked. Emitting
@@ -923,7 +1019,14 @@ int main(void)
                 last_ms = now_ms;
                 usb_lock_calls++;
                 main_usb_fb_ovr_write(usb_fb_manual);   // 0 = auto measured loop
-                mcr.usb_last_level = (int)aaf_pkt_fifo_level_read();
+                uint32_t _lvl = aaf_pkt_fifo_level_read();
+                mcr.usb_last_level = (int)_lvl;
+                // Min/max over a 1 s window. A 1 Hz SNAPSHOT of this value is
+                // what made the last two media-clock attempts unreadable: the
+                // ring dips below the prime floor briefly and often, and a slow
+                // sample lands in a dip almost never. Min is the number that
+                // matters.
+                mcr_dante_level_sample(_lvl);
             }
         }
 

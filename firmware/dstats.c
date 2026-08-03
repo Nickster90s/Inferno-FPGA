@@ -15,6 +15,8 @@
 #include "dante_flows.h"
 #include "dante_tx.h"
 #include "gptp.h"
+#include "rx_gate.h"
+#include "mcr_dante.h"
 #include <generated/csr.h>
 #include <stdio.h>
 
@@ -26,10 +28,119 @@ static void put32(uint8_t *p, uint32_t n, uint32_t v)
     p[n+2] = (uint8_t)(v >> 8); p[n+3] = (uint8_t)v;
 }
 
+// rx_gate control + readout, on a SEPARATE request opcode.
+//
+// Deliberately NOT extra fields on the main reply. Growing that reply from 200
+// to 208 bytes once killed the port outright -- no response at all, while ARC
+// and flow control kept answering -- and the cause was never found (see the
+// comment further down). The main reply therefore stays byte-identical and
+// rx_gate gets its own, smaller record. A different reply is not a bigger one.
+//
+// Request: 'g'                -> status only
+//          'g' '1'            -> arm, provisionally (auto-reverts, see below)
+//          'g' '0'            -> disarm
+//          'g' 'c'            -> commit (cancel the auto-revert)
+//
+// Arming over the network is provisional on purpose: if the allow-list is
+// wrong, the packet carrying "turn it off" is exactly the one that gets
+// dropped. The board undoes it by itself unless told the network survived.
+#define RXGATE_REVERT_MS 30000u
+
+static void rxgate_rx(const uint8_t src_ip[4], uint16_t src_port,
+                      const uint8_t *req, uint32_t len)
+{
+    if (len >= 2) {
+        switch (req[1]) {
+            case '1': rx_gate_set(1, RXGATE_REVERT_MS); break;
+            case '0': rx_gate_set(0, 0);                break;
+            case 'c': rx_gate_commit();                 break;
+            default:  break;                            // status-only
+        }
+    }
+
+    rx_gate_status_t g;
+    rx_gate_get_status(&g);
+
+    uint8_t *p = net_udp_payload_buf();
+    uint32_t n = 0;
+    put32(p, n, 0x52584731u);          n += 4;   // 'RXG1' — version tag, so the
+                                                 // host parses by name and never
+                                                 // by a hand-counted offset.
+    put32(p, n, g.enabled);            n += 4;
+    put32(p, n, g.pending_revert);     n += 4;
+    put32(p, n, g.revert_in_ms);       n += 4;
+    put32(p, n, g.match);              n += 4;
+    put32(p, n, g.nomatch);            n += 4;
+    put32(p, n, g.discarded);          n += 4;
+    put32(p, n, ((uint32_t)g.last_drop_mac[0] << 24) |
+                ((uint32_t)g.last_drop_mac[1] << 16) |
+                ((uint32_t)g.last_drop_mac[2] << 8)  |
+                 (uint32_t)g.last_drop_mac[3]);  n += 4;
+    put32(p, n, ((uint32_t)g.last_drop_mac[4] << 8) |
+                 (uint32_t)g.last_drop_mac[5]);  n += 4;
+    // The two counters that say whether this is working, alongside the gate's
+    // own: writer_errors is the thing being fixed, and rx_filtered is the
+    // SOFTWARE filter's drop count -- it should go flat as the gate takes over.
+    put32(p, n, ethmac_sram_writer_errors_read()); n += 4;
+    put32(p, n, rx_gate_sw_filtered());            n += 4;
+
+    net_udp_commit(src_ip, src_port, STATS_PORT, n, NET_TOS_BEST_EFFORT);
+}
+
+// Media-clock control + readout, opcode 'm'. Same reasoning as 'g': a separate,
+// smaller record rather than extra fields on the 200-byte main reply, which
+// died once when it grew to 208.
+//
+//   'm'        -> status only
+//   'm' '1'    -> arm the discipline
+//   'm' '0'    -> disarm (NCO back to nominal, immediately)
+static void mclk_rx(const uint8_t src_ip[4], uint16_t src_port,
+                    const uint8_t *req, uint32_t len)
+{
+    if (len >= 2) {
+        if (req[1] == '1') mcr_dante_set_enabled(1);
+        else if (req[1] == '0') mcr_dante_set_enabled(0);
+    }
+
+    mcr_dante_status_t m;
+    mcr_dante_get_status(&m);
+
+    uint8_t *p = net_udp_payload_buf();
+    uint32_t n = 0;
+    put32(p, n, 0x4D434C4Bu);                    n += 4;   // 'MCLK' version tag
+    put32(p, n, m.enabled);                      n += 4;
+    put32(p, n, m.ptp_locked);                   n += 4;
+    put32(p, n, (uint32_t)m.target_ppb);         n += 4;
+    put32(p, n, (uint32_t)m.applied_ppb);        n += 4;
+    put32(p, n, m.base_inc);                     n += 4;
+    put32(p, n, m.applied_inc);                  n += 4;
+    put32(p, n, m.nco_writes);                   n += 4;
+    put32(p, n, m.trips);                        n += 4;
+    put32(p, n, m.lvl_min);                      n += 4;
+    put32(p, n, m.lvl_avg);                      n += 4;
+    put32(p, n, m.lvl_max);                      n += 4;
+    put32(p, n, m.underrun_per_s);               n += 4;
+    put32(p, n, (uint32_t)m.drift_samples);      n += 4;
+    put32(p, n, aaf_pkt_underrun_count_read());  n += 4;
+    put32(p, n, aaf_pkt_overrun_count_read());   n += 4;
+
+    net_udp_commit(src_ip, src_port, STATS_PORT, n, NET_TOS_BEST_EFFORT);
+}
+
 static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
                      uint16_t src_port, const uint8_t *req, uint32_t len)
 {
-    (void)dst_ip; (void)req; (void)len;
+    (void)dst_ip;
+
+    if (len >= 1 && req[0] == 'g') {
+        rxgate_rx(src_ip, src_port, req, len);
+        return;
+    }
+    if (len >= 1 && req[0] == 'm') {
+        mclk_rx(src_ip, src_port, req, len);
+        return;
+    }
+    (void)req; (void)len;
 
     uint8_t *p = net_udp_payload_buf();
     uint32_t n = 0;

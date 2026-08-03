@@ -110,8 +110,15 @@ Two properties are load-bearing and must survive every future change:
   `BENCHMARK_BASELINE.md`.
 - **The host is slaved to our clock, not the reverse.** The USB wrapper measures
   its own NCO-strobes-per-SOF and reports that as async isochronous feedback, so
-  the host paces itself to the media clock. There is no sample-rate converter
-  and nothing chases the FIFO, so nothing can run away.
+  the host paces itself to the media clock. There is no sample-rate converter.
+
+  **Correction (2026-08-03): "nothing chases the FIFO" was wrong**, and believing
+  it cost two bench sessions. The wrapper's feedback is a **PI servo on ring
+  level**, not a pure rate report — `rtl/usb_avb_subsystem.v`: `err = 64 -
+  block_level`, `integ += err`, P gain `err<<6`, updated every SOF. So the ring
+  already has a controller, and anything that disciplines the NCO becomes a
+  *second* controller on the same buffer. That is why the media-clock NCO must
+  be **slew-limited** (`mcr_dante.c`) rather than stepped.
 
 ---
 
@@ -147,8 +154,29 @@ proportional to actual subscriptions (0.03 Mbit/s idle).
 
 ## Open bugs
 
-**Media clock is UNDISCIPLINED under PTPv1 — drifts ~15 ms/hour.** Still open,
-and the most serious issue. Left running the stream dies silently: every counter
+**Media clock: rate discipline now works (2026-08-03), audio interaction still
+untested.** `mcr_dante.c` replaces `mcr`'s ownership of the NCO — one writer,
+rate only (`g_ptpv1.rate_ppb`, the servo integral, never the phase term),
+slew-limited to 100 ppb/s at 1 Hz. Measured by toggling it at runtime:
+**+4.86 ppm disarmed → +0.17 ppm armed** (17.5 → 0.6 ms/hour), causal and
+reversible. The whole correction costs **17 CSR writes**, against the old path's
+thousands per second.
+
+Root cause of the two previous failures, finally identified: an **AVB CRF-loss
+watchdog** was the only live NCO writer, rewriting it at ~4 kHz — *and* the USB
+async feedback is not a rate report but a **PI servo on ring level** (traced in
+`rtl/usb_avb_subsystem.v`), so the ring already had a controller. Stepping the
+NCO underneath it was the fault; the missing constraint was slew rate, not the
+choice of rate estimate. See `MCR_REPLACEMENT.md`.
+
+**Still untested:** the MacBook was off, so the ring was empty throughout. Drift
+is fixed; whether the USB servo absorbs the slewed NCO *with audio flowing* is
+the exact thing that killed both earlier attempts. Arm it with audio playing and
+someone watching (`tools/mclk.py`), not unattended — the auto-disable guard
+cannot distinguish "ring never primed" from "no USB source". Left **disarmed**.
+
+**(historical) Media clock is UNDISCIPLINED under PTPv1 — drifts ~15 ms/hour.**
+Was the most serious issue. Left running the stream dies silently: every counter
 reads healthy while the timestamp walks out of the receiver's ~1 ms buffer.
 
 Root cause is understood. `mcr_compute_gptp_base()` takes its rate from
@@ -197,8 +225,24 @@ Confirmed: two receivers, separate contexts, both playing.
 
 **`mac_writer_err` climbs at ~25/s.** Received frames dropped because the CPU
 cannot drain two RX slots against flooded multicast. This is the documented
-collapse mode (risk 8); PTP stays locked despite it, but it is real frame loss
-and wants the `rx_gate` MAC allow-list.
+collapse mode (risk 8); PTP stays locked despite it, but it is real frame loss —
+and it is the *source* of the ±5–10 µs PTP offset outliers that `ptpv1.c`'s
+unlock hysteresis currently masks, since a lost FollowUp or DelayResp mispairs
+with the wrong Sync.
+
+**Fixed by `rx_gate`** (2026-08-01) — see `RX_GATE.md`. Measured A/B on one
+bitstream with the filter toggled at runtime: **21.0% of unicast round-trips to
+the board were lost with the filter off (84 of 400), and 0 of 400 with it on.**
+`writer_errors` falls 61.1 → 8.4/s; the residual is flood frames aborted while
+the status FIFO is briefly full, counted before the MAC is classified, and is
+*not* lost control traffic — see RX_GATE.md for why, and why round-trip loss is
+the honest instrument. Underruns, overruns, PTP unlocks and re-anchors were all
+zero in both arms.
+
+The filter is disabled at reset and armed explicitly (`tools/rx_gate.py on`, or
+`x` on the console), so the bitstream behaves exactly as before until asked. The
+software allow-list in `dispatch_rx()` could never have fixed this on its own: it
+runs after the frame has already taken a slot, and the slot is what is exhausted.
 
 **Clipping at full source volume** is unconfirmed as ours. The digital path is
 a bit-exact MSB-justified truncation with no gain stage, so it cannot create
@@ -371,6 +415,8 @@ touch-sensitive, intermittent link.
 | `R` / `z` | dump / clear the on-FPGA packet capture ring |
 | `P` | sweep the presentation-time offset (AVB-only; removed in Phase 5) |
 | `N` | clear a stale inherited AVB CRF binding from NV |
+| `g` / `x` | RX MAC allow-list state / arm-disarm it (see `RX_GATE.md`) |
+| `c` / `d` | media-clock state / arm-disarm discipline (see `MCR_REPLACEMENT.md`) |
 | `v` | toggle verbose prints (default off) |
 | `r` | reboot |
 | `h` / `?` | help |
@@ -378,7 +424,9 @@ touch-sensitive, intermittent link.
 `b` is the early-warning instrument. Targets are **>10,000 iterations/s and 0
 writer errors**. If iterations/s falls below ~2000 or writer errors climb once
 real Dante multicast is on the wire, the CPU is being swamped by flooded audio
-and needs a MAC-level RX allow-list — not a protocol parser.
+and needs a MAC-level RX allow-list — not a protocol parser. That allow-list now
+exists in gateware: `g` shows what it would drop while still disabled, `x` arms
+it. `RX_GATE.md` has the procedure.
 
 ---
 
@@ -389,11 +437,15 @@ avb_soc.py              LiteX SoC top: CRG, LiteEth+TSU, MCR NCO, USB instance,
                         packetizer wiring, clock constraints, floorplan hooks
 aaf_packetizer.py       gateware packetizer: 6×8ch rings → frame builder →
                         TXFrameArbiter.  Phase 5 → dante_packetizer.py
+rx_gate.py              RX destination-MAC allow-list: drops the flooded audio
+                        before it takes an RX slot.  Off at reset -- RX_GATE.md
 floorplan_usb.py        --pre-place region constraint for the USB block
 build.sh                deterministic build wrapper (PYTHONHASHSEED + setarch -R)
 
 tools/
   netload.py            push firmware into coderam over raw Ethernet (dev loop)
+  rx_gate.py            arm / back out / measure the RX MAC allow-list
+  mclk.py               arm / back out / measure the media-clock discipline
   mkimage.py            wrap firmware in the loader's header for SPI flash
   seed_sweep.sh         build N seeds, tabulate Fmax per clock
   test_netload_protocol.py
@@ -410,6 +462,9 @@ firmware/
   mcr.c                 media-clock NCO servo
   osc.c                 minimal ARP/IPv4/UDP shim.  Phase 2 → net.c
   cap.c                 on-FPGA packet capture ring
+  rx_gate.c             CSR programming + auto-revert for the RX allow-list
+  mcr_dante.c           the Dante media clock: sole NCO owner, rate-only,
+                        slew-limited.  Replaces mcr.c's ownership
   cfgflash.c config.c   NV config in SPI flash (versioned + CRC)
   pkt_geom.h            packetizer stream geometry
 

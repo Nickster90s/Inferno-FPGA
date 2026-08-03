@@ -116,3 +116,89 @@ the actual fix.
   That layering is fine, but `gptp_t.servo_locked` being read by `mcr` while only
   the 802.1AS servo sets it is exactly the trap that caused the undisciplined
   clock. Any remaining cross-module reads of gPTP state deserve the same audit.
+
+---
+
+# DONE (2026-08-03) — `mcr_dante.c`
+
+Built and measured. `mcr_watchdog_tick()` no longer owns the NCO; `mcr_dante.c`
+is the single writer.
+
+## The mechanism, finally identified
+
+Two things had been missed, and together they explain why both previous attempts
+failed:
+
+**1. An AVB watchdog was setting the Dante sample rate.** Under Dante there is no
+CRF, so `mcr_pump_hw()` is a no-op, `mcr_servo_update()` is gated off
+(`cs==1 && crf_rate_valid`), and `mcr_usb_lock()` — itself a PI servo that writes
+the NCO — has **no callers at all**. The one live writer was the CRF-loss
+watchdog's fallback branch (`mcr.c:267`), rewriting the increment on **every
+main-loop iteration (~4 kHz)** with a 2-unit (~0.5 ppm) deadband.
+
+**2. The ring already has a controller.** The USB wrapper's async feedback is not
+a rate report. Traced in `rtl/usb_avb_subsystem.v`:
+
+    err    = 64 - block_level      // setpoint = ring centre
+    integ += err                   // integrator, clamped +/-0x080000
+    fb_out = f(strobe_rate, err<<6, integ)    // updated every SOF
+
+That is a PI servo on ring level. So disciplining the NCO adds a **second**
+controller to one buffer — and the old code stepped it at 4 kHz underneath a
+servo correcting at SOF rate.
+
+So the missing constraint was never *which* rate estimate to follow. Following
+the full addend (rate+phase) and following the integral alone both failed for the
+same reason: **neither was slew-limited.**
+
+## The rewrite
+
+- **One owner.** `mcr_dante.c` only. `main.c` no longer calls
+  `mcr_watchdog_tick()`.
+- **Rate only.** Follows `g_ptpv1.rate_ppb` — the servo integral. The
+  proportional term is phase and never reaches the audio sample rate.
+- **Slew-limited to 100 ppb/s, updated at 1 Hz.** The whole 4.3 ppm correction
+  takes ~43 s and costs **17 CSR writes**, against the old path's thousands per
+  second.
+- **Disabled at boot**, dry-run reporting first (`tools/mclk.py`).
+- **Auto-disable** if underrun exceeds 10% duty with an active ring.
+
+## Measured (no USB source attached; drift still valid, the packetizer emits at the media rate regardless)
+
+| discipline | drift |
+|---|---|
+| ARMED | **+0.17 ppm  (+0.6 ms/hour)** |
+| disarmed | **+4.86 ppm  (+17.5 ms/hour)** |
+
+Toggled twice, causal and reversible. Dry-run cross-check passed before arming:
+PTP's estimate (-4.28 ppm) against independently measured drift (+4.7 ppm) —
+opposite sign, matching magnitude.
+
+## Also found: the "underruns with fifo_level at centre" paradox is not one
+
+`underrun_count` increments on **every 48 kHz media tick** while un-primed, not
+per event — measured directly at 48009/s with the ring empty. So the historic
+"40547 underruns in 4 minutes" is **0.845 s of un-primed time (0.35% duty)**:
+brief, repeated dips. `fifo_level` was read as a ~1 Hz snapshot, which lands in a
+dip almost never. Nothing paradoxical, just a fast transient sampled slowly.
+`mcr_dante_level_sample()` now tracks min/max at 1 kHz; **watch min, not avg.**
+
+## NOT YET VALIDATED — and one gap in the safety net
+
+The whole ring/USB interaction is **untested**: the MacBook was off, so the ring
+was empty throughout. Drift is fixed; whether the USB PI servo absorbs a
+slew-limited NCO **while audio is flowing** is exactly what killed the last two
+attempts and has not been retried.
+
+The auto-disable guard has a known hole: it requires `lvl_max >= 32` to
+distinguish "ring active" from "no USB source". If a disciplined clock prevented
+the ring from priming at all, `lvl_max` would stay low, the guard would never
+trip, and audio would be silently dead. So **arm it with audio playing and
+someone watching**, not unattended:
+
+    tools/mclk.py status      # target vs drift, and ring level min/max
+    tools/mclk.py on          # slews over ~45 s
+    tools/mclk.py watch 120   # watch level MIN and underrun delta
+    tools/mclk.py off         # immediate, unconditional revert to nominal
+
+The board is left **disarmed**.

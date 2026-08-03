@@ -67,6 +67,7 @@ from liteeth.mac import LiteEthMAC
 from liteeth.core.ptp import LiteEthTSU
 
 from dante_packetizer import DantePacketizer, TXFrameArbiter
+from rx_gate import RXGate
 
 from migen.genlib.fifo import SyncFIFO, AsyncFIFO
 
@@ -562,13 +563,48 @@ class AVBSoC(SoCCore):
         # ~4 BRAM sites and, more importantly, removes the RX fanout off
         # mac.core.source that previously cost sys_clk headroom.
         #
-        # sram.writer.discard_in is now left undriven (Migen defaults it to 0),
-        # restoring the unfiltered RX path to the CPU. If Dante multicast flood
-        # ever swamps the dispatcher (risk 8 in the plan), reintroduce filtering
-        # as rx_gate.py -- a MAC allow-list -- NOT as a protocol parser.
-        #
         # Reference copies: _avb_reference/{avtp_extractor,crf_extractor}.py
         # ------------------------------------------------------------
+
+        # ------------------------------------------------------------
+        # RX GATE (plan risk 8) — destination-MAC allow-list.
+        #
+        # The trigger fired: on the unmanaged bench switch, other Dante devices'
+        # audio floods every port, and with only 2 RX slots (nrxslots CANNOT be
+        # raised, see above) ethmac_sram_writer_errors climbs ~25/s. That is real
+        # received-frame loss, and losing a PTPv1 FollowUp or DelayResp mispairs
+        # it with the wrong Sync -> +/-5-10 us offset excursions against a
+        # sub-microsecond steady state (TELEMETRY_AND_PTP.md section 2).
+        #
+        # NOT the rx_wired stream seam the plan expected. sram.writer.discard_in
+        # (a local liteeth patch, already here for the AVB extractor) drops a
+        # frame at the writer's FSM: no status-FIFO push, no ev_pending, and
+        # crucially NO SLOT ADVANCE, so a filtered frame never occupies one of
+        # the 2 RX slots. The gate is therefore a pure OBSERVER of the same
+        # stream the writer sees; the RX datapath is not re-plumbed at all. This
+        # also keeps the rx_ts ring consistent for free -- it is pushed on
+        # commit_pulse, which discarded frames never reach.
+        #
+        # DISABLED AT RESET. rx_gate.enable is CSRStorage(reset=0), so this
+        # bitstream behaves exactly like the previous one until firmware arms it,
+        # and writing 0 backs it out instantly. That matters because a wrong
+        # allow-list drops ALL RX -- no ARP, no PTP, no mDNS, no stats -- and the
+        # CSR write is the only way back that does not involve a JTAG reflash.
+        # ------------------------------------------------------------
+        self.submodules.rx_gate = rx_gate = RXGate(dw=32)
+        self.comb += [
+            # Observe-only tap. Driving sink.ready from the real consumer's ready
+            # (rather than tying it to 1) makes the gate's beat accounting
+            # cycle-identical to the writer's, whatever the writer does with it.
+            rx_gate.sink.valid.eq(mac.core.source.valid),
+            rx_gate.sink.ready.eq(mac.core.source.ready),
+            rx_gate.sink.last.eq(mac.core.source.last),
+            rx_gate.sink.data.eq(mac.core.source.data),
+            rx_gate.sink.last_be.eq(mac.core.source.last_be),
+            # The one wire that does anything. Sampled by the writer only on the
+            # cycle of sink.last (liteeth/mac/sram.py:96).
+            sram_writer.discard_in.eq(rx_gate.discard),
+        ]
 
         # CSRs: pop strobe + 80-bit popped value + level + overflow count.
         self.rx_ts_pop_lo  = CSRStatus(32, description="RX-ring popped nanoseconds.")

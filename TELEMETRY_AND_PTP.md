@@ -61,6 +61,27 @@ Where the accuracy actually goes, in order:
    FollowUp or DelayResp mispairs with the wrong Sync and injects microseconds
    of error. THIS IS THE ROOT CAUSE and it is a gateware fix: the rx_gate MAC
    allow-list from the plan's risk 8. Nothing else matters until it is done.
+
+   **DONE and MEASURED (2026-08-01) — see RX_GATE.md.** A/B on one bitstream,
+   filter toggled at runtime: **84 of 400 unicast round-trips lost with it off,
+   0 of 400 with it on.** The flood (3000.7/s) is fully gated.
+
+   Two corrections to the framing above, both learned by measuring:
+
+   - **mac_writer_err was the wrong instrument.** It counts a frame aborted
+     while the 2-deep status FIFO is full, *before* the destination MAC is
+     classified, so after rx_gate ~98% of what it counts is flood we were
+     discarding anyway. It falls 61.1 -> 8.4/s, not to 0, while actual loss goes
+     21% -> 0%. Round-trip loss is the honest number. Making the counter mean
+     what its name says is a small deferred-increment change in liteeth's
+     sram.py, not done here.
+   - **The outlier SOURCE is now gated, but the outlier RATE is not yet
+     re-measured.** No unlocks or re-anchors occurred in either 90 s arm, and no
+     +/-5-10 us excursions were seen (offset stayed inside a ~200-300 ns band
+     both ways) -- but the outliers were always intermittent and are masked by
+     hysteresis, so confirming they have stopped needs a long console watch for
+     `[ptpv1] outlier ... ignored`, which the operator's picocom sees and this
+     host does not.
 2. **PTPv1 has no correctionField.** Switch residence time lands directly in the
    offset -- the one place Audinate is not better, they have the same problem on
    PTPv1. On a quiet switch this is tens to hundreds of ns.
