@@ -17,6 +17,10 @@
 void ptpv1_init(const uint8_t mac[6]);
 void ptpv1_poll(void);
 
+// Runtime servo tuning, so variants can be interleaved without a reflash.
+void ptpv1_set_tuning(uint8_t median_n, int32_t ki_num, uint8_t exact);
+void ptpv1_get_tuning(uint8_t *median_n, int32_t *ki_num, uint8_t *exact);
+
 typedef struct {
     uint8_t  locked;                 // servo has converged
     uint8_t  have_master;            // a Leader has been seen

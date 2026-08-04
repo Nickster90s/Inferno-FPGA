@@ -228,3 +228,61 @@ Worth doing next, in order:
    numbers do not move.
 3. Path delay spread (3988 ns) still dominates the error budget and no servo
    change touches it.
+
+---
+
+# 5-RUN INTERLEAVED MATRIX (2026-08-04) — the single-capture table was noise
+
+Redone properly: 5 variants x 5 rounds, **round-robin**, switched at RUNTIME via
+a new `'s'` opcode so no variant needed a reflash. That matters — a reflash
+reboots the board, which re-locks PTP, re-anchors the media clock and restarts
+the talker, injecting exactly the transients a servo comparison is measuring.
+25 captures, 140 s each, zero reboots.
+
+| variant | off sd | \|mean\| standing | rate sd |
+|---|---|---|---|
+| A med7 ki900 | 108 [46..203] | 187 [120..535] | 0.0 [0.0..0.0] |
+| B med1 ki900 | 53 [39..124] | 318 [9..764] | 0.0 [0.0..0.0] |
+| C med1 ki3600 | 59 [46..157] | 36 [8..182] | 0.0 [0.0..21.7] |
+| D med7 ki3600 | 92 [38..173] | 77 [22..143] | 5.0 [0.0..14.0] |
+| **E med7 ki900 EXACT** | 75 [48..139] | **27 [4..90]** | 6.4 [5.2..14.6] |
+
+(median of 5 runs, [min..max]; ns unless stated. 0 unlocks, 0 underruns in all 25.)
+
+## Conclusions
+
+**Offset NOISE is indistinguishable across all five.** Every range overlaps every
+other. Neither the median width nor KI measurably affects jitter. The earlier
+single-capture-per-variant table appeared to show 5x differences and a clear
+winner; that was entirely run-to-run variance. **Both of the changes originally
+requested — remove the median, raise KI — turn out to change nothing measurable
+about noise.**
+
+**The STANDING OFFSET does separate, and A vs E do not overlap at all**
+([120..535] vs [4..90]). E is 7x better on the median with a tighter spread, at
+the SAME gain. It simply stops discarding the remainder.
+
+**`rate sd` 0.0 -> 6.4 ppb is the loop actually closing.** Under the truncating
+form the integral was frozen for any offset below 1111 ns and could not track
+real drift at all. That is the substantive fix, and it is a correctness issue,
+not a tuning preference.
+
+## Adopted
+
+median 7, KI 900, **exact integral accumulation**. The median filter stays: no
+evidence it helps, but none that it hurts either, and it is the configuration
+with the most hours on it.
+
+## Caveat worth keeping
+
+A confirmation capture taken straight after the change read sd 692 / mean 323 /
+rate sd 60.9 -- far worse than E's matrix figures. But its **path delay spread
+was 6266 ns against ~4000 ns during the matrix**: the network was simply
+noisier. It is not comparable, which is the same trap as before. Only
+interleaved runs support a ranking.
+
+It does show one real tradeoff: with the integral no longer frozen, rate wander
+tracks network noise (60.9 ppb in that window vs 6.4 ppb in the matrix). That
+is 0.06 ppm -- 8x smaller than the phase servo that was audibly bad -- and
+underruns stayed at 0, but it is the price of closing the loop and is worth a
+listen under load.

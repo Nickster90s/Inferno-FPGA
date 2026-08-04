@@ -161,7 +161,65 @@ static uint8_t         awaiting_followup;
 static int64_t  median_buf[MEDIAN_N];
 static uint8_t  median_count, median_pos;
 
+// RUNTIME-TUNABLE SERVO PARAMETERS.
+//
+// Exists so a variant can be A/B'd without a reflash. Reflashing costs a
+// reboot, which re-locks PTP, re-anchors the media clock and restarts the
+// talker -- all of which inject exactly the transients a servo comparison is
+// trying to measure. It also makes INTERLEAVED runs practical, which is what
+// distinguishes a real ranking from run-to-run network noise: a single capture
+// per variant was measured to vary ~3x on identical code.
+static uint8_t  rt_median_n     = MEDIAN_N;
+static int32_t  rt_ki_num       = SERVO_KI_NUM;
+// EXACT INTEGRAL IS NOW THE DEFAULT. Established by a 5-run interleaved matrix
+// (5 variants x 5 rounds, runtime-switched, no reboots), 2026-08-04:
+//
+//   variant             off sd            |mean| standing     rate sd
+//   A med7 ki900   108 [46..203]     187 [120..535] ns   0.0 [0.0..0.0]
+//   B med1 ki900    53 [39..124]       318 [9..764]      0.0 [0.0..0.0]
+//   C med1 ki3600   59 [46..157]        36 [8..182]      0.0 [0.0..21.7]
+//   D med7 ki3600   92 [38..173]       77 [22..143]      5.0 [0.0..14.0]
+//   E med7 ki900 EX 75 [48..139]         27 [4..90]      6.4 [5.2..14.6]
+//
+// Offset NOISE is indistinguishable across all five -- every range overlaps
+// every other, so neither the median width nor KI measurably affects jitter.
+// An earlier single-capture-per-variant table appeared to show 5x differences;
+// that was entirely run-to-run variance, and it is why this was redone with
+// interleaved repeats.
+//
+// The STANDING OFFSET does separate, and A vs E do not overlap at all
+// ([120..535] vs [4..90]). E is 7x better on the median with a tighter spread,
+// at the SAME low gain -- it simply stops discarding the remainder. rate sd
+// going 0.0 -> 6.4 ppb is the loop actually closing: under the old form the
+// integral was frozen for any offset below 1111 ns and could not track real
+// drift at all.
+//
+// 0 unlocks and 0 underruns across all 25 runs.
+static uint8_t  rt_exact_integ = 1;
+static int64_t  freq_integral_num;       // exact accumulator, when enabled
+
+
+
 static int64_t  freq_integral;
+
+void ptpv1_set_tuning(uint8_t median_n, int32_t ki_num, uint8_t exact)
+{
+    if (median_n < 1) median_n = 1;
+    if (median_n > MEDIAN_N) median_n = MEDIAN_N;
+    rt_median_n = median_n;
+    rt_ki_num   = ki_num;
+    rt_exact_integ = exact ? 1 : 0;
+    // Reset the filter so the new width does not inherit a half-full buffer of
+    // the old one, and re-seed the exact accumulator from the live integral.
+    median_count = 0; median_pos = 0;
+    freq_integral_num = freq_integral * SERVO_KI_DEN;
+}
+
+void ptpv1_get_tuning(uint8_t *median_n, int32_t *ki_num, uint8_t *exact)
+{
+    *median_n = rt_median_n; *ki_num = rt_ki_num; *exact = rt_exact_integ;
+}
+
 static int       unlock_streak;
 static uint32_t lock_streak;
 
@@ -257,8 +315,8 @@ static inline int uuid_eq(const uint8_t *a, const uint8_t *b)
 static int64_t median_of(int64_t v)
 {
     median_buf[median_pos] = v;
-    median_pos = (uint8_t)((median_pos + 1) % MEDIAN_N);
-    if (median_count < MEDIAN_N) median_count++;
+    median_pos = (uint8_t)((median_pos + 1) % rt_median_n);
+    if (median_count < rt_median_n) median_count++;
 
     int64_t tmp[MEDIAN_N];
     for (uint8_t i = 0; i < median_count; i++) tmp[i] = median_buf[i];
@@ -399,13 +457,26 @@ static void servo_update(int64_t offset_ns)
 
     int64_t kp_num = (filtered > 1000 || filtered < -1000)
                      ? SERVO_KP_FAST_NUM : SERVO_KP_NUM;
-    int64_t ki_num = SERVO_KI_NUM;
+    int64_t ki_num = rt_ki_num;
     int64_t p = (-filtered * kp_num) / SERVO_KP_DEN;
 
     // Anti-windup: only integrate inside a band, so a transient does not leave
     // a persistent frequency bias behind.
     if (filtered < 1000000 && filtered > -1000000) {
-        freq_integral += (-filtered * ki_num) / SERVO_KI_DEN;
+        if (rt_exact_integ) {
+            // Exact accumulation: keeps the remainder the truncating form
+            // throws away every update (offsets below SERVO_KI_DEN/ki_num ns
+            // otherwise contribute nothing at all).
+            freq_integral_num += (int64_t)(-filtered) * ki_num;
+            if (freq_integral_num >  SERVO_INTEGRAL_MAX * SERVO_KI_DEN)
+                freq_integral_num =  SERVO_INTEGRAL_MAX * SERVO_KI_DEN;
+            if (freq_integral_num < -SERVO_INTEGRAL_MAX * SERVO_KI_DEN)
+                freq_integral_num = -SERVO_INTEGRAL_MAX * SERVO_KI_DEN;
+            freq_integral = freq_integral_num / SERVO_KI_DEN;
+        } else {
+            freq_integral += (-filtered * ki_num) / SERVO_KI_DEN;
+            freq_integral_num = freq_integral * SERVO_KI_DEN;
+        }
         if (freq_integral >  SERVO_INTEGRAL_MAX) freq_integral =  SERVO_INTEGRAL_MAX;
         if (freq_integral < -SERVO_INTEGRAL_MAX) freq_integral = -SERVO_INTEGRAL_MAX;
     }

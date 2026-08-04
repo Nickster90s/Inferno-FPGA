@@ -141,6 +141,25 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         rxgate_rx(src_ip, src_port, req, len);
         return;
     }
+    // Servo tuning: 's' <median_n> <ki_num BE32> <exact>  -> current tuning back.
+    if (len >= 1 && req[0] == 's') {
+        if (len >= 7)
+            ptpv1_set_tuning(req[1],
+                             (int32_t)(((uint32_t)req[2] << 24) |
+                                       ((uint32_t)req[3] << 16) |
+                                       ((uint32_t)req[4] << 8)  | req[5]),
+                             req[6]);
+        uint8_t mn, ex; int32_t ki;
+        ptpv1_get_tuning(&mn, &ki, &ex);
+        uint8_t *p = net_udp_payload_buf();
+        uint32_t n = 0;
+        put32(p, n, 0x53525630u); n += 4;   // 'SRV0'
+        put32(p, n, mn);          n += 4;
+        put32(p, n, (uint32_t)ki); n += 4;
+        put32(p, n, ex);          n += 4;
+        net_udp_commit(src_ip, src_port, STATS_PORT, n, NET_TOS_BEST_EFFORT);
+        return;
+    }
     if (len >= 1 && req[0] == 't') {
         void telem_drain(const uint8_t *, uint16_t, const uint8_t *, uint32_t);
         telem_drain(src_ip, src_port, req, len);
