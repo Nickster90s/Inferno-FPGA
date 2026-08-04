@@ -495,6 +495,13 @@ static void write_ctx(unsigned f, const uint8_t dst_ip[4], const uint8_t dmac[6]
     aaf_pkt_flow_cfg_write((uint32_t)(nslots & 0x0F) | ((fpp == 16) ? 0x10u : 0u));
 }
 
+// 4-byte IP compare. Not memcmp(): this picolibc build does not link one, which
+// is why the surrounding code compares bytes by hand.
+static inline int ip4_eq(const uint8_t a[4], const uint8_t b[4])
+{
+    return a[0]==b[0] && a[1]==b[1] && a[2]==b[2] && a[3]==b[3];
+}
+
 int dante_tx_bind_unicast(const uint8_t peer_ip[4], const uint8_t dst_ip[4],
                           uint16_t dst_port, const uint16_t *chans,
                           uint8_t nslots, uint8_t fpp)
@@ -513,13 +520,32 @@ int dante_tx_bind_unicast(const uint8_t peer_ip[4], const uint8_t dst_ip[4],
         return -1;
     }
 
-    // Re-bind an existing flow from the same peer rather than allocating a new
-    // context: the ~5 s keepalive is the SAME request repeated, and treating
-    // each one as a new flow would exhaust all six contexts in half a minute.
+    // Re-bind an existing flow with the SAME DESTINATION SOCKET rather than
+    // allocating a new context: the ~5 s keepalive is the SAME request
+    // repeated, and treating each one as a new flow would exhaust all six
+    // contexts in half a minute.
+    //
+    // THE KEY IS (peer, dst_ip, dst_port), NOT THE PEER ALONE.
+    //
+    // Matching on the peer capped every receiver at ONE flow: a second flow
+    // request from the same device found the first context and overwrote it,
+    // so a 16-channel receiver received 8 channels and nothing was ever
+    // rejected. Found 2026-08-04 with a RedNet A16R (16 ch) and an AM2 (2 ch)
+    // subscribed: 2 contexts bound, 205 requests, 0 rejected, both devices
+    // asking for more than they got.
+    //
+    // A receiver demultiplexes its flows by DESTINATION UDP PORT -- each one
+    // arrives in its own 0x0802 socket descriptor (dante_flows.c:88) -- so the
+    // port is what distinguishes two flows from one device. Keying on the full
+    // socket keeps the keepalive behaviour the old comment wanted while
+    // letting one device hold as many flows as it asks for.
     uint32_t now_ms = gptp_uptime_ms();
     int f = -1;
     for (unsigned i = 0; i < N_FLOWS; i++)
-        if (flows[i].in_use && (flows[i].peer[0]==peer_ip[0] && flows[i].peer[1]==peer_ip[1] && flows[i].peer[2]==peer_ip[2] && flows[i].peer[3]==peer_ip[3])) { f = (int)i; break; }
+        if (flows[i].in_use &&
+            flows[i].dport == dst_port &&
+            ip4_eq(flows[i].peer, peer_ip) &&
+            ip4_eq(flows[i].dst,  dst_ip)) { f = (int)i; break; }
     if (f < 0)
         for (unsigned i = 0; i < N_FLOWS; i++)
             if (!flows[i].in_use) { f = (int)i; break; }
