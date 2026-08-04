@@ -32,13 +32,14 @@ import time
 
 PORT = 7779
 TAG = 0x4D434C4B  # 'MCLK'
-SIGNED = {"target_ppb", "applied_ppb", "drift_samples"}
+SIGNED = {"target_ppb", "applied_ppb", "drift_samples", "phase_ppb"}
 
 FIELDS = [
     "enabled", "ptp_locked", "target_ppb", "applied_ppb",
     "base_inc", "applied_inc", "nco_writes", "trips",
     "lvl_min", "lvl_avg", "lvl_max", "underrun_per_s",
     "drift_samples", "underrun_total", "overrun_total",
+    "phase_enabled", "phase_ppb",
 ]
 
 
@@ -54,8 +55,10 @@ def query(board, arg=b"", timeout=3.0, tries=4):
             if w[0] != TAG:
                 raise ValueError(f"bad tag {w[0]:#010x}; firmware current?")
             out = dict(zip(FIELDS, w[1:]))
+            # Tolerate a firmware older than a field: zip() truncates, so a
+            # short reply simply omits the tail rather than crashing the tool.
             for k in SIGNED:
-                if out[k] >= 1 << 31:
+                if k in out and out[k] >= 1 << 31:
                     out[k] -= 1 << 32
             return out
         except Exception as e:      # noqa: BLE001 - report the last failure
@@ -77,6 +80,8 @@ def show(st):
     print(f"  underrun       {st['underrun_per_s']}/s"
           f"   {'<- ring empty, no USB source' if st['underrun_per_s'] > 40000 else ''}")
     print(f"  drift          {st['drift_samples']:+d} samples (emitted - PTP)")
+    print(f"  phase term     {'ENABLED' if st.get('phase_enabled') else 'off'}"
+          f"   contributing {st.get('phase_ppb', 0):+d} ppb")
 
 
 def watch(board, secs):
@@ -136,6 +141,12 @@ def main():
     elif cmd == "on":
         print("armed:")
         show(query(board, b"1"))
+    elif cmd == "phase-on":
+        print("phase term ENABLED (experimental - it caused clock artifacts once):")
+        show(query(board, b"P"))
+    elif cmd == "phase-off":
+        print("phase term disabled:")
+        show(query(board, b"p"))
     elif cmd == "off":
         print("disarmed, NCO back to nominal:")
         show(query(board, b"0"))

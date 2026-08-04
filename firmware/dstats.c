@@ -100,6 +100,8 @@ static void mclk_rx(const uint8_t src_ip[4], uint16_t src_port,
     if (len >= 2) {
         if (req[1] == '1') mcr_dante_set_enabled(1);
         else if (req[1] == '0') mcr_dante_set_enabled(0);
+        else if (req[1] == 'P') mcr_dante_set_phase_enabled(1);
+        else if (req[1] == 'p') mcr_dante_set_phase_enabled(0);
     }
 
     mcr_dante_status_t m;
@@ -123,6 +125,8 @@ static void mclk_rx(const uint8_t src_ip[4], uint16_t src_port,
     put32(p, n, (uint32_t)m.drift_samples);      n += 4;
     put32(p, n, aaf_pkt_underrun_count_read());  n += 4;
     put32(p, n, aaf_pkt_overrun_count_read());   n += 4;
+    put32(p, n, m.phase_enabled);                n += 4;
+    put32(p, n, (uint32_t)m.phase_ppb);          n += 4;
 
     net_udp_commit(src_ip, src_port, STATS_PORT, n, NET_TOS_BEST_EFFORT);
 }

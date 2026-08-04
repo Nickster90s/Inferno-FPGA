@@ -51,8 +51,12 @@ void mcr_dante_level_sample(uint32_t level);
 // Arm or disarm the discipline. Disarming restores the nominal increment.
 void mcr_dante_set_enabled(int on);
 
+void mcr_dante_set_phase_enabled(int on);
+
 typedef struct {
     uint8_t  enabled;
+    uint8_t  phase_enabled;
+    int32_t  phase_ppb;
     uint8_t  ptp_locked;
     int32_t  target_ppb;        // g_ptpv1.rate_ppb -- where we want to be
     int32_t  applied_ppb;       // where the slew limiter has actually got to

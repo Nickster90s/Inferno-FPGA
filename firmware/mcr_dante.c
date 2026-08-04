@@ -41,6 +41,22 @@
 
 // ---- Phase ----
 //
+// DISABLED BY DEFAULT, because the first version of it broke audio.
+//
+// It was pure-proportional with a deadband, and its output fed the rate slew
+// limiter -- i.e. the lag was INSIDE the loop. That is a textbook limit cycle:
+// on the bench the phase hunted -27 -> +216 samples (a 5 ms excursion, target
+// +74) while modulating the media clock rate by roughly +/-0.5 ppm on a slow
+// period. Receivers locking to those timestamps reported clock problems, and
+// the operator heard them. Bisected 2026-08-04 by disabling the discipline:
+// audio went clean immediately.
+//
+// Rate discipline alone is validated and safe (see the audio test above), so
+// the two are now separable: `mclk on` gives rate only. The phase term stays
+// off until it is redesigned with damping -- a PI whose integrator is not
+// behind the slew limiter, much lower gain, and telemetry that can actually
+// show it oscillating. Do not re-enable it on a hunch.
+//
 // RATE AND PHASE ARE SEPARATE STATE. Correcting the rate stops the error
 // growing; it never brings back what has already accumulated. Missing this is
 // what produced silence on 2026-08-04: rate discipline was working (+0.53 ppm)
@@ -81,6 +97,8 @@ static uint32_t last_underrun;
 static uint32_t underrun_per_s;
 static int32_t  drift_samples;
 static int32_t  phase_ppb;
+// Phase term DEFAULTS OFF. See the block comment at PHASE_MAX_PPB.
+static uint8_t  phase_enabled;
 
 // 1 s level window, fed at 1 kHz.
 static uint32_t win_start_ms;
@@ -209,7 +227,9 @@ void mcr_dante_poll(void)
     // ---- Phase term ----
     // drift_samples was computed above: emitted media timestamp minus PTP.
     // Positive means we are running AHEAD, so the clock must be slowed.
-    {
+    if (!phase_enabled) {
+        phase_ppb = 0;
+    } else {
         int32_t perr = drift_samples - 74;      // DANTE_TX_TS_OFFSET
         if (perr > PHASE_DEADBAND_SAMPLES || perr < -PHASE_DEADBAND_SAMPLES) {
             phase_ppb = -perr * PHASE_KP_PPB_PER_SAMPLE;
@@ -260,8 +280,18 @@ void mcr_dante_poll(void)
     }
 }
 
+void mcr_dante_set_phase_enabled(int on)
+{
+    phase_enabled = on ? 1 : 0;
+    if (!phase_enabled) phase_ppb = 0;
+    printf("[mclk] phase term %s\n", phase_enabled ? "ENABLED (experimental)"
+                                                    : "disabled");
+}
+
 void mcr_dante_get_status(mcr_dante_status_t *out)
 {
+    out->phase_enabled  = phase_enabled;
+    out->phase_ppb      = phase_ppb;
     out->enabled        = enabled;
     out->ptp_locked     = g_ptpv1.locked;
     out->target_ppb     = target_ppb;
