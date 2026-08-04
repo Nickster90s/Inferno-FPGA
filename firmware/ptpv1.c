@@ -34,6 +34,7 @@
 //     scaled accordingly and the median filter is widened.
 
 #include "ptpv1.h"
+#include "telem.h"
 #include "config.h"
 #include "net.h"
 #include "dante_dev.h"
@@ -429,6 +430,16 @@ static void servo_update(int64_t offset_ns)
     g_ptpv1.rate_ppb = (int32_t)freq_integral;
     gptp_set_addend_full(g_ptpv1.current_addend_full);
 
+    // One telemetry record per servo update. Raw AND filtered offset together:
+    // the difference between them is what the median filter is actually doing,
+    // and no snapshot could ever show it.
+    telem_push(TELEM_T_PTP, g_ptpv1.locked ? TELEM_F_LOCKED : 0,
+               (uint16_t)g_ptpv1.servo_updates,
+               (int32_t)g_ptpv1.offset_ns,
+               (int32_t)filtered,
+               (int32_t)g_ptpv1.mean_path_delay_ns,
+               g_ptpv1.rate_ppb);
+
     // Hold lock off until the path delay is known -- but never indefinitely.
     //
     // mean_path_delay starts at 0, so the offset is computed without it and can
@@ -454,6 +465,8 @@ static void servo_update(int64_t offset_ns)
         unlock_streak = 0;
         if (++lock_streak >= LOCK_STREAK && !g_ptpv1.locked) {
             g_ptpv1.locked = 1;
+            telem_event(TELEM_E_PTP_LOCK, (int32_t)filtered,
+                        (int32_t)g_ptpv1.mean_path_delay_ns);
             // WARM START: remember the converged addend. The crystal error is a
             // property of this board, not of this boot, so re-deriving it from
             // scratch every time costs ~10-20 s of the ~30 s lock for no new
@@ -490,10 +503,14 @@ static void servo_update(int64_t offset_ns)
         if (++unlock_streak >= UNLOCK_STREAK) {
             if (g_ptpv1.locked) {
                 g_ptpv1.locked = 0;
+                telem_event(TELEM_E_PTP_UNLOCK, (int32_t)filtered, unlock_streak);
                 printf("[ptpv1] unlocked, offset %lld ns (%d consecutive)\n",
                        (long long)filtered, unlock_streak);
             }
         } else if (g_ptpv1.locked) {
+            telem_push(TELEM_T_PTP, TELEM_F_LOCKED | TELEM_F_OUTLIER,
+                       (uint16_t)unlock_streak, (int32_t)g_ptpv1.offset_ns,
+                       (int32_t)filtered, 0, g_ptpv1.rate_ppb);
             printf("[ptpv1] outlier %lld ns ignored (%d/%d)\n",
                    (long long)filtered, unlock_streak, UNLOCK_STREAK);
         }

@@ -17,6 +17,7 @@
 #include "gptp.h"
 #include "rx_gate.h"
 #include "mcr_dante.h"
+#include "telem.h"
 #include <generated/csr.h>
 #include <stdio.h>
 
@@ -138,6 +139,11 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
 
     if (len >= 1 && req[0] == 'g') {
         rxgate_rx(src_ip, src_port, req, len);
+        return;
+    }
+    if (len >= 1 && req[0] == 't') {
+        void telem_drain(const uint8_t *, uint16_t, const uint8_t *, uint32_t);
+        telem_drain(src_ip, src_port, req, len);
         return;
     }
     if (len >= 1 && req[0] == 'm') {

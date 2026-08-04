@@ -3,6 +3,7 @@
 #include "mcr_dante.h"
 #include "ptpv1.h"
 #include "gptp.h"
+#include "telem.h"
 
 #include <generated/csr.h>
 #include <stdio.h>
@@ -158,6 +159,7 @@ void mcr_dante_set_enabled(int on)
         last_written_inc = base_inc;
         mcr_increment_write(base_inc);
         nco_writes++;
+        telem_event(TELEM_E_MCLK_DISARM, (int32_t)base_inc, 0);
         printf("[mclk] DISABLED, NCO restored to nominal %lu\n",
                (unsigned long)base_inc);
     } else {
@@ -165,6 +167,7 @@ void mcr_dante_set_enabled(int on)
         applied_ppb      = 0;
         applied_inc      = base_inc;
         last_written_inc = base_inc;
+        telem_event(TELEM_E_MCLK_ARM, target_ppb, SLEW_PPB);
         printf("[mclk] ENABLED, slewing 0 -> %ld ppb at %d ppb/s (~%lu s)\n",
                (long)target_ppb, SLEW_PPB,
                (unsigned long)((target_ppb < 0 ? -target_ppb : target_ppb)
@@ -211,6 +214,7 @@ void mcr_dante_poll(void)
     if (enabled && lvl_max >= RING_ACTIVE_LEVEL &&
         underrun_per_s > UNDERRUN_TRIP_PER_S) {
         trips++;
+        telem_event(TELEM_E_MCLK_TRIP, (int32_t)underrun_per_s, lvl_min);
         printf("[mclk] TRIP: underrun %lu/s with ring active (level %u..%u) "
                "-- reverting to nominal\n",
                (unsigned long)underrun_per_s, lvl_min, lvl_max);
@@ -239,6 +243,19 @@ void mcr_dante_poll(void)
             phase_ppb = 0;
         }
     }
+
+    // BOTH ERROR AXES IN ONE RECORD. drift_samples is phase, applied_ppb is
+    // rate. The 227 ms outage happened because only one of them was ever
+    // reported, and the servo limit cycle because neither was sampled fast
+    // enough to see it move.
+    telem_push(TELEM_T_MCLK,
+               (uint8_t)((enabled ? TELEM_F_DISCIPLINED : 0) |
+                         (phase_enabled ? TELEM_F_PHASE_ON : 0)),
+               lvl_avg,
+               drift_samples,
+               applied_ppb,
+               (int32_t)(((uint32_t)lvl_min << 16) | (uint32_t)lvl_max),
+               (int32_t)underrun_per_s);
 
     target_ppb = g_ptpv1.rate_ppb + phase_ppb;
     if (target_ppb >  MAX_PPB) target_ppb =  MAX_PPB;

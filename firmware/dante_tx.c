@@ -26,6 +26,7 @@
 #include "mcr.h"
 #include "dante_flows.h"
 #include "net.h"
+#include "telem.h"
 #include <generated/csr.h>
 #include <string.h>
 #include <stdio.h>
@@ -224,6 +225,7 @@ static void ts_anchor(void)
     aaf_pkt_ts_load_sub_write((uint32_t)sub);
     aaf_pkt_ts_load_write(1);
     g_tx_stats.anchors++;
+    telem_event(TELEM_E_ANCHOR, (int32_t)sec, (int32_t)sub);
     printf("[dtx] media clock anchored to PTP %lu.%09lu -> %lu.%lu (offset %d)\n",
            (unsigned long)t.seconds, (unsigned long)t.nanoseconds,
            (unsigned long)sec, (unsigned long)sub, DANTE_TX_TS_OFFSET);
@@ -371,10 +373,12 @@ void dante_tx_poll(void)
         aaf_pkt_enable_write(1);
         talker_on = 1;
         g_tx_stats.enables++;
+        telem_event(TELEM_E_TALKER_ON, (int32_t)dante_tx_active(), 0);
         printf("[dtx] clock locked -- talker ENABLED\n");
     } else {
         aaf_pkt_enable_write(0);
         talker_on = 0;
+        telem_event(TELEM_E_TALKER_OFF, 0, 0);
         g_tx_stats.disables++;
         printf("[dtx] clock unlocked -- talker OFF\n");
     }
@@ -569,6 +573,8 @@ int dante_tx_bind_unicast(const uint8_t peer_ip[4], const uint8_t dst_ip[4],
         flows[f].in_use = 1;
         flows[f].rebinds++;
         for (int i = 0; i < 4; i++) flows[f].peer[i] = peer_ip[i];
+        telem_event(TELEM_E_FLOW_BIND, (int32_t)((f << 24) | (nslots << 8) | fpp),
+                    (int32_t)dst_port);
         printf("[dtx] flow %d -> %u.%u.%u.%u:%u, %u slots, fpp %u\n",
                f, dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3], dst_port, nslots, fpp);
     }
@@ -696,6 +702,7 @@ int dante_tx_unbind(unsigned f)
     flows[f].in_use = 0;
     aaf_pkt_ctx_select_write(f);
     aaf_pkt_flow_cfg_write(0);
+    telem_event(TELEM_E_FLOW_UNBIND, (int32_t)f, 0);
     printf("[dtx] flow %u deleted\n", f);
     return 0;
 }

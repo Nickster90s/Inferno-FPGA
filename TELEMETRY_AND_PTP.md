@@ -105,3 +105,66 @@ whole path; it is NOT plausible on interop, which is where their value is.
 
 Do NOT tune the servo before 1 and 2. Today's session is the argument: every
 change made without an instrument had to be reverted.
+
+---
+
+# BUILT AND MEASURING (2026-08-04) — `telem.c` + `tools/telemetry.py`
+
+Item 2 done. Fixed-size records pushed ON EVENT into a 96-entry ring, drained
+over UDP 7779 opcode `'t'`, parsed by name against a `'TLM1'` version tag,
+logged to CSV for offline analysis. Separate opcode with its own bounded reply,
+so it cannot regress the 200-byte stats endpoint that died once at 208.
+
+Covers **both error axes** and state transitions:
+
+| record | carries |
+|---|---|
+| `ptp` (per servo update) | raw offset, filtered offset, path delay, rate_ppb, locked/outlier flags |
+| `mclk` (1 Hz) | **drift_samples (PHASE)** + applied_ppb (RATE), ring min/avg/max, underrun/s |
+| `event` | lock, unlock, anchor, talker on/off, flow bind/unbind, mclk arm/disarm/trip |
+
+Sequence gaps are reported, never silently skipped.
+
+## What it found in the first 105 seconds
+
+**1. The Sync rate is 3.08/s, not ~2 Hz.** `SERVO_KI_NUM` was cut 3600 -> 900
+"for ~2 Hz" — a guess that was never measured. At the real 3.08 Hz the integral
+gain is under-scaled by about 1.5x.
+
+**2. The median filter is pure lag.** Measured over 217 steady-state samples:
+
+    raw offset      sd = 152 ns
+    filtered offset sd = 158 ns      <- filtering makes it WORSE
+    outliers flagged: 0
+
+MEDIAN_N=7 at 3.08 Hz costs ~2.3 s of phase lag in the servo loop and removes
+no noise. It was added to suppress the +/-5-10 us excursions caused by RX frame
+loss -- and **rx_gate removed that source**, so the filter is now redundant
+machinery adding lag. That is exactly the kind of thing only a before/after
+instrument can show.
+
+**3. Path delay spread is 3988 ns** (14022..18010), which now dominates the
+error budget. PTPv1 has no correctionField, so switch residence time lands
+directly here. This is the wall, not the servo.
+
+**4. There is a ~1.1 us standing offset** (+777..+1524 ns). Constant, so
+harmless for audio — a receiver absorbs it as latency — but it means the
+"sub-100 ns" target is not reachable without addressing path asymmetry.
+
+**5. Media clock is healthy**: phase span 9 samples (0.19 ms) over the window,
+ring 49..76, underrun 0/s.
+
+## Suggested order, revised
+
+1. ~~rx_gate~~ **done** — 21% -> 0% control-frame loss.
+2. ~~Streaming telemetry~~ **done** — this file.
+3. **Retune the servo, now with data.** In order of expected value:
+   remove or shrink the median filter (it is costing lag for no benefit),
+   then rescale KI for the measured 3.08 Hz. Verify each with a before/after
+   capture rather than by ear.
+4. Media clock: rate discipline is done and validated; the PHASE term is
+   disabled after it limit-cycled. Redesign it as a properly damped PI with
+   the integrator outside the slew limiter — and now the telemetry can show
+   whether it oscillates.
+5. Path delay / asymmetry is the remaining wall, and is largely inherent to
+   PTPv1 on a switched network.

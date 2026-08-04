@@ -32,6 +32,7 @@
 #include "dante_flows.h"
 #include "rx_gate.h"
 #include "mcr_dante.h"
+#include "telem.h"
 void dante_stats_init(void);
 
 // MAC address — locally administered, unique per device.
@@ -930,6 +931,7 @@ int main(void)
     // DISABLED: it reports what it would write so the sign and magnitude can be
     // checked against measured drift before anything touches the clock.
     mcr_dante_init(CONFIG_CLOCK_FREQUENCY, 48000);
+    telem_init();
     // Start the gateware talker from boot so the USB ring always has a
     // consumer and the async-feedback servo has a real rate to measure.
     // The talker itself stays gated on clock lock inside the main loop.
