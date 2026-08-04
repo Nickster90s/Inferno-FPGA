@@ -168,3 +168,63 @@ ring 49..76, underrun 0/s.
    whether it oscillates.
 5. Path delay / asymmetry is the remaining wall, and is largely inherent to
    PTPv1 on a switched network.
+
+---
+
+# SERVO EXPERIMENT (2026-08-04) — asked to remove the median and raise KI; measurement said no
+
+Seven 190 s captures, one variable at a time, via `tools/telemetry.py`.
+
+| variant | off sd | p2p | \|mean\| | rate sd | result |
+|---|---|---|---|---|---|
+| A median7 KI900 (original) | 79 ns | 293 | 649 ns | 0.0 ppb | baseline |
+| B median1 KI900 | 171 | 1148 | 1014 | 19.5 | worse |
+| C median1 KI3600 | 414 | 2753 | **26** | 43.9 | accurate, jittery |
+| D median7 KI3600 | 327 | 2039 | 105 | 56.6 | worse |
+| E exact integral, KI900 | 369 | 1638 | 85 | 20.6 | accurate, jittery |
+| F exact + 250 ns deadband | 412 | 1769 | 134 | 22.4 | no better |
+| G exact + 1000 ns deadband | — | — | — | — | **PTP UNLOCK + talker restart** |
+| H = A re-run, identical code | 234 | 1084 | 737 | 9.0 | see below |
+
+## Three things this established
+
+**1. `rate sd = 0.0` in the baseline gave away a latent bug.** With
+`SERVO_KI_DEN = 1e6`, `(-filtered * 900) / 1e6` truncates to ZERO for any
+offset below **1111 ns**. The standing offset was 649 ns, under the threshold,
+so the integral was frozen and the loop was structurally unable to correct it.
+KI=3600 only moves that threshold to 277 ns. This is arithmetic, verifiable by
+inspection, and independent of any measurement noise.
+
+**2. The original tuning is good largely by accident.** It is not merely a
+deadband -- it is a deadband PLUS severe quantisation above it (an offset of
+2000 ns contributes 1 ppb). Together that makes a very low-gain, very stable
+loop. Reproducing only the deadband part (G), with exact accumulation above it,
+wound the integral up and drove a real PTP unlock and talker restart.
+
+**3. THE MIDDLE OF THIS TABLE IS NOT TRUSTWORTHY.** H is byte-identical code to
+A -- `git checkout` -- and measured sd 234 against A's 79. Run-to-run variance
+is about 3x, which is the same size as most of the differences above. Only the
+large effects are outside the noise: C/D/E's much lower standing offset, and G's
+categorical failure.
+
+**The methodological lesson, which cost this whole experiment:** a single
+190 s capture per variant is not enough to rank them. The earlier claim that
+"the median filter is pure lag" was worse still -- it compared raw against
+filtered INSIDE one run, but the filtered value is what drives the servo, so it
+shapes the raw signal too. You cannot infer the effect of removing a filter
+from inside its own closed loop.
+
+## Where this leaves it
+
+Reverted to the original tuning: median 7, KI 900. It is the known-good
+configuration and nothing measured beat it outside the noise floor.
+
+Worth doing next, in order:
+1. **Repeat captures** -- 3-5 runs per variant, interleaved, before trusting any
+   ranking. The telemetry makes this cheap; not doing it is what wasted the run.
+2. **Fix the truncation deliberately**: exact accumulation with the effective
+   gain kept where it is today (the quantisation is currently doing the gain
+   reduction by accident). That is a real robustness improvement even if the
+   numbers do not move.
+3. Path delay spread (3988 ns) still dominates the error budget and no servo
+   change touches it.
