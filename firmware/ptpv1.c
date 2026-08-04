@@ -113,6 +113,10 @@
 // enough to lock against. One is not enough -- see the note in the DelayResp
 // handler.
 #define PD_MIN_SAMPLES      4
+
+// Re-step rather than steer while unlocked and further out than this. Chosen
+// just above the 2 us lock threshold so it closes the gap to lock in one go but
+// never fires against normal in-lock jitter.
 #define SERVO_INTEGRAL_MAX  100000000LL  // +-100 ms
 #define SERVO_STEP_NS       500000000LL  // step rather than slew beyond 500 ms
 // Lock thresholds, sized for PTPv1 on this path rather than inherited.
@@ -132,6 +136,13 @@
 //
 // Raising the threshold is the honest fix here, not more servo tuning: no gain
 // choice removes a term the protocol cannot measure.
+// Thresholds are 2000/5000 and stay there. A 2026-08-04 attempt to widen them
+// to 6000/15000 was based on a misdiagnosis: the offset noise had risen to
+// 3-7 us and looked like an irreducible floor, but the actual cause was rx_gate
+// sitting DISABLED after a reboot, putting 21% control-frame loss back on the
+// PTP path. With rx_gate armed the offset converges below 1 us and these
+// thresholds are comfortable. Do not widen them to chase noise -- check that
+// rx_gate is armed first.
 #define LOCK_THRESHOLD_NS   2000
 #define UNLOCK_THRESHOLD_NS 5000
 #define LOCK_STREAK         8
@@ -356,6 +367,8 @@ static void servo_update(int64_t offset_ns)
         while (ns >= 1000000000LL) { ns -= 1000000000LL; target.seconds++; }
         target.nanoseconds = (uint32_t)ns;
         gptp_step_time(target);
+        g_ptpv1.step_count++;          // anything anchored to PTP is now stale
+        g_ptpv1.phase_settled = 0;
 
         // Deliberately KEEP freq_integral across a step.
         //
@@ -446,6 +459,13 @@ static void servo_update(int64_t offset_ns)
     if (!pd_step_done && pd_samples >= PD_MIN_SAMPLES) {
         pd_step_done = 1;
         gptp_adjust_offset(-offset_ns);
+        // THIS is the step that used to land AFTER the talker had already
+        // anchored: mean_path_delay_ns goes non-zero on the FIRST DelayResp,
+        // which satisfied dante_tx's gate, but this residual correction needs
+        // PD_MIN_SAMPLES of them. The media clock was anchored to the pre-step
+        // timeline and stayed there.
+        g_ptpv1.step_count++;
+        g_ptpv1.phase_settled = 1;     // no further phase steps expected
         median_count = 0; median_pos = 0;
         lock_streak = 0;
         printf("[ptpv1] path delay %lld ns, phase corrected %lld ns\n",

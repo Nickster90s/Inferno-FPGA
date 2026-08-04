@@ -37,6 +37,7 @@ dante_tx_stats_t g_tx_stats;
 // How long PTP must stay locked before the media clock is anchored to it.
 // The first lock edge is not trustworthy -- see dante_tx_poll.
 #define PTP_SETTLE_MS    4000
+#define PHASE_SETTLE_MAX_MS  20000   // fallback: never block audio indefinitely
 
 #define N_FLOWS         (DANTE_TX_CHANNELS / 8)     // 6
 #define FPP             16
@@ -270,9 +271,44 @@ void dante_tx_poll(void)
     if (g_ptpv1.locked && !was_locked) lock_since = gptp_uptime_ms();
     was_locked = g_ptpv1.locked;
 
+    // WAIT FOR PTP'S PHASE TO BE FINAL, not merely for lock.
+    //
+    // mean_path_delay_ns goes non-zero on the FIRST DelayResp, but ptpv1 then
+    // applies a residual phase STEP once it has PD_MIN_SAMPLES of them
+    // (ptpv1.c:446). The old gate was satisfied by the first condition, so the
+    // talker anchored the media clock and THEN PTP stepped absolute time out
+    // from under it. The media clock is a free-running counter anchored once --
+    // it stayed on the pre-step timeline permanently. That is audio which is
+    // out of sync from the instant the stream starts, with every counter
+    // reading healthy.
+    // phase_settled is a GATE, not a hard dependency: if it somehow never
+    // arrives, audio must not be blocked forever. After PHASE_SETTLE_MAX_MS of
+    // lock we start anyway -- a late step will now re-anchor us (below) rather
+    // than leaving the media clock stranded, so starting is recoverable and
+    // never starting is not.
+    uint8_t phase_ok = g_ptpv1.phase_settled ||
+                       (gptp_uptime_ms() - lock_since) >= PHASE_SETTLE_MAX_MS;
     uint8_t settled = g_ptpv1.locked
+                   && phase_ok
                    && g_ptpv1.mean_path_delay_ns != 0
                    && (gptp_uptime_ms() - lock_since) >= PTP_SETTLE_MS;
+
+    // SELF-HEALING: any later PTP step invalidates the anchor, so follow it.
+    // This is the general form of the bug above -- it does not matter WHY the
+    // clock stepped (cold-boot acquisition, a master change, a leap), only that
+    // anything anchored to it is now on the wrong timeline.
+    {
+        static uint32_t seen_steps;
+        static uint8_t  seen_init;
+        if (!seen_init) { seen_steps = g_ptpv1.step_count; seen_init = 1; }
+        if (g_ptpv1.step_count != seen_steps) {
+            seen_steps = g_ptpv1.step_count;
+            if (talker_on) {
+                printf("[dtx] PTP stepped -- re-anchoring media clock\n");
+                ts_anchor();
+            }
+        }
+    }
 
     // Also wait for the MEDIA CLOCK to be ready, not just PTP.
     //

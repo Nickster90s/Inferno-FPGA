@@ -41,6 +41,16 @@ typedef struct {
     // proportional term is phase correction, and feeding it into an audio
     // sample rate is audible wander, not drift correction.
     int32_t  rate_ppb;
+
+    // PHASE STEP ACCOUNTING.
+    //
+    // Any step moves absolute time out from under anything anchored to it. The
+    // media clock is a free-running counter anchored ONCE to PTP, so a step
+    // after that anchor leaves it on the old timeline permanently -- audio that
+    // is out of sync from the moment the stream starts, with every counter
+    // healthy. dante_tx watches step_count and re-anchors when it moves.
+    uint32_t step_count;        // bumped on every absolute step or phase adjust
+    uint8_t  phase_settled;     // 1 once the post-path-delay residual step is done
 } ptpv1_state_t;
 extern ptpv1_state_t g_ptpv1;
 
