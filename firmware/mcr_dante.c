@@ -5,6 +5,7 @@
 #include "gptp.h"
 #include "telem.h"
 #include "config.h"
+#include "dante_tx.h"
 
 #include <generated/csr.h>
 #include <stdio.h>
@@ -252,8 +253,9 @@ void mcr_dante_poll(void)
         ptp_timestamp_t t = gptp_read_time();
         int64_t ptp_smp = (int64_t)t.seconds * 48000
                         + (int64_t)((t.nanoseconds * 3u) / 62500u);
-        int64_t emit    = (int64_t)aaf_pkt_dbg_last_sec_read() * 48000
-                        + (int64_t)aaf_pkt_dbg_last_ts_read();
+        uint32_t esec, esub;
+        dante_tx_read_emitted(&esec, &esub);   // atomic pair; see dante_tx.h
+        int64_t emit    = (int64_t)esec * 48000 + (int64_t)esub;
         drift_samples = (int32_t)(emit - ptp_smp);
     }
 

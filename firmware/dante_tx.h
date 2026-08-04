@@ -74,6 +74,17 @@ int  dante_tx_bind_multicast(uint16_t ext_id, const uint16_t *chans, uint8_t n);
 int  dante_tx_ctx_for_id(uint16_t ext_id);
 void dante_tx_flow_mac(unsigned f, uint8_t mac[6]);
 
+// Read the last EMITTED media timestamp atomically.
+//
+// dbg_last_sec and dbg_last_ts are two separate CSR reads, and the gateware
+// re-latches the pair on every emitted packet (3000-6000/s). A read that
+// straddles a seconds boundary returns sec_old with sub_new -- a clean ONE
+// SECOND error. Observed on the bench 2026-08-04:
+//     [dtx] media clock phase -48079 samples (-1001 ms) off -- re-anchoring
+// which then STEPPED the media clock, and a step is audible. Rate discipline
+// holds drift to ~1.9 ms/hour, so a 1000 ms jump is never real.
+void dante_tx_read_emitted(uint32_t *sec, uint32_t *sub);
+
 // Full per-flow detail for the UDP readout: what we ACTUALLY bound, so the
 // binding can be compared against what the receiver asked for without needing
 // the console. Returns 0 if the slot is unused.

@@ -394,12 +394,23 @@ void dante_tx_poll(void)
     // without stepping.
     if (talker_on && want) {
         ptp_timestamp_t t = gptp_read_time();
+        uint32_t esec, esub;
+        dante_tx_read_emitted(&esec, &esub);      // atomic: see the header
         int64_t ptp_smp = (int64_t)t.seconds * 48000
                         + (int64_t)((t.nanoseconds * 3u) / 62500u);
-        int64_t emit    = (int64_t)aaf_pkt_dbg_last_sec_read() * 48000
-                        + (int64_t)aaf_pkt_dbg_last_ts_read();
+        int64_t emit    = (int64_t)esec * 48000 + (int64_t)esub;
         int64_t err = emit - ptp_smp - DANTE_TX_TS_OFFSET;
-        if (err > DANTE_TX_REANCHOR_SAMPLES || err < -DANTE_TX_REANCHOR_SAMPLES) {
+        // CONFIRM BEFORE STEPPING. A re-anchor is audible, so one bad reading
+        // must never cause one. Require the error to persist across two polls;
+        // real phase error is monotonic and easily survives that, while a
+        // measurement artefact does not.
+        static uint8_t bad_streak;
+        if (err > DANTE_TX_REANCHOR_SAMPLES || err < -DANTE_TX_REANCHOR_SAMPLES)
+            bad_streak++;
+        else
+            bad_streak = 0;
+        if (bad_streak >= 2) {
+            bad_streak = 0;
             printf("[dtx] media clock phase %ld samples (%ld ms) off "
                    "-- re-anchoring\n",
                    (long)err, (long)(err / 48));
@@ -803,6 +814,23 @@ int dante_tx_mcast_enum(unsigned n, uint16_t *id)
 // exactly the right combined rate but only one receiver hearing audio points at
 // per-context header state, and this is the field that cannot be checked from
 // the build host: unicast is forwarded only to its destination port.
+void dante_tx_read_emitted(uint32_t *sec, uint32_t *sub)
+{
+    // Seqlock on the seconds field: read sec, sub, sec again. If seconds moved
+    // between the two reads the pair straddled a boundary, so retry. Bounded --
+    // at 3000-6000 packets/s a boundary is crossed once per second, so a second
+    // consecutive straddle is not physically reachable, but the loop is capped
+    // anyway rather than trusted.
+    for (int i = 0; i < 4; i++) {
+        uint32_t s1 = aaf_pkt_dbg_last_sec_read();
+        uint32_t sb = aaf_pkt_dbg_last_ts_read();
+        uint32_t s2 = aaf_pkt_dbg_last_sec_read();
+        if (s1 == s2) { *sec = s1; *sub = sb; return; }
+    }
+    *sec = aaf_pkt_dbg_last_sec_read();
+    *sub = aaf_pkt_dbg_last_ts_read();
+}
+
 int dante_tx_flow_detail(unsigned f, dante_tx_flow_detail_t *out)
 {
     if (f >= N_FLOWS) return 0;

@@ -132,7 +132,7 @@ class DantePacketizer(LiteXModule):
     """
     def __init__(self, mcr, tsu, *, usb_sample_lo, usb_sample_hi,
                  usb_readable, channels=8, samples_per_packet=16,
-                 fifo_depth=64, streams=6):
+                 fifo_depth=64, streams=6, n_ctx=None):
         dw = 32
         ch_bits  = max(1, log2_int(channels, need_pow2=False))
         blk_bits = max(1, log2_int(samples_per_packet, need_pow2=False))
@@ -144,14 +144,19 @@ class DantePacketizer(LiteXModule):
         # Frame s sample (row r, slice-ch c) is at ring offset r*BLOCK_CH+s*ch+c;
         # the reader advances +1 within a slice and +ROW_JUMP at the row boundary
         # (proven in sims/sim_stride_timemux.py).
+        # `streams` sizes CHANNEL STORAGE (one ring per `channels`); `n_ctx`
+        # sizes FLOW CONTEXTS. Separate axes -- receivers take 4 ch/flow, so 48
+        # channels needs ~12 contexts but still only 6 rings.
         self.streams = streams
+        n_ctx = streams if n_ctx is None else n_ctx
+        self.n_ctx = n_ctx
         BLOCK_CH      = streams * channels                 # 48 for 6x8
         ROW_JUMP      = BLOCK_CH - channels + 1             # 41: ch7 -> next row's slice
         FRAME_SAMPLES = channels * samples_per_packet       # 48 samples in one AAF frame
         BLOCK_SAMPLES = BLOCK_CH * samples_per_packet        # 288 ring samples per block
         # samp_hi channel-index field width; `first` marker sits just above it.
         first_bit     = max(1, (BLOCK_CH - 1).bit_length()) # 6 for 48ch, 3 for 8ch
-        st_bits       = max(1, log2_int(streams, need_pow2=False))
+        st_bits       = max(1, log2_int(n_ctx, need_pow2=False))
 
         # ---- Frame geometry (computed once, Python-side) ----
         # Dante wire format, confirmed against captures/dante_audio_multicast.pcap:
@@ -585,14 +590,14 @@ class DantePacketizer(LiteXModule):
         # are selected by `stream_idx` (the frame being built); src_mac/tci/pres are
         # shared. Array indexing -> a clean Case mux (NOT a barrel shift), safe on
         # openXC7. seq is per-stream.
-        dip_arr  = Array([Signal(32) for _ in range(streams)])
-        csum_arr = Array([Signal(16) for _ in range(streams)])
-        sport_arr= Array([Signal(16) for _ in range(streams)])
-        dport_arr= Array([Signal(16) for _ in range(streams)])
-        dmac_arr = Array([Signal(48) for _ in range(streams)])
-        cmlo_arr = Array([Signal(32) for _ in range(streams)])
-        cmhi_arr = Array([Signal(32) for _ in range(streams)])
-        cfg_arr  = Array([Signal(8)  for _ in range(streams)])
+        dip_arr  = Array([Signal(32) for _ in range(n_ctx)])
+        csum_arr = Array([Signal(16) for _ in range(n_ctx)])
+        sport_arr= Array([Signal(16) for _ in range(n_ctx)])
+        dport_arr= Array([Signal(16) for _ in range(n_ctx)])
+        dmac_arr = Array([Signal(48) for _ in range(n_ctx)])
+        cmlo_arr = Array([Signal(32) for _ in range(n_ctx)])
+        cmhi_arr = Array([Signal(32) for _ in range(n_ctx)])
+        cfg_arr  = Array([Signal(8)  for _ in range(n_ctx)])
         ctx_sel  = self.ctx_select.storage
         # udp_dport is the LATCH trigger: firmware writes dst_ip, ip_csum and
         # udp_sport first, then udp_dport last, exactly as it wrote stream_id_lo
@@ -615,7 +620,7 @@ class DantePacketizer(LiteXModule):
             ]),
         ]
 
-        stream_idx = Signal(max=streams) if streams > 1 else Signal()
+        stream_idx = Signal(max=n_ctx) if n_ctx > 1 else Signal()
 
         # ---- Per-flow packet geometry, derived combinationally ----------------
         # pay_len = nslots * fpp * 3. fpp is 8 or 16, so this is (nslots*3) shifted
@@ -630,9 +635,9 @@ class DantePacketizer(LiteXModule):
         # because tick_hi is latched at send_req.
         # An Array, not a Signal: Migen cannot index a Signal with a Signal, and
         # stream_idx is one.
-        due_arr = Array([Signal() for _ in range(streams)])
+        due_arr = Array([Signal() for _ in range(n_ctx)])
         self.comb += [due_arr[i].eq((cfg_arr[i][0:4] != 0) & (~cfg_arr[i][4] | tick_hi))
-                      for i in range(streams)]
+                      for i in range(n_ctx)]
         cfg_now   = cfg_arr[stream_idx]
         nslots    = Signal(4)
         fpp16     = Signal()
@@ -897,7 +902,7 @@ class DantePacketizer(LiteXModule):
         # disabled flow therefore still built a packet -- with nslots = 0 that is
         # a 51-byte header-only frame, emitted for every unconfigured context.
         fsm.act("SKIP",
-            If(stream_idx != (streams - 1),
+            If(stream_idx != (n_ctx - 1),
                 NextValue(stream_idx, stream_idx + 1),
                 NextValue(byte_idx, 0), NextValue(bph, 0),
                 NextValue(cs_slot, 0), NextValue(cs_samp, 0),
@@ -991,7 +996,7 @@ class DantePacketizer(LiteXModule):
                 If(source.last,
                     NextValue(pkt_count, pkt_count + 1),
                     # (no sequence number: Dante's header has none)
-                    If(stream_idx != (streams - 1),
+                    If(stream_idx != (n_ctx - 1),
                         # More frames in this block: build the next stream's slice
                         # from the SAME 288-sample block (rd unchanged).
                         NextValue(stream_idx, stream_idx + 1),
