@@ -324,18 +324,39 @@ void dante_tx_poll(void)
         }
     }
 
-    // Re-anchor when the emitted seconds drifts from PTP by more than a second.
-    // The media clock is rate-disciplined by mcr, so this should never fire in
-    // steady state; it exists to recover from a PTP step, which moves absolute
-    // time out from under a counter that only ever increments.
+    // Re-anchor on PHASE error measured in SAMPLES.
+    //
+    // This used to compare only the SECONDS field and fire on diff > 1, which
+    // made it structurally blind to exactly the error that matters. Found
+    // 2026-08-04 with no audio and a fully green patch in Dante Controller:
+    //
+    //     emitted 402927.04519   PTP 402926.41611   =  +10908 samples
+    //                                               =  +227 ms INTO THE FUTURE
+    //
+    // 147x DANTE_TX_TS_OFFSET, and ~227x a receiver's buffer. Receivers accept
+    // the subscription -- the control plane is unaffected -- and then discard
+    // every audio packet as far-future. Silence, with every counter healthy:
+    // ring centred, zero underruns, 9001 pps on the wire.
+    //
+    // A one-second threshold is ~1000x a receiver's latency setting. The
+    // seconds field only differed by 1, and `diff > 1` needs 2, so it never
+    // fired even at a quarter second out.
+    //
+    // This is a STEP and it is audible, so it is a coarse backstop only -- for
+    // a PTP step, or for phase accumulated while the talker was idle. Steady
+    // state is held by the slow phase term in mcr_dante.c, which corrects
+    // without stepping.
     if (talker_on && want) {
         ptp_timestamp_t t = gptp_read_time();
-        uint32_t emitted = aaf_pkt_dbg_last_sec_read();
-        uint32_t now_s   = (uint32_t)t.seconds;
-        uint32_t diff    = (emitted > now_s) ? (emitted - now_s) : (now_s - emitted);
-        if (diff > 1) {
-            printf("[dtx] media clock %lu vs PTP %lu -- re-anchoring\n",
-                   (unsigned long)emitted, (unsigned long)now_s);
+        int64_t ptp_smp = (int64_t)t.seconds * 48000
+                        + (int64_t)((t.nanoseconds * 3u) / 62500u);
+        int64_t emit    = (int64_t)aaf_pkt_dbg_last_sec_read() * 48000
+                        + (int64_t)aaf_pkt_dbg_last_ts_read();
+        int64_t err = emit - ptp_smp - DANTE_TX_TS_OFFSET;
+        if (err > DANTE_TX_REANCHOR_SAMPLES || err < -DANTE_TX_REANCHOR_SAMPLES) {
+            printf("[dtx] media clock phase %ld samples (%ld ms) off "
+                   "-- re-anchoring\n",
+                   (long)err, (long)(err / 48));
             ts_anchor();
         }
     }

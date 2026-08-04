@@ -183,22 +183,128 @@ brief, repeated dips. `fifo_level` was read as a ~1 Hz snapshot, which lands in 
 dip almost never. Nothing paradoxical, just a fast transient sampled slowly.
 `mcr_dante_level_sample()` now tracks min/max at 1 kHz; **watch min, not avg.**
 
-## NOT YET VALIDATED — and one gap in the safety net
+## VALIDATED WITH AUDIO (2026-08-04)
 
-The whole ring/USB interaction is **untested**: the MacBook was off, so the ring
-was empty throughout. Drift is fixed; whether the USB PI servo absorbs a
-slew-limited NCO **while audio is flowing** is exactly what killed the last two
-attempts and has not been retried.
+The half that killed both previous attempts. MacBook streaming, two unicast
+flows, talker on. Discipline toggled at runtime; same session, same bitstream.
 
-The auto-disable guard has a known hole: it requires `lvl_max >= 32` to
-distinguish "ring active" from "no USB source". If a disciplined clock prevented
-the ring from priming at all, `lvl_max` would stay low, the guard would never
-trip, and audio would be silently dead. So **arm it with audio playing and
-someone watching**, not unattended:
+| | disarmed | ARMED |
+|---|---|---|
+| drift | +3.61 ppm (+13.0 ms/hour) | **+0.39 ppm (+1.4 ms/hour)** |
+| ring level | 45…77 | **48…78** |
+| underrun delta | 0 | **0** |
+| overrun delta | 0 | **0** |
+| trips | 0 | **0** |
+
+**The ring did not care.** Level range while armed (48…78) is
+indistinguishable from undisciplined (45…77), against a centre of 64. Sampled
+through the whole 44 s slew at 4 s intervals, the worst level minimum was 49 and
+peak underrun was 0/s -- the ring never approached the prime floor.
+
+That is the difference the slew limiter makes. Both earlier attempts stepped the
+NCO at main-loop rate and produced underrun storms; at 100 ppb/s the USB PI
+servo absorbs the change as an ordinary disturbance and the level does not move.
+
+PTP stayed locked with no re-anchors, enables or disables throughout, and
+rx_gate's writer_errors stayed at its usual armed residual -- so disciplining
+the media clock disturbs neither the network nor the clock recovery.
+
+## One gap in the safety net remains
+
+The auto-disable guard requires `lvl_max >= 32` to distinguish "ring active"
+from "no USB source". If a disciplined clock prevented the ring from priming at
+all, `lvl_max` would stay low, the guard would never trip, and audio would be
+silently dead. That did not happen here -- the ring never went near the floor --
+but the hole is real and untested, because nothing has yet made the guard fire.
+Worth closing before this runs unattended overnight.
 
     tools/mclk.py status      # target vs drift, and ring level min/max
     tools/mclk.py on          # slews over ~45 s
     tools/mclk.py watch 120   # watch level MIN and underrun delta
     tools/mclk.py off         # immediate, unconditional revert to nominal
 
-The board is left **disarmed**.
+Procedure:
+
+---
+
+# RATE IS NOT ENOUGH — the phase bug (2026-08-04)
+
+Within hours of the rate discipline being declared working, **audio stopped
+entirely** while every counter read healthy. The fix above was half a fix.
+
+## Symptom
+
+No audio at any receiver. Dante Controller showed the patch **fully green**.
+Re-patching changed nothing. Meanwhile on the board:
+
+    talker 1, 9001 pps on the wire, ring centred 55..73,
+    underrun 0/s, overrun 0, PTP locked, rx_gate armed and clean
+
+Everything that could be measured said the transmitter was healthy.
+
+## Cause
+
+    emitted 402927.04519    PTP 402926.41611   =  +10908 samples
+                                               =  +227 ms INTO THE FUTURE
+
+`DANTE_TX_TS_OFFSET` is +74 samples (1.5 ms). We were at **147x that**, in the
+future. `flows_tx.rs:44` is explicit that the clock must be in the past --
+"otherwise Dante devices receiving from us go mad and fart". Receivers negotiate
+the subscription happily (the control plane is untouched, hence the green
+patch) and then discard every audio packet as far-future.
+
+**Two independent failures had to line up:**
+
+1. **`ts_anchor()` only runs when the talker ENABLES.** The talker stayed on for
+   two days while the USB host was off, free-running at +4.7 ppm the whole time.
+   227 ms is about 13 hours of that.
+
+2. **The re-anchor watchdog was structurally blind to it.** `dante_tx.c:327`
+   compared only the **seconds** field and fired on `diff > 1`. The error lived
+   entirely in the sub-second field, and the seconds differed by exactly 1 --
+   which `> 1` does not catch. A one-second threshold is ~1000x a receiver's
+   latency setting; it could never have protected audio.
+
+## And the rate fix could not have caught it
+
+`mcr_dante` corrects **rate**. Rate discipline stops the error growing; it never
+returns what has already accumulated. With the phase 227 ms out, drift measured
+a healthy +0.53 ppm the whole time -- perfectly flat, perfectly wrong.
+
+This is exactly what `overlay_clock.rs` says and what the section above quoted
+without acting on:
+
+> **Rate and phase are separate, explicit state.** `freq_scale` is the standing
+> rate correction; `shift` is phase.
+
+Only `freq_scale` was built. `shift` was missing, and nothing measured it: the
+status output printed `drift +10829 samples` for hours and it was read as a
+benign running total rather than as 227 ms of phase error.
+
+## Fix, both halves
+
+- **`dante_tx.c`** — the re-anchor now measures phase in **samples**
+  (`DANTE_TX_REANCHOR_SAMPLES` = 240 = 5 ms), not in whole seconds. It is a
+  STEP and audible, so it is a coarse backstop only: PTP steps, and phase
+  accumulated while the talker was idle.
+- **`mcr_dante.c`** — a slow phase term alongside the rate. 4 ppb per sample of
+  error, clamped to **+/-2000 ppb**, 1 ms deadband. Deliberately feeble: under
+  half the crystal error the rate term already handles, so it cannot fight the
+  ring or the USB servo. Its job is to stop phase ever accumulating, not to
+  rescue a large one.
+
+## Verified
+
+    phase    +10908 samples  ->  -4 samples
+    rate     +0.69 ppm armed
+    ring     51..78 (centre 64), underrun delta 0, overrun delta 0
+    PTP      locked, no re-anchors
+
+**Audio confirmed back by ear.**
+
+## The lesson worth keeping
+
+A media clock has two error axes and this project had instruments for one.
+Every counter on the box read healthy through a total audio outage, because
+none of them measured phase. When adding a servo, ask what the OTHER axis is
+doing -- and if nothing reports it, that is the bug waiting to happen.

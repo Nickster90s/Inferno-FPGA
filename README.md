@@ -169,14 +169,44 @@ async feedback is not a rate report but a **PI servo on ring level** (traced in
 NCO underneath it was the fault; the missing constraint was slew rate, not the
 choice of rate estimate. See `MCR_REPLACEMENT.md`.
 
-**Still untested:** the MacBook was off, so the ring was empty throughout. Drift
-is fixed; whether the USB servo absorbs the slewed NCO *with audio flowing* is
-the exact thing that killed both earlier attempts. Arm it with audio playing and
-someone watching (`tools/mclk.py`), not unattended — the auto-disable guard
-cannot distinguish "ring never primed" from "no USB source". Left **disarmed**.
+**Validated with audio (2026-08-04).** MacBook streaming, two unicast flows,
+discipline toggled at runtime:
+
+| | disarmed | armed |
+|---|---|---|
+| drift | +3.61 ppm (13.0 ms/h) | **+0.39 ppm (1.4 ms/h)** |
+| ring level | 45…77 | **48…78** |
+| underrun / overrun | 0 / 0 | **0 / 0** |
+
+The ring did not care — level range while armed is indistinguishable from
+undisciplined, against a centre of 64, and the worst level minimum sampled
+through the whole 44 s slew was 49. PTP stayed locked with no re-anchors. That
+is what the slew limiter buys: both earlier attempts stepped the NCO at
+main-loop rate and produced underrun storms.
+
+**Then audio stopped entirely, and rate discipline could not have caught it.**
+Hours later: no audio at any receiver, patch **fully green** in Dante
+Controller, and every counter healthy — 9001 pps, ring centred, zero underruns,
+PTP locked. The emitted timestamp was **+10908 samples (227 ms) in the future**,
+147× `DANTE_TX_TS_OFFSET`. Receivers negotiate the subscription fine and then
+discard every audio packet as far-future.
+
+Two failures lined up: `ts_anchor()` only runs when the talker *enables*, and
+the talker had stayed on for two days of free-running drift; and the re-anchor
+watchdog compared only the **seconds** field with `diff > 1`, so a 0.227 s error
+was structurally invisible to it. Rate discipline reported a flat +0.53 ppm
+throughout — correct, and irrelevant. **Rate and phase are separate axes**, and
+only one had an instrument. Fixed in both `dante_tx.c` (sample-based re-anchor,
+5 ms backstop) and `mcr_dante.c` (slow phase term, ±2 ppm, 1 ms deadband).
+Phase now −4 samples; audio confirmed by ear. See `MCR_REPLACEMENT.md`.
+
+**Remaining gap:** the auto-disable guard needs `lvl_max >= 32` to tell "ring
+active" from "no USB source", so it cannot catch a clock that stops the ring
+priming at all. Nothing has made it fire yet. Worth closing before an unattended
+overnight run.
 
 **(historical) Media clock is UNDISCIPLINED under PTPv1 — drifts ~15 ms/hour.**
-Was the most serious issue. Left running the stream dies silently: every counter
+Was the most serious issue; fixed above. Left running the stream dies silently: every counter
 reads healthy while the timestamp walks out of the receiver's ~1 ms buffer.
 
 Root cause is understood. `mcr_compute_gptp_base()` takes its rate from

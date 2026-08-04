@@ -32,6 +32,14 @@
 // errs on the side of "further in the past".
 #define DANTE_TX_TS_OFFSET   (74)       // samples; applied in ts_anchor(), NOT the CSR
 
+// Coarse re-anchor threshold, in samples of phase error against PTP.
+// 240 samples = 5 ms. A Dante receiver's latency setting is 1-5 ms, so any
+// error approaching this already breaks playout -- but re-anchoring is a STEP
+// and audible, so it must not fire in normal operation. mcr_dante.c's slow
+// phase term is what keeps it from ever getting here; this only catches a PTP
+// step or phase accumulated while the talker was idle.
+#define DANTE_TX_REANCHOR_SAMPLES  (240)
+
 typedef struct {
     uint32_t enables;
     uint32_t disables;

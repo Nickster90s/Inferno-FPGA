@@ -39,6 +39,33 @@
 // a fault. A level that has reached a quarter scale means real content.
 #define RING_ACTIVE_LEVEL    32
 
+// ---- Phase ----
+//
+// RATE AND PHASE ARE SEPARATE STATE. Correcting the rate stops the error
+// growing; it never brings back what has already accumulated. Missing this is
+// what produced silence on 2026-08-04: rate discipline was working (+0.53 ppm)
+// while the emitted timestamp sat 227 ms in the future from two days of
+// free-running drift, and every receiver discarded the audio.
+//
+// So a small phase term is pulled in alongside the rate. It is deliberately
+// FEEBLE: clamped to +/-2000 ppb, which is under half the crystal error the
+// rate term already handles, so it can never fight the ring or the USB servo.
+// At the clamp it closes 1 ms of phase in ~8 minutes -- far too slow to rescue
+// a large accumulated error (that is the re-anchor backstop's job in
+// dante_tx.c) but ample to stop one ever forming.
+#define PHASE_MAX_PPB        2000
+
+// Proportional gain: ppb per sample of phase error. 4 ppb/sample reaches the
+// clamp at 500 samples (~10 ms) of error and is proportional below that, so
+// small errors get gentle correction and large ones saturate rather than
+// producing a step.
+#define PHASE_KP_PPB_PER_SAMPLE  4
+
+// Deadband, in samples. Below this the phase is left alone: PTP's own offset
+// noise is hundreds of ns and chasing it would modulate the audio rate for no
+// benefit. 48 samples = 1 ms.
+#define PHASE_DEADBAND_SAMPLES   48
+
 // ---- State -----------------------------------------------------------------
 
 static uint32_t base_inc;
@@ -53,6 +80,7 @@ static uint32_t trips;
 static uint32_t last_underrun;
 static uint32_t underrun_per_s;
 static int32_t  drift_samples;
+static int32_t  phase_ppb;
 
 // 1 s level window, fed at 1 kHz.
 static uint32_t win_start_ms;
@@ -178,7 +206,21 @@ void mcr_dante_poll(void)
     // proportional term is phase correction and must never reach an audio
     // sample rate. Both clocks derive from sys_clk, so the same ppb that
     // corrects the TSU addend corrects the media NCO, with the same sign.
-    target_ppb = g_ptpv1.rate_ppb;
+    // ---- Phase term ----
+    // drift_samples was computed above: emitted media timestamp minus PTP.
+    // Positive means we are running AHEAD, so the clock must be slowed.
+    {
+        int32_t perr = drift_samples - 74;      // DANTE_TX_TS_OFFSET
+        if (perr > PHASE_DEADBAND_SAMPLES || perr < -PHASE_DEADBAND_SAMPLES) {
+            phase_ppb = -perr * PHASE_KP_PPB_PER_SAMPLE;
+            if (phase_ppb >  PHASE_MAX_PPB) phase_ppb =  PHASE_MAX_PPB;
+            if (phase_ppb < -PHASE_MAX_PPB) phase_ppb = -PHASE_MAX_PPB;
+        } else {
+            phase_ppb = 0;
+        }
+    }
+
+    target_ppb = g_ptpv1.rate_ppb + phase_ppb;
     if (target_ppb >  MAX_PPB) target_ppb =  MAX_PPB;
     if (target_ppb < -MAX_PPB) target_ppb = -MAX_PPB;
 
