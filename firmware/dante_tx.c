@@ -803,6 +803,21 @@ int dante_tx_mcast_enum(unsigned n, uint16_t *id)
 // exactly the right combined rate but only one receiver hearing audio points at
 // per-context header state, and this is the field that cannot be checked from
 // the build host: unicast is forwarded only to its destination port.
+int dante_tx_flow_detail(unsigned f, dante_tx_flow_detail_t *out)
+{
+    if (f >= N_FLOWS) return 0;
+    const flow_slot_t *s = &flows[f];
+    out->in_use = s->in_use;
+    for (int i = 0; i < 4; i++) { out->peer[i] = s->peer[i]; out->dst[i] = s->dst[i]; }
+    out->dport  = s->dport;
+    out->nslots = s->nslots;
+    out->fpp    = s->fpp;
+    out->mcast  = s->mcast;
+    out->age_ms = gptp_uptime_ms() - s->last_ms;
+    for (int i = 0; i < 8; i++) out->chans[i] = s->chans[i];
+    return s->in_use;
+}
+
 void dante_tx_flow_mac(unsigned f, uint8_t mac[6])
 {
     for (int i = 0; i < 6; i++) mac[i] = (f < N_FLOWS) ? flows[f].dmac[i] : 0;

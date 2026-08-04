@@ -160,6 +160,30 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         net_udp_commit(src_ip, src_port, STATS_PORT, n, NET_TOS_BEST_EFFORT);
         return;
     }
+    // Per-flow detail, opcode 'f'. What we ACTUALLY bound: destination socket,
+    // slot count, fpp and the slot->channel map. Exists because diagnosing "all
+    // green in Dante Controller but no audio" repeatedly came down to guessing
+    // at this from packet rates when the console had it written down.
+    if (len >= 1 && req[0] == 'f') {
+        uint8_t *p = net_udp_payload_buf();
+        uint32_t n = 0;
+        put32(p, n, 0x464C5731u); n += 4;          // 'FLW1'
+        put32(p, n, 6);           n += 4;          // N_FLOWS
+        for (unsigned f = 0; f < 6; f++) {
+            dante_tx_flow_detail_t d;
+            dante_tx_flow_detail(f, &d);
+            put32(p, n, ((uint32_t)d.in_use << 24) | ((uint32_t)d.nslots << 16) |
+                        ((uint32_t)d.fpp << 8) | d.mcast);            n += 4;
+            put32(p, n, ((uint32_t)d.dst[0] << 24) | ((uint32_t)d.dst[1] << 16) |
+                        ((uint32_t)d.dst[2] << 8) | d.dst[3]);        n += 4;
+            put32(p, n, d.dport);                                     n += 4;
+            put32(p, n, d.age_ms);                                    n += 4;
+            for (unsigned i = 0; i < 8; i += 2)
+                { put32(p, n, ((uint32_t)d.chans[i] << 16) | d.chans[i+1]); n += 4; }
+        }
+        net_udp_commit(src_ip, src_port, STATS_PORT, n, NET_TOS_BEST_EFFORT);
+        return;
+    }
     if (len >= 1 && req[0] == 't') {
         void telem_drain(const uint8_t *, uint16_t, const uint8_t *, uint32_t);
         telem_drain(src_ip, src_port, req, len);

@@ -118,7 +118,26 @@
 // just above the 2 us lock threshold so it closes the gap to lock in one go but
 // never fires against normal in-lock jitter.
 #define SERVO_INTEGRAL_MAX  100000000LL  // +-100 ms
-#define SERVO_STEP_NS       500000000LL  // step rather than slew beyond 500 ms
+// STEP RATHER THAN STEER BEYOND THIS.
+//
+// Was 500 ms, which left a huge dead band: an offset between the ~2 us lock
+// threshold and 500 ms was neither stepped nor reachable by steering in any
+// sensible time. Measured 2026-08-04 on a boot that never locked at all --
+// offset sat at -115969016 ns (-116 ms), far too big to steer down and far too
+// small to trip a 500 ms step. Lock was intermittent: 18 s, 18 s, then never.
+//
+// statime uses 1 ms for exactly this (filters/kalman.rs step_threshold), and
+// inferno's flows_tx.rs takes the same view -- re-bootstrap on divergence
+// rather than trying to steer it out.
+//
+// 1 ms is ~150x the measured offset noise (3-7 us peak on this path), so it
+// cannot fire on jitter. An earlier attempt at a 2500 ns re-step DID fire on
+// noise and livelocked; the lesson is the threshold must sit far above the
+// measurement noise, not that stepping is wrong.
+//
+// Stepping is only safe because the media clock now FOLLOWS steps: every step
+// bumps g_ptpv1.step_count and dante_tx re-anchors on it.
+#define SERVO_STEP_NS       1000000LL    // 1 ms, per statime's step_threshold
 // Lock thresholds, sized for PTPv1 on this path rather than inherited.
 //
 // These were 500/2000, carried over from gPTP -- which had 802.1AS transparent

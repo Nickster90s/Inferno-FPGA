@@ -58,7 +58,6 @@ void    dante_tx_report(void);   // console diagnostics
 const uint8_t *dante_tx_flow_ip(unsigned f);
 unsigned       dante_tx_flows(void);
 
-#endif // DANTE_TX_H
 
 // Bind a unicast flow from a receiver's request. Returns the context index, or
 // -1 if none is free. `chans` are 1-based tx channel numbers, 0 meaning an
@@ -74,6 +73,22 @@ int  dante_tx_flow_desc(unsigned f, uint8_t ip[4], uint16_t *port,
 int  dante_tx_bind_multicast(uint16_t ext_id, const uint16_t *chans, uint8_t n);
 int  dante_tx_ctx_for_id(uint16_t ext_id);
 void dante_tx_flow_mac(unsigned f, uint8_t mac[6]);
+
+// Full per-flow detail for the UDP readout: what we ACTUALLY bound, so the
+// binding can be compared against what the receiver asked for without needing
+// the console. Returns 0 if the slot is unused.
+typedef struct {
+    uint8_t  in_use;
+    uint8_t  peer[4];
+    uint8_t  dst[4];
+    uint16_t dport;
+    uint8_t  nslots;
+    uint8_t  fpp;
+    uint8_t  mcast;
+    uint32_t age_ms;
+    uint16_t chans[8];
+} dante_tx_flow_detail_t;
+int dante_tx_flow_detail(unsigned f, dante_tx_flow_detail_t *out);
 uint16_t dante_tx_flow_chan(unsigned f, unsigned slot);
 int  dante_tx_chan_bundle(uint16_t ch1, uint16_t *id, uint8_t *pos);
 int  dante_tx_mcast_by_id(uint16_t id, uint8_t ip[4], uint8_t *nslots);
@@ -82,3 +97,11 @@ int  dante_tx_unbind(unsigned f);
 void dante_tx_expire(void);
 void dante_tx_flow_info(unsigned f, uint8_t *in_use, uint32_t *age_ms,
                         uint32_t *rebinds);      // drop flows whose keepalives stopped
+
+// NOTE: this #endif used to sit at line 61, in the MIDDLE of the file, so every
+// declaration below it was OUTSIDE the include guard. It went unnoticed because
+// everything down there was function prototypes, and re-declaring a prototype is
+// legal C -- dstats.c includes this header twice (lines 12 and 16) and got away
+// with it. The first typedef added below the old #endif broke the build with
+// "conflicting types". Keep this at the end of the file.
+#endif // DANTE_TX_H
