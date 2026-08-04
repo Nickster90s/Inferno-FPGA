@@ -418,6 +418,13 @@ static void servo_update(int64_t offset_ns)
         freq_integral = applied - err_ppb;
         if (freq_integral >  SERVO_INTEGRAL_MAX) freq_integral =  SERVO_INTEGRAL_MAX;
         if (freq_integral < -SERVO_INTEGRAL_MAX) freq_integral = -SERVO_INTEGRAL_MAX;
+        // SEED THE EXACT ACCUMULATOR TOO. With rt_exact_integ the integral is
+        // derived from freq_integral_num every update, so writing only
+        // freq_integral here left the accumulator at 0 and the next Sync threw
+        // this hard-won acquisition away -- the servo then re-integrated the
+        // whole ~4300 ppb crystal error at ~3 ppb per update. Measured cost:
+        // lock went from seconds to 144 s.
+        freq_integral_num = freq_integral * SERVO_KI_DEN;
 
         int64_t na = (int64_t)g_ptpv1.base_addend_full
                    + (freq_integral * (int64_t)g_ptpv1.base_addend_full) / 1000000000LL;
@@ -929,6 +936,11 @@ void ptpv1_init(const uint8_t mac[6])
             // discarded on the first Sync. The integral is what carries the
             // standing rate correction, so that is what must be restored.
             freq_integral = ((warm - base) * 1000000000LL) / base;
+            // Same trap one level down from the comment above: with the exact
+            // integral, freq_integral_num is the real state and freq_integral
+            // is derived from it. Seeding only the derived value means the
+            // warm start is discarded on the first Sync.
+            freq_integral_num = freq_integral * SERVO_KI_DEN;
             g_ptpv1.rate_ppb = (int32_t)freq_integral;
             g_ptpv1.current_addend_full = (uint64_t)warm;
             gptp_set_addend_full(g_ptpv1.current_addend_full);
