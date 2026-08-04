@@ -8,7 +8,7 @@
 #include <stdint.h>
 
 #define CFG_MAGIC    0xCFA50701u
-#define CFG_VERSION  3          // v3 adds the PTPv1 warm-start addend; v1/v2 blobs still load
+#define CFG_VERSION  4          // v4 adds the media-clock warm-start rate; v1-v3 blobs still load
 
 typedef struct {
     uint32_t magic;
@@ -37,7 +37,22 @@ typedef struct {
     uint8_t  ptp_addend_valid;
     uint8_t  _pad4[3];
     uint64_t ptp_addend_full;   // last converged 52-bit TSU addend
-    uint8_t  reserved[60];
+    // Media-clock rate WARM START. PTP already warm-starts its addend above;
+    // the media clock did not, so every boot began at nominal and slewed to
+    // ~-4300 ppb at 100 ppb/s -- 43 seconds of wrong-and-changing sample rate
+    // with the talker already running. That is the "bad audio for a while
+    // after boot" the operator reported. Persisting the learned rate makes the
+    // media clock start within ppb of correct on the first packet.
+    // NOTE THE ORDER: the int32 comes FIRST so it lands on its natural
+    // alignment straight after the uint64, and reserved shrinks by exactly the
+    // 5 bytes used. Declaring the uint8 first inserted 3 bytes of padding,
+    // which changed sizeof(cfg_t) -- and cfg_load() requires
+    // `t.size == sizeof(cfg_t)`, so EVERY stored blob was rejected and reset to
+    // defaults on every boot. The warm start could never engage because its own
+    // config field was being wiped before it was read.
+    int32_t  mclk_ppb;          // last converged media-clock rate correction
+    uint8_t  mclk_ppb_valid;
+    uint8_t  reserved[55];
     uint32_t crc;              // checksum over all bytes above
 } cfg_t;
 

@@ -27,6 +27,7 @@
 #include "dante_flows.h"
 #include "net.h"
 #include "telem.h"
+#include "mcr_dante.h"
 #include <generated/csr.h>
 #include <string.h>
 #include <stdio.h>
@@ -273,7 +274,14 @@ void dante_tx_poll(void)
                    && g_ptpv1.mean_path_delay_ns != 0
                    && (gptp_uptime_ms() - lock_since) >= PTP_SETTLE_MS;
 
-    uint8_t want = settled && (dante_tx_active() > 0);
+    // Also wait for the MEDIA CLOCK to be ready, not just PTP.
+    //
+    // PTP lock says the TIME reference is good; it says nothing about the
+    // sample rate the packetizer is emitting at. Starting a stream while
+    // mcr_dante is still slewing means the first ~43 s go out on a rate that is
+    // both wrong and moving -- the "bad audio for a while after boot" symptom.
+    // With the NV warm start this is normally satisfied immediately.
+    uint8_t want = settled && (dante_tx_active() > 0) && mcr_dante_rate_ready();
 
     // ---- MEDIA CLOCK RATE SERVO -------------------------------------------
     //

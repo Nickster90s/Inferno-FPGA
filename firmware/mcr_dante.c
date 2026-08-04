@@ -4,6 +4,7 @@
 #include "ptpv1.h"
 #include "gptp.h"
 #include "telem.h"
+#include "config.h"
 
 #include <generated/csr.h>
 #include <stdio.h>
@@ -39,6 +40,19 @@
 // is the state the bench is in with the MacBook off), which must not look like
 // a fault. A level that has reached a quarter scale means real content.
 #define RING_ACTIVE_LEVEL    32
+
+// Warm-start persistence. Flash is a sector erase per save, so save rarely and
+// only once the slew has converged on the target.
+#define NV_SAVE_MS           600000u     // at most once per 10 minutes
+#define NV_SAVE_DELTA_PPB    200         // and only if it moved meaningfully
+
+// How close the applied rate must be to the PTP estimate before the talker is
+// allowed to start. One slew step (100 ppb) plus margin.
+#define RATE_READY_PPB       250
+
+// At or above this the ring is simply empty (48 kHz strobe = 100% duty), which
+// means no USB source -- never a reason to blame the media clock.
+#define UNDERRUN_NO_SOURCE_PER_S  24000u
 
 // ---- Phase ----
 //
@@ -98,6 +112,8 @@ static uint32_t last_underrun;
 static uint32_t underrun_per_s;
 static int32_t  drift_samples;
 static int32_t  phase_ppb;
+static uint8_t  warm_started;
+static uint32_t last_nv_ms;
 // Phase term DEFAULTS OFF. See the block comment at PHASE_MAX_PPB.
 static uint8_t  phase_enabled;
 
@@ -134,7 +150,36 @@ void mcr_dante_init(uint32_t sys_clk_freq, uint32_t fs)
     last_update_ms  = gptp_uptime_ms();
     win_start_ms    = last_update_ms;
 
-    mcr_increment_write(base_inc);
+    // WARM START. Without this every boot begins at nominal and slews to the
+    // crystal correction at SLEW_PPB/s -- ~43 s at the measured -4300 ppb --
+    // with the talker already running on a sample rate that is both wrong and
+    // moving. That is the "bad audio for a while after boot" symptom. PTP has
+    // warm-started its addend from NV since v3; this does the same for the
+    // media clock so the first packet is emitted at within ppb of the right
+    // rate.
+    //
+    // Sanity-clamped: a corrupt or wildly stale value must not start the clock
+    // somewhere absurd. Anything beyond MAX_PPB is ignored and we cold-start.
+    if (g_cfg.mclk_ppb_valid &&
+        g_cfg.mclk_ppb < MAX_PPB && g_cfg.mclk_ppb > -MAX_PPB) {
+        applied_ppb      = g_cfg.mclk_ppb;
+        applied_inc      = inc_for_ppb(applied_ppb);
+        last_written_inc = applied_inc;
+        mcr_increment_write(applied_inc);
+        warm_started = 1;
+        // AUTO-ARM on a warm start. The saved rate is one this board already
+        // converged on and ran audio with, so there is nothing to prove by
+        // waiting: arming here means the very first packet leaves at the right
+        // rate and the talker never has to be held off or dropped for a slew.
+        // A cold boot deliberately does NOT auto-arm -- there is no trusted
+        // rate to start from, so it stays manual (tools/mclk.py on).
+        enabled = 1;
+        printf("[mclk] WARM START %ld ppb from NV, ARMED (inc %lu)\n",
+               (long)applied_ppb, (unsigned long)applied_inc);
+    } else {
+        mcr_increment_write(base_inc);
+        printf("[mclk] cold start at nominal (no NV rate)\n");
+    }
 
     printf("[mclk] one owner, rate-only, slew %d ppb/s. base_inc=%lu "
            "DISABLED (dry run)\n", SLEW_PPB, (unsigned long)base_inc);
@@ -163,10 +208,12 @@ void mcr_dante_set_enabled(int on)
         printf("[mclk] DISABLED, NCO restored to nominal %lu\n",
                (unsigned long)base_inc);
     } else {
-        // Start the slew from nominal: that is where the NCO actually is.
-        applied_ppb      = 0;
-        applied_inc      = base_inc;
-        last_written_inc = base_inc;
+        // Start the slew from where the NCO ACTUALLY is. After a warm start
+        // that is the persisted rate, not nominal -- resetting to 0 here would
+        // throw the warm start away and re-introduce the 43 s ramp.
+        applied_inc      = inc_for_ppb(applied_ppb);
+        last_written_inc = applied_inc;
+        mcr_increment_write(applied_inc);
         telem_event(TELEM_E_MCLK_ARM, target_ppb, SLEW_PPB);
         printf("[mclk] ENABLED, slewing 0 -> %ld ppb at %d ppb/s (~%lu s)\n",
                (long)target_ppb, SLEW_PPB,
@@ -211,8 +258,20 @@ void mcr_dante_poll(void)
     }
 
     // ---- Auto-disable ----
-    if (enabled && lvl_max >= RING_ACTIVE_LEVEL &&
-        underrun_per_s > UNDERRUN_TRIP_PER_S) {
+    // A 100%-duty underrun is NOT a clock fault -- it is an empty ring, i.e.
+    // no USB source. A clock that is disturbing the ring causes PARTIAL
+    // underrun: brief repeated dips as the level crosses the prime floor.
+    //
+    // The old test used lvl_max >= 32, which fired spuriously on 2026-08-04
+    // when the USB host stopped: block_level reports a constant 64 while the
+    // talker is disabled (dante_packetizer.py "report centre while talker
+    // off"), so the talker-off window looked like an active ring, and the
+    // guard reverted a perfectly good warm-started rate. Duty cycle is the
+    // discriminator that actually separates the two cases.
+    if (enabled &&
+        underrun_per_s > UNDERRUN_TRIP_PER_S &&
+        underrun_per_s < UNDERRUN_NO_SOURCE_PER_S &&
+        lvl_max >= RING_ACTIVE_LEVEL) {
         trips++;
         telem_event(TELEM_E_MCLK_TRIP, (int32_t)underrun_per_s, lvl_min);
         printf("[mclk] TRIP: underrun %lu/s with ring active (level %u..%u) "
@@ -295,6 +354,26 @@ void mcr_dante_poll(void)
         mcr_increment_write(applied_inc);
         nco_writes++;
     }
+
+    // Persist the converged rate for the next boot, but rarely: this is a
+    // flash sector erase/write, and doing it on every small change would wear
+    // the part and stall the main loop. Only once converged (slew has caught
+    // up with the target) and only when it has actually moved.
+    // The FIRST save is not time-gated: a cold-started board must persist its
+    // rate as soon as it converges, or the very next boot is cold again and
+    // the whole warm-start mechanism never engages. Later saves are rate
+    // limited, because each one is a flash sector erase.
+    if (enabled && applied_ppb == target_ppb &&
+        (!g_cfg.mclk_ppb_valid || (uint32_t)(now - last_nv_ms) >= NV_SAVE_MS)) {
+        last_nv_ms = now;
+        int32_t d = g_cfg.mclk_ppb - applied_ppb;
+        if (!g_cfg.mclk_ppb_valid || d > NV_SAVE_DELTA_PPB || d < -NV_SAVE_DELTA_PPB) {
+            g_cfg.mclk_ppb_valid = 1;
+            g_cfg.mclk_ppb       = applied_ppb;
+            cfg_save();
+            printf("[mclk] rate %ld ppb saved for warm start\n", (long)applied_ppb);
+        }
+    }
 }
 
 void mcr_dante_set_phase_enabled(int on)
@@ -303,6 +382,20 @@ void mcr_dante_set_phase_enabled(int on)
     if (!phase_enabled) phase_ppb = 0;
     printf("[mclk] phase term %s\n", phase_enabled ? "ENABLED (experimental)"
                                                     : "disabled");
+}
+
+int mcr_dante_rate_ready(void)
+{
+    // Not disciplining at all: the clock is whatever the crystal does, which is
+    // steady even if it is wrong. Nothing to wait for.
+    if (!enabled)
+        return 1;
+    if (!g_ptpv1.locked)
+        return 0;
+    // Converged when the slew limiter has caught the target. A warm start
+    // arrives here on the first poll instead of ~43 s later.
+    int32_t d = target_ppb - applied_ppb;
+    return (d < RATE_READY_PPB && d > -RATE_READY_PPB);
 }
 
 void mcr_dante_get_status(mcr_dante_status_t *out)

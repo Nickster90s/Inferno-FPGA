@@ -53,6 +53,12 @@ void mcr_dante_set_enabled(int on);
 
 void mcr_dante_set_phase_enabled(int on);
 
+// 1 when the media clock is fit to start a stream on: the rate has converged on
+// the PTP estimate (or was warm-started onto it) rather than still slewing.
+// dante_tx gates the talker on this so a stream never begins on a sample rate
+// that is still moving -- that ramp is what made the first ~45 s sound wrong.
+int mcr_dante_rate_ready(void);
+
 typedef struct {
     uint8_t  enabled;
     uint8_t  phase_enabled;
