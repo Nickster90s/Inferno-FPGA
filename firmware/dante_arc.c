@@ -673,7 +673,23 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         // a deliberate silence. 0x22 is what real hardware returns for an
         // unsupported opcode.
         g_arc_stats.unknown++;
-        if (g_arc_stats.unknown <= 12)
+        // LOG EACH DISTINCT OPCODE, not the first N requests.
+        //
+        // The cap was `unknown <= 12`, which is a budget on REQUESTS. Dante
+        // Controller polls, so twelve arrive within seconds of boot and every
+        // opcode after that is dropped in silence -- including any asked later
+        // when an operator opens Device View. We have been unable to answer
+        // "what is Controller asking us that we ignore?" for that reason alone.
+        //
+        // A 64-bit set keyed on the low 6 bits of the opcode is enough: the
+        // opcodes seen on this bus are sparse (0x1100, 0x1102, 0x2320, 0x3300
+        // in inferno; 0x2201/2/4, 0x3010/4, 0x4100 here), so collisions are
+        // unlikely and the cost of one is a missed log line, not a wrong reply.
+        static uint64_t seen_opcodes;
+        uint64_t bit = 1ULL << (opcode & 63);
+        int first_time = !(seen_opcodes & bit);
+        seen_opcodes |= bit;
+        if (first_time)
             printf("[arc] unhandled opcode %#06x from %u.%u.%u.%u (answering 0x22)\n",
                    opcode, src_ip[0], src_ip[1], src_ip[2], src_ip[3]);
         code = 0x22;

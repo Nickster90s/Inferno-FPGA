@@ -472,6 +472,29 @@ static uint32_t build_txt_chan(uint8_t *p, unsigned ch1)
     n = txt_put(p, n, "pcm=3 4");
     n = txt_put(p, n, "enc=24");
     n = txt_put(p, n, "latency_ns=500000");
+    // fpp=<MAX>,<MIN>, per inferno mdns_server.rs:120
+    // (format!("fpp={},{}", FPP_MAX_ADVERTISED, FPP_MIN) = 32,2).
+    //
+    // REVERTED TO 8 (2026-08-05). Advertising 16 is more truthful --
+    // dante_flows.c accepts 8 or 16 -- and it was changed for exactly that
+    // reason. But it made a RedNet A16R renegotiate all four of its flows from
+    // fpp=8 to fpp=16, and the audio went bad in the room at that moment.
+    //
+    // Everything measurable stayed identical across the change: rate discipline
+    // armed, phase term off, drift -31 samples, ring 61..68, underrun 0/s, PTP
+    // locked at -167 ns, one anchor, one enable, 18002 pps for 6 fpp=16 flows,
+    // and the multicast stream on the wire byte-perfect (no gaps, no dups,
+    // fpp-aligned, -5 dBFS of real audio). The only variable that moved was the
+    // receivers' fpp, and the only instrument that detected it was the operator.
+    //
+    // The change also bought nothing: the A16R still requests 4 channels per
+    // flow either way, which was the reason for trying it. So this is a revert
+    // of a correctness nicety that cost audio and returned nothing.
+    //
+    // If it is ever raised again, note that with every flow at fpp=16 they all
+    // fall due on tick_hi together -- six packets in one burst every 333 us
+    // instead of spread across every tick, which is worth ruling out before
+    // blaming the receivers.
     n = txt_put(p, n, "fpp=8,2");
     // nchan is the channels in a FLOW, not the device's channel count.
     // inferno: MAX_CHANNELS_IN_FLOW.min(tx_channels.len()) -> 8. We were

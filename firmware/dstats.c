@@ -184,6 +184,28 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         net_udp_commit(src_ip, src_port, STATS_PORT, n, NET_TOS_BEST_EFFORT);
         return;
     }
+    // 'o' [ASCII signed decimal] -- set the TX timestamp offset in samples and
+    // re-anchor. Replies with the value now in force so a sweep can confirm the
+    // write landed rather than assuming it did.
+    if (len >= 1 && req[0] == 'o') {
+        if (len >= 2) {
+            int32_t v = 0, sign = 1; uint32_t i = 1;
+            if (req[i] == '-') { sign = -1; i++; }
+            else if (req[i] == '+') { i++; }
+            int digits = 0;
+            for (; i < len && req[i] >= '0' && req[i] <= '9'; i++) {
+                v = v * 10 + (req[i] - '0'); digits++;
+            }
+            if (digits) dante_tx_set_ts_offset(sign * v);
+        }
+        uint8_t *p2 = net_udp_payload_buf();
+        uint32_t n2 = 0;
+        put32(p2, n2, 0x54534F31u); n2 += 4;                     // 'TSO1'
+        put32(p2, n2, (uint32_t)dante_tx_get_ts_offset()); n2 += 4;
+        net_udp_commit(src_ip, src_port, STATS_PORT, n2, NET_TOS_BEST_EFFORT);
+        return;
+    }
+
     if (len >= 1 && req[0] == 't') {
         void telem_drain(const uint8_t *, uint16_t, const uint8_t *, uint32_t);
         telem_drain(src_ip, src_port, req, len);

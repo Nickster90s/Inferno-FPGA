@@ -55,6 +55,10 @@
 // means no USB source -- never a reason to blame the media clock.
 #define UNDERRUN_NO_SOURCE_PER_S  24000u
 
+// Consecutive one-second polls the trip condition must hold before it is
+// believed. See the trip site for why this exists.
+#define TRIP_STREAK_S        6u
+
 // ---- PHASE: a real PLL on PTP, deliberately feeble --------------------------
 //
 // DISABLED BY DEFAULT. Two earlier attempts at this broke audio; read why
@@ -167,6 +171,7 @@ static uint32_t trips;
 static uint32_t last_underrun;
 static uint32_t underrun_per_s;
 static int32_t  drift_samples;
+static uint32_t trip_streak;
 static int32_t  phase_ppb;
 static uint8_t  warm_started;
 static int32_t  phase_setpoint;      // drift value the PLL holds
@@ -330,10 +335,33 @@ void mcr_dante_poll(void)
     // off"), so the talker-off window looked like an active ring, and the
     // guard reverted a perfectly good warm-started rate. Duty cycle is the
     // discriminator that actually separates the two cases.
+    // REQUIRE PERSISTENCE. The window between "ring empty" (48000/s) and "ring
+    // healthy" (0/s) is traversed EVERY TIME the USB host starts streaming, and
+    // on the way through it passes exactly through this band with the level
+    // already climbing past RING_ACTIVE_LEVEL. Starting playback on the MacBook
+    // therefore tripped the guard and reverted the rate correction, after which
+    // the media clock free-ran at the crystal's ~4.4 ppm -- about 13 samples per
+    // minute, crossing a receiver's entire 1 ms budget in under four minutes.
+    //
+    // Observed 2026-08-05: trips=1, applied +0 ppb against a target of
+    // -4408 ppb, and the emitted timestamp walking out of every latency window.
+    // This is the THIRD spurious trip of this guard (previously: lvl_max >= 32
+    // matching the talker-off constant 64), and each time the cause was a
+    // transient state rather than a clock fault.
+    //
+    // A real clock fault is persistent by nature; a startup transient lasts a
+    // second or two. Requiring several consecutive seconds separates them
+    // without weakening the guard against what it is actually for.
     if (enabled &&
         underrun_per_s > UNDERRUN_TRIP_PER_S &&
         underrun_per_s < UNDERRUN_NO_SOURCE_PER_S &&
-        lvl_max >= RING_ACTIVE_LEVEL) {
+        lvl_max >= RING_ACTIVE_LEVEL)
+        trip_streak++;
+    else
+        trip_streak = 0;
+
+    if (trip_streak >= TRIP_STREAK_S) {
+        trip_streak = 0;
         trips++;
         telem_event(TELEM_E_MCLK_TRIP, (int32_t)underrun_per_s, lvl_min);
         printf("[mclk] TRIP: underrun %lu/s with ring active (level %u..%u) "

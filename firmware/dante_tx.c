@@ -53,6 +53,22 @@ dante_tx_stats_t g_tx_stats;
 static uint8_t  flow_ip[N_FLOWS][4];
 static uint8_t  talker_on;
 
+// RUNTIME-TUNABLE TIMESTAMP OFFSET.
+//
+// This was a compile-time constant, and calibrating it cost a rebuild, a flash,
+// a reboot, and the operator re-creating the multicast flow by hand -- about
+// five minutes per data point, with the board's uptime (and therefore any
+// accumulated phase drift) different every time. Two attempts at predicting the
+// right value from a model both missed, and the second overshot by more than
+// the first undershot, because the model `lag = 15 - offset` does not describe
+// the measured system: a -162 change in the offset moved the on-wire lag by
+// +366, a ratio of 2.26 rather than 1.
+//
+// A knob that can be swept in seconds, without a reboot and without losing the
+// flow table, turns that into a two-point calibration. Measure, adjust, measure
+// -- no model required.
+static int32_t ts_offset_samples = DANTE_TX_TS_OFFSET;
+
 // ---------------------------------------------------------------------------
 // IPv4 header checksum, computed once per flow.
 //
@@ -219,7 +235,7 @@ static void ts_anchor(void)
     // pair, so the carry is done here in C where seconds exist, and the
     // emitted value is always ts_sub - 15 with ts_sub congruent to 15 mod 16 --
     // in [0, 47984], a multiple of fpp, and never wrapping either way.
-    sub += DANTE_TX_TS_OFFSET;
+    sub += ts_offset_samples;
     if (sub < 0)            { sub += 48000; sec -= 1; }
     else if (sub >= 48000)  { sub -= 48000; sec += 1; }
 
@@ -230,7 +246,7 @@ static void ts_anchor(void)
     telem_event(TELEM_E_ANCHOR, (int32_t)sec, (int32_t)sub);
     printf("[dtx] media clock anchored to PTP %lu.%09lu -> %lu.%lu (offset %d)\n",
            (unsigned long)t.seconds, (unsigned long)t.nanoseconds,
-           (unsigned long)sec, (unsigned long)sub, DANTE_TX_TS_OFFSET);
+           (unsigned long)sec, (unsigned long)sub, (int)ts_offset_samples);
 }
 
 void dante_tx_poll(void)
@@ -515,7 +531,13 @@ static flow_slot_t flows[N_FLOWS];
 // context (nslots = 0) for the gap and would be audible. The only thing this
 // timeout does is release a context when a receiver goes away for good, so
 // erring long costs nothing and erring short costs audio.
-#define FLOW_TIMEOUT_MS  300000
+// 600 s, not 300. On the bench an AM2's live flow was measured at 229 s and
+// still climbing between refreshes, so a 300 s timer was close enough to its
+// keepalive interval to silence a flow that was still in use -- the exact
+// "erring short costs audio" failure recorded above. Slot pressure is handled
+// by eviction-on-demand in the bind paths, which reclaims only when a slot is
+// genuinely needed, so the timer can afford to be purely a backstop.
+#define FLOW_TIMEOUT_MS  600000
 
 
 
@@ -613,12 +635,33 @@ int dante_tx_bind_unicast(const uint8_t peer_ip[4], const uint8_t dst_ip[4],
         // than refusing. This replaces timer expiry -- it reclaims a context
         // only when one is actually needed, so it cannot fire spuriously the
         // way a PTP-derived timeout did.
-        uint32_t oldest = 0; f = 0;
+        // PREFER A UNICAST VICTIM. A multicast flow is never refreshed (ARC
+        // 2201 creates it, nothing sends keepalives for it), so its last_ms is
+        // frozen at creation and its age grows without bound -- which makes it
+        // the oldest context on the box within minutes and therefore ALWAYS the
+        // first thing an age-ordered scan evicts. Observed on the bench: an
+        // A16R renegotiating four flows evicted the operator's multicast
+        // immediately, every time, while genuinely stale unicast contexts
+        // survived. Age is simply not a meaningful staleness signal for
+        // multicast, so rank it last instead of first.
+        uint32_t oldest = 0; f = -1;
         for (unsigned i = 0; i < N_FLOWS; i++) {
+            if (flows[i].mcast) continue;
             uint32_t age = now_ms - flows[i].last_ms;
-            if (age >= oldest) { oldest = age; f = (int)i; }
+            if (f < 0 || age >= oldest) { oldest = age; f = (int)i; }
         }
-        printf("[dtx] all contexts busy -- evicting %d\n", f);
+        if (f < 0) {
+            // Every context is multicast -- fall back to age order among them
+            // rather than refusing the bind.
+            oldest = 0; f = 0;
+            for (unsigned i = 0; i < N_FLOWS; i++) {
+                uint32_t age = now_ms - flows[i].last_ms;
+                if (age >= oldest) { oldest = age; f = (int)i; }
+            }
+        }
+        printf("[dtx] all contexts busy -- evicting %d (%s, idle %lu s)\n",
+               f, flows[f].mcast ? "multicast" : "unicast",
+               (unsigned long)((now_ms - flows[f].last_ms) / 1000));
         flows[f].in_use = 0;
     }
 
@@ -644,30 +687,95 @@ int dante_tx_bind_unicast(const uint8_t peer_ip[4], const uint8_t dst_ip[4],
     return f;
 }
 
+int32_t dante_tx_get_ts_offset(void) { return ts_offset_samples; }
+
+void dante_tx_set_ts_offset(int32_t v)
+{
+    // Re-anchoring mid-stream is a timestamp DISCONTINUITY: one packet advances
+    // by other than fpp, and a receiver may click or briefly mute. That is
+    // acceptable for calibration and is not something to do while anyone is
+    // listening for pleasure -- which is precisely why this is a diagnostic
+    // knob and not part of any control loop.
+    ts_offset_samples = v;
+    printf("[dtx] ts offset -> %d samples, re-anchoring\n", (int)v);
+    ts_anchor();
+}
+
 void dante_tx_expire(void)
 {
-    // DELIBERATELY DOES NOTHING. Flows are never expired on a timer.
+    // DISABLED. Time-based expiry has now silenced a LIVE flow twice with two
+    // different timeouts: 300 s, then 600 s, both chosen from observed
+    // keepalive intervals that turned out not to bound anything. Measured on
+    // the bench:
     //
-    // Every timer-based version of this was wrong, because the only clock we
-    // have is derived from PTP and PTP steps. The console showed the cost
-    // plainly: at lock, both flows expired in the same instant, active dropped
-    // to zero, and the talker went ENABLED -> OFF -> ENABLED within seconds.
-    // Each toggle re-anchors the media clock and re-primes the ring, and THAT
-    // is the mangled audio at stream start -- not the ring level, which now
-    // sits at its centre through the whole hold-off. Multicast never showed it
-    // because multicast never gated on flows.
+    //   [dtx] flow 4 stale (600 s, 169.254.61.114:14405) -- releasing
     //
-    // Raising the timeout (16 s -> 45 s -> 5 min) never addressed it: the
-    // apparent gap after a step is tens of thousands of seconds, not seconds.
-    // Nor did the discontinuity guard, which compared consecutive polls and
-    // still missed it.
+    // an AM2 whose subscription was live and whose audio stopped when we
+    // released its context. Earlier the same device was seen refreshing at
+    // 229 s, so there is no interval here that is both long enough to be safe
+    // and short enough to be useful.
     //
-    // Expiry is not needed for correctness. A context is reclaimed by peer IP
-    // when the same receiver refreshes, and when all six are taken a NEW peer
-    // evicts the least-recently-bound one (see dante_tx_bind_unicast). A
-    // departed receiver therefore costs one idle context and nothing else --
-    // and an idle context transmits nothing, because nslots stays set but the
-    // talker only ever sends to bound destinations.
+    // The only problem expiry existed to solve is a receiver that MOVES PORTS
+    // stranding its old context (see the history below). Eviction-on-demand in
+    // dante_tx_bind_unicast/_bind_multicast solves that strictly better: it
+    // reclaims only when a context is actually needed, prefers unicast victims,
+    // and picks the oldest among them -- so it cannot fire against a flow
+    // nobody is competing for.
+    return;
+
+    // RE-ENABLED 2026-08-05, because the flow key changed underneath it.
+    //
+    // This used to do nothing, and the justification was sound at the time:
+    // "a context is reclaimed by peer IP when the same receiver refreshes".
+    // That held while the reuse key was the PEER, so a renegotiating receiver
+    // overwrote its own context. Keying on (peer, dst_ip, dst_port) fixed the
+    // 8-channel cap but made a receiver that MOVES PORTS strand its old context
+    // permanently.
+    //
+    // Observed: advertising fpp=16,2 made a RedNet A16R renegotiate from port
+    // 14351 onto 14361/63/65/67. Its old fpp=8 context stayed bound and kept
+    // transmitting -- 6000 pps to a socket nobody was listening on -- and with
+    // all six slots occupied there was no room left to create a multicast flow.
+    //
+    // TIMEOUT IS DELIBERATELY LONG. dante_tx.c's own history records keepalives
+    // measured at 16-38 s and a 45 s timeout still expiring flows mid-stream,
+    // which silences a context (nslots = 0) until the next refresh and is
+    // audible. Live flows here refresh every 28-33 s; the stale ones sat at
+    // 128 s. 300 s separates those by a wide margin and only ever reclaims a
+    // context a receiver has genuinely abandoned.
+    uint32_t now = gptp_uptime_ms();
+    for (unsigned f = 0; f < N_FLOWS; f++) {
+        if (!flows[f].in_use)
+            continue;
+        // MULTICAST HAS NO KEEPALIVE. A multicast flow is created once by ARC
+        // 2201 and is never refreshed -- there is no subscriber sending flow
+        // control for it, so last_ms is frozen at creation and its age climbs
+        // forever. Ageing it out therefore does not reclaim an abandoned
+        // context, it silently kills a stream that is working: measured here at
+        // 391 s and still transmitting real audio at -6 dBFS.
+        //
+        // This was a regression from re-enabling expiry at all. Slot pressure
+        // is handled by eviction-on-demand in the bind paths, which is age-
+        // ordered and so will still reclaim a genuinely idle multicast context
+        // when something actually needs the slot.
+        if (flows[f].mcast)
+            continue;
+        uint32_t age = now - flows[f].last_ms;
+        // SANITY GUARD. gptp_uptime_ms is PTP-derived (bias-compensated, but
+        // still). Every previous timer-based version of this was defeated by a
+        // clock step making every age enormous at once and expiring the lot.
+        // An age beyond an hour is not a stale flow, it is a moved clock --
+        // ignore it and let the next poll decide on sane numbers.
+        if (age > 3600000u)
+            continue;
+        if (age > FLOW_TIMEOUT_MS) {
+            printf("[dtx] flow %u stale (%lu s, %u.%u.%u.%u:%u) -- releasing\n",
+                   f, (unsigned long)(age / 1000),
+                   flows[f].dst[0], flows[f].dst[1], flows[f].dst[2],
+                   flows[f].dst[3], flows[f].dport);
+            dante_tx_unbind(f);
+        }
+    }
 }
 
 // Turn a multicast bundle on: 8 consecutive channels at fpp 16, to the group
@@ -688,7 +796,29 @@ int dante_tx_bind_multicast(uint16_t ext_id, const uint16_t *chans, uint8_t n)
     if (f < 0)
         for (unsigned i = 0; i < N_FLOWS; i++)
             if (!flows[i].in_use) { f = (int)i; break; }
-    if (f < 0) return -1;
+    if (f < 0) {
+        // EVICT THE LEAST-RECENTLY-BOUND rather than refusing, which is what
+        // dante_tx_bind_unicast already does. Refusing produced
+        // "[arc] 2201: no free context for flow 32" on the bench with all six
+        // slots held -- four by an A16R taking only FOUR channels per flow, one
+        // by an AM2, and one by an A16R context it had abandoned when it moved
+        // ports. The abandoned one was the obvious candidate and nothing would
+        // take it.
+        //
+        // Evicting on demand is strictly better than waiting for the timer:
+        // it reclaims only when a slot is actually needed and always picks the
+        // stalest, so it cannot silence a flow that is still being refreshed.
+        uint32_t now = gptp_uptime_ms(), oldest = 0;
+        f = 0;
+        for (unsigned i = 0; i < N_FLOWS; i++) {
+            uint32_t age = now - flows[i].last_ms;
+            if (age > 3600000u) age = 3600000u;      // clock moved; do not trust
+            if (age >= oldest) { oldest = age; f = (int)i; }
+        }
+        printf("[dtx] multicast needs a context -- evicting %d (stale %lu s)\n",
+               f, (unsigned long)(oldest / 1000));
+        dante_tx_unbind((unsigned)f);
+    }
 
     const uint8_t *dip = flow_ip[f];
     uint8_t dmac[6] = { 0x01, 0x00, 0x5E, (uint8_t)(dip[1] & 0x7F), dip[2], dip[3] };

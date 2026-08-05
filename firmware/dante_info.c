@@ -206,6 +206,46 @@ static void send_heartbeat(void)
     put_u32(p, n, 0);       n += 4;
     put_u32(p, n, 0);       n += 4;
 
+    // 0x8002: per-channel signal peaks. EVERY real device on the bench sends
+    // this and we were the only one that did not -- compared structurally with
+    // a heartbeat capture on 2026-08-05:
+    //
+    //   MacBook  8000 8001 8002 8003 8004 8006 8008 8009 800a
+    //   A16R     8000 8001 8002 8003 8004
+    //   AM2      8000 8001 8002 8003 8004
+    //   us       8000 8001 ---- 8003 8004
+    //
+    // It was skipped because the leading count "could not be pinned down".
+    // inferno documents it exactly (info_mcast_server.rs:201-225): u16 tx
+    // count, 0, u16 rx count, 0, 24, 0, then ONE BYTE per channel, tx first
+    // then rx, zero-padded to a multiple of four. The observed lengths agree:
+    // the A16R's 60 = 24 + 36 (16+16 channels padded), the AM2's 28 = 24 + 4.
+    //
+    // PEAKS ARE REPORTED AS ZERO, honestly. Firmware never sees sample values
+    // -- audio goes USB -> gateware ring -> packetizer without passing through
+    // the CPU -- so there is nothing to measure here yet. Real meters need a
+    // per-channel peak detector in dante_packetizer.py exposed over CSR. The
+    // record is sent because its ABSENCE is a structural difference from every
+    // real device; the zeros are a truthful "no meter", not a fabricated level.
+    {
+        const uint16_t ntx = DANTE_TX_CHANNELS, nrx = DANTE_RX_CHANNELS;
+        uint16_t npk = ntx + nrx;
+        uint16_t pad = (uint16_t)((4u - (npk & 3u)) & 3u);
+        put_u16(p, n, (uint16_t)(24 + npk + pad)); n += 2;
+        put_u16(p, n, 0x8002);  n += 2;
+        put_u16(p, n, 4);       n += 2;
+        put_u16(p, n, (uint16_t)(12 + npk)); n += 2;
+        put_u16(p, n, seqnum);  n += 2;
+        put_u16(p, n, 0);       n += 2;
+        put_u16(p, n, ntx);     n += 2;
+        put_u16(p, n, 0);       n += 2;
+        put_u16(p, n, nrx);     n += 2;
+        put_u16(p, n, 0);       n += 2;
+        put_u16(p, n, 24);      n += 2;
+        put_u16(p, n, 0);       n += 2;
+        for (uint16_t i = 0; i < npk + pad; i++) { p[n] = 0; n += 1; }
+    }
+
     // 0x8003 / 0x8004: emitted LAST, deliberately.
     //
     // Both begin with a count that scales the record. That count was why these
@@ -213,15 +253,32 @@ static void send_heartbeat(void)
     // every record AFTER it, because records are length-delimited and read in
     // sequence. Putting them at the end bounds that risk to themselves.
     //
-    // The count now has evidence behind it rather than being a guess: the A16R
-    // is a 16-channel device and sends 2, and 16/8 = 2 flows (Dante's
-    // MAX_CHANNELS_IN_FLOW is 8). The other device on the bench sends 32, which
-    // is consistent with the same rule for a larger box. Our 48 channels give 6.
+    // COUNT IS THE **RX** FLOW CAPACITY, NOT A FUNCTION OF TX CHANNELS.
+    //
+    // This used to be DANTE_TX_CHANNELS / 8 = 6, justified as "the A16R is a
+    // 16-channel device and sends 2, and 16/8 = 2". That rule does not hold:
+    // measured directly off the wire with tools/dante_latency.py on 2026-08-05,
+    // the A16R sends 32 and the AM2 sends 2. 16/8 is 2 only by coincidence.
+    //
+    // What the block actually is (inferno info_mcast_server.rs:227-250): the
+    // per-flow `actual_latency_samples` of the flows this device RECEIVES,
+    // taken from its channels_subscriber. A pure transmitter has none. We were
+    // advertising six phantom RX flows, each reporting 0 samples of latency --
+    // a value no real flow can have, since it is measured as
+    // (now - packet_timestamp) at receipt.
+    //
+    // We have DANTE_RX_CHANNELS = 2. The AM2, also a two-channel device,
+    // reports 2. That is the only direct evidence available, so follow it.
+    //
+    // NOTE this is unlikely to change Dante Controller's grey "Latency Status"
+    // for us: with nothing subscribed to our RX channels there are no received
+    // flows to measure, and grey is the correct rendering of that. Fixed
+    // because advertising flows we do not have is wrong on its own terms.
     //
     // 0x8003 carries the sample rate (the A16R's 0x0000bb80 = 48000) followed
     // by one word per flow; 0x8004 is one word per flow with no preamble. Both
     // are all-zero past those on real hardware.
-    const uint16_t nflows = DANTE_TX_CHANNELS / 8;
+    const uint16_t nflows = DANTE_RX_CHANNELS;
 
     put_u16(p, n, (uint16_t)(12 + 8 + 4 + 4 * nflows)); n += 2;
     put_u16(p, n, 0x8003);  n += 2;
