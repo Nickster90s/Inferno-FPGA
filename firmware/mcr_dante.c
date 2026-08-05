@@ -55,48 +55,103 @@
 // means no USB source -- never a reason to blame the media clock.
 #define UNDERRUN_NO_SOURCE_PER_S  24000u
 
-// ---- Phase ----
+// ---- PHASE: a real PLL on PTP, deliberately feeble --------------------------
 //
-// DISABLED BY DEFAULT, because the first version of it broke audio.
+// DISABLED BY DEFAULT. Two earlier attempts at this broke audio; read why
+// before enabling it.
 //
-// It was pure-proportional with a deadband, and its output fed the rate slew
-// limiter -- i.e. the lag was INSIDE the loop. That is a textbook limit cycle:
-// on the bench the phase hunted -27 -> +216 samples (a 5 ms excursion, target
-// +74) while modulating the media clock rate by roughly +/-0.5 ppm on a slow
-// period. Receivers locking to those timestamps reported clock problems, and
-// the operator heard them. Bisected 2026-08-04 by disabling the discipline:
-// audio went clean immediately.
+// THE PROBLEM. Rate discipline alone is a FREQUENCY-locked loop: it stops the
+// error growing but never returns what has accumulated, and the NCO increment
+// is a 32-bit integer so ~0.12 ppm of rate error is not even expressible.
+// Measured: +0.26 ppm residual, 0.9 ms/hour of phase walk with nothing pulling
+// it back. A receiver at 1 ms latency crosses its whole buffer in about an
+// hour. That is what "the media clock feels like it is free running" was.
 //
-// Rate discipline alone is validated and safe (see the audio test above), so
-// the two are now separable: `mclk on` gives rate only. The phase term stays
-// off until it is redesigned with damping -- a PI whose integrator is not
-// behind the slew limiter, much lower gain, and telemetry that can actually
-// show it oscillating. Do not re-enable it on a hunch.
+// WHY A TEXTBOOK PLL FAILS HERE. A normal PLL assumes the VCO can be moved
+// freely. This NCO feeds TWO loops: the Dante timestamp (wants phase lock to
+// PTP) and the USB async feedback (the host rate-matches to this same NCO). The
+// actuator is also the reference for a faster loop, so moving it quickly
+// destabilises the ring. Attempt 1 was proportional-only with a +/-2 ppm clamp
+// and a deadband: it limit-cycled and was audible. Attempt 2 avoided the servo
+// entirely and added a fractional NCO in gateware -- correct arithmetic (sim:
+// 0.0 ppb error) but it dithers STROBE TIMING at 50 MHz, and the USB feedback
+// measures strobes-per-SOF, so the ring starved (avg level 36, ~9700 underrun/s).
 //
-// RATE AND PHASE ARE SEPARATE STATE. Correcting the rate stops the error
-// growing; it never brings back what has already accumulated. Missing this is
-// what produced silence on 2026-08-04: rate discipline was working (+0.53 ppm)
-// while the emitted timestamp sat 227 ms in the future from two days of
-// free-running drift, and every receiver discarded the audio.
+// THE CONSTRAINT THAT FOLLOWS. Loop bandwidth must sit far below the USB loop's.
+// What the host demonstrably tolerates: the rate slew of 0 -> -4300 ppb at
+// 100 ppb/s ran with ZERO underruns, validated with audio. And the arithmetic is
+// kind -- nulling 1 ms (48 samples) of phase over an hour needs only 0.28 ppm.
+// So the loop wants a time constant of ~hours, i.e. millihertz bandwidth. That
+// is not a compromise: path delay spread here is 4-6 us, so a wide loop would
+// chase network jitter straight into the audio.
 //
-// So a small phase term is pulled in alongside the rate. It is deliberately
-// FEEBLE: clamped to +/-2000 ppb, which is under half the crystal error the
-// rate term already handles, so it can never fight the ring or the USB servo.
-// At the clamp it closes 1 ms of phase in ~8 minutes -- far too slow to rescue
-// a large accumulated error (that is the re-anchor backstop's job in
-// dante_tx.c) but ample to stop one ever forming.
-#define PHASE_MAX_PPB        2000
+// QUANTISATION SOLVES ITSELF. An integral this slow naturally dithers the
+// increment between N and N+1 at ~1 Hz. 0.24 ppm x 48000 = 0.0115 samples/s, so
+// a 1 s dither moves the ring by 0.01 samples against a 2048-sample ring --
+// nothing. Dither was never the problem; dither at 50 MHz was.
+//
+// SETPOINT: A FIXED TARGET, not a latched one.
+//
+// The first version latched the setpoint from whatever drift read after the
+// anchor. That holds phase, but it holds it WHEREVER THAT BOOT HAPPENED TO
+// LAND -- measured at -37, -26 and -53 samples on successive boots, i.e. the
+// absolute offset varied by +/-0.5 ms and was never corrected, only frozen.
+// Against a receiver at 1 ms latency that is exactly "the audio is out of
+// sync", and it explains why it differed every time the board came up.
+//
+// So target a defined position instead. inferno's flows_tx.rs uses
+// CLOCK_OFFSET_NS = -500_000, i.e. 24 samples IN THE PAST, and is explicit that
+// the clock must not be in the future ("otherwise Dante devices receiving from
+// us go mad and fart"). Driving to that makes the offset deterministic across
+// boots and puts us on the documented value rather than an accident of when the
+// anchor fired.
+//
+// Note this finally makes DANTE_TX_TS_OFFSET's mislabelling harmless: that
+// constant says +74 while the wire measures ~-37 because of emit-path latency
+// nobody budgeted. The loop closes on the MEASURED position, so it does not
+// matter what the open-loop constant claims.
+#define PHASE_TARGET_SAMPLES     (-24)   // inferno CLOCK_OFFSET_NS = -500 us
+// Hard clamp on the loop's contribution. MUST SPAN SEVERAL NCO LSBs.
+//
+// One increment LSB is 1/4123169 = 242 ppb. The first version clamped at 300 --
+// barely ONE LSB -- and the integral saturated there within 10 minutes and sat
+// pinned: it could not wind past a grid point to dither between two adjacent
+// increments, which is how a slow integral expresses a value BETWEEN them.
+// Measured: requested -300 ppb but only ~150 ppb of drift correction appeared,
+// because the actuator could only render -242 or -485.
+//
+// 2000 ppb is ~8 LSB, enough headroom for the integral to settle onto a dither
+// point and to absorb PTP feedforward error without hitting the rail. Still far
+// below anything the ring notices: the output goes through the 100 ppb/s slew
+// limiter, and 2 ppm delivered at that rate takes 20 s -- gentler than the 43 s
+// startup slew that ran with zero underruns.
+//
+// This is the same quantisation the gateware fractional NCO was meant to fix.
+// A slow integral dithering between LSBs at ~1 Hz achieves it in firmware and
+// avoids the 50 MHz strobe jitter that starved the ring when it was done in
+// hardware (0.24 ppm x 48000 = 0.0115 samples/s -- 0.01 samples per second
+// against a 2048-sample ring).
+#define PHASE_MAX_PPB            2000
 
-// Proportional gain: ppb per sample of phase error. 4 ppb/sample reaches the
-// clamp at 500 samples (~10 ms) of error and is proportional below that, so
-// small errors get gentle correction and large ones saturate rather than
-// producing a step.
-#define PHASE_KP_PPB_PER_SAMPLE  4
+// Integral gain, in 1/PHASE_I_SCALE ppb per sample of error per 1 Hz update.
+// At 48 samples of error the integral grows 48*6/1024 = 0.28 ppb per second, so
+// it reaches the 280 ppb needed to null 1 ms in ~1000 s. Hours, as intended.
+// Raised 6 -> 40 after the loop was shown to run against a LIVE ring with no
+// effect on it (level 58..67, underrun 0/s, trips 0). At 6 it needed ~1 hour to
+// acquire, which is academic when the thing being corrected moves in minutes.
+// At 40 the same 48-sample error is nulled in ~10 minutes, still two orders of
+// magnitude slower than the USB feedback loop it must not disturb.
+#define PHASE_KI                 40
+#define PHASE_I_SCALE            1024
 
-// Deadband, in samples. Below this the phase is left alone: PTP's own offset
-// noise is hundreds of ns and chasing it would modulate the audio rate for no
-// benefit. 48 samples = 1 ms.
-#define PHASE_DEADBAND_SAMPLES   48
+// Proportional gain (ppb per sample), as a fraction. Damping only -- kept small
+// so a transient cannot jerk the rate. 48 samples -> ~19 ppb.
+#define PHASE_KP_NUM             2
+#define PHASE_KP_DEN             5
+
+// How long after an anchor to wait before latching the setpoint, so the drift
+// measurement has settled.
+#define PHASE_SETPOINT_SETTLE_MS 15000
 
 // ---- State -----------------------------------------------------------------
 
@@ -114,6 +169,11 @@ static uint32_t underrun_per_s;
 static int32_t  drift_samples;
 static int32_t  phase_ppb;
 static uint8_t  warm_started;
+static int32_t  phase_setpoint;      // drift value the PLL holds
+static uint8_t  setpoint_valid;
+static uint32_t setpoint_arm_ms;
+static uint32_t seen_anchors;
+static int64_t  phase_integ;         // units of 1/PHASE_I_SCALE ppb
 static uint32_t last_nv_ms;
 // Phase term DEFAULTS OFF. See the block comment at PHASE_MAX_PPB.
 static uint8_t  phase_enabled;
@@ -292,31 +352,41 @@ void mcr_dante_poll(void)
     // ---- Phase term ----
     // drift_samples was computed above: emitted media timestamp minus PTP.
     // Positive means we are running AHEAD, so the clock must be slowed.
-    if (!phase_enabled) {
-        phase_ppb = 0;
-    } else {
-        int32_t perr = drift_samples - 74;      // DANTE_TX_TS_OFFSET
-        if (perr > PHASE_DEADBAND_SAMPLES || perr < -PHASE_DEADBAND_SAMPLES) {
-            phase_ppb = -perr * PHASE_KP_PPB_PER_SAMPLE;
-            if (phase_ppb >  PHASE_MAX_PPB) phase_ppb =  PHASE_MAX_PPB;
-            if (phase_ppb < -PHASE_MAX_PPB) phase_ppb = -PHASE_MAX_PPB;
-        } else {
-            phase_ppb = 0;
-        }
+    // ---- PLL ----
+    // Re-latch the setpoint after any anchor: the anchor moves absolute phase,
+    // so the old setpoint no longer describes where we want to sit.
+    if (g_tx_stats.anchors != seen_anchors) {
+        seen_anchors    = g_tx_stats.anchors;
+        setpoint_valid  = 0;
+        setpoint_arm_ms = now + PHASE_SETPOINT_SETTLE_MS;
+        phase_integ     = 0;
+    }
+    if (!setpoint_valid && dante_tx_enabled() && g_ptpv1.locked &&
+        (int32_t)(now - setpoint_arm_ms) >= 0) {
+        phase_setpoint = PHASE_TARGET_SAMPLES;
+        setpoint_valid = 1;
+        printf("[mclk] phase target %ld samples (currently %ld, err %ld)\n",
+               (long)phase_setpoint, (long)drift_samples,
+               (long)(drift_samples - phase_setpoint));
     }
 
-    // BOTH ERROR AXES IN ONE RECORD. drift_samples is phase, applied_ppb is
-    // rate. The 227 ms outage happened because only one of them was ever
-    // reported, and the servo limit cycle because neither was sampled fast
-    // enough to see it move.
-    telem_push(TELEM_T_MCLK,
-               (uint8_t)((enabled ? TELEM_F_DISCIPLINED : 0) |
-                         (phase_enabled ? TELEM_F_PHASE_ON : 0)),
-               lvl_avg,
-               drift_samples,
-               applied_ppb,
-               (int32_t)(((uint32_t)lvl_min << 16) | (uint32_t)lvl_max),
-               (int32_t)underrun_per_s);
+    if (!phase_enabled || !setpoint_valid || !g_ptpv1.locked) {
+        phase_ppb = 0;
+    } else {
+        // err > 0 means we are AHEAD of where we should be, so slow down.
+        int32_t err = drift_samples - phase_setpoint;
+
+        phase_integ += -(int64_t)err * PHASE_KI;
+        int64_t ilim = (int64_t)PHASE_MAX_PPB * PHASE_I_SCALE;
+        if (phase_integ >  ilim) phase_integ =  ilim;
+        if (phase_integ < -ilim) phase_integ = -ilim;
+
+        int32_t p = -(err * PHASE_KP_NUM) / PHASE_KP_DEN;
+        int32_t i = (int32_t)(phase_integ / PHASE_I_SCALE);
+        phase_ppb = p + i;
+        if (phase_ppb >  PHASE_MAX_PPB) phase_ppb =  PHASE_MAX_PPB;
+        if (phase_ppb < -PHASE_MAX_PPB) phase_ppb = -PHASE_MAX_PPB;
+    }
 
     target_ppb = g_ptpv1.rate_ppb + phase_ppb;
     if (target_ppb >  MAX_PPB) target_ppb =  MAX_PPB;

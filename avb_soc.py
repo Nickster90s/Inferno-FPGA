@@ -270,6 +270,28 @@ class MCRNco(LiteXModule):
         # the nominal increment (constant) and the live servo'd increment.
         self.base_increment = default_inc
         self.increment      = self._increment.storage
+        # FRACTIONAL INCREMENT -- sub-LSB rate resolution.
+        #
+        # `_increment` is a 32-bit integer, so one LSB is 1/4123169 = 0.2425 ppm
+        # = 242 ppb. That is the FLOOR on how accurately the media clock rate can
+        # be set: even a perfect servo leaves up to +/-121 ppb, which walks the
+        # timestamp ~0.44 ms/hour with nothing to pull it back (the phase loop is
+        # open). Measured on the bench 2026-08-04: residual +0.26 ppm = 1.07 LSB,
+        # 0.9 ms/hour -- a receiver at 1 ms latency sees the timestamp cross its
+        # whole buffer in about an hour. That is what "the media clock feels like
+        # it is free running" actually was: quantisation, not a servo fault.
+        #
+        # Adding an 8-bit fractional part gives 256x finer resolution (0.95 ppb).
+        # The dither happens at sys_clk (50 MHz), not at the servo update rate,
+        # so the residual phase jitter is one NCO LSB at 20 ns scale -- orders of
+        # magnitude below a sample period and inaudible. Dithering the integer
+        # increment from FIRMWARE at 1 Hz would instead modulate the audio rate
+        # by 0.24 ppm with a 1 s period, which is exactly the kind of wander that
+        # has caused trouble here before.
+        self._increment_frac = CSRStorage(8, reset=0,
+            description="NCO increment fractional part, units of 1/256 LSB. "
+                        "Effective increment = _increment + _increment_frac/256.")
+
         self._sample_count = CSRStatus(32,
             description="Free-running fs sample count (debug).")
         self._phase = CSRStatus(32,
@@ -281,7 +303,13 @@ class MCRNco(LiteXModule):
         next_phase   = Signal(33)
         sample_count = Signal(32)
 
-        self.comb += next_phase.eq(self.phase + self._increment.storage)
+        # Fractional accumulator: carries one extra LSB into the phase every
+        # 256/frac cycles, so the AVERAGE increment is inc + frac/256.
+        frac_acc = Signal(9)
+        self.sync += frac_acc.eq(frac_acc[0:8] + self._increment_frac.storage)
+
+        self.comb += next_phase.eq(self.phase + self._increment.storage
+                                   + frac_acc[8])
         self.sync += [
             self.phase.eq(next_phase[:32]),
             self.sample_strobe.eq(next_phase[32]),
