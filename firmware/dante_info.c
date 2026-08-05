@@ -291,6 +291,15 @@ static void send_heartbeat(void)
     put_u16(p, n, 0x0018);  n += 2;
     put_u16(p, n, 0);       n += 2;
     put_u32(p, n, 48000);   n += 4;                  // sample rate
+    // Zero because we RECEIVE nothing. This record is the per-flow measured
+    // RX latency and a transmit-only device has none.
+    //
+    // TESTED 2026-08-05: reporting a plausible non-zero value here (14 samples,
+    // matching what the AM2 reports) did NOT change Dante Controller's grey
+    // Latency Status for us. So the colour is NOT driven by this record, and
+    // the long-held assumption that it was is wrong. Controller appears to show
+    // latency only for flows IT knows about -- i.e. subscriptions -- and
+    // ignores a latency claim for a flow that does not exist in its model.
     for (uint16_t i = 0; i < nflows; i++) { put_u32(p, n, 0); n += 4; }
 
     put_u16(p, n, (uint16_t)(12 + 8 + 4 * nflows)); n += 2;

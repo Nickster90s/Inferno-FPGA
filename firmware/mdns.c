@@ -293,10 +293,32 @@ static uint32_t build_txt_cmc(uint8_t *p)
     n = txt_put(p, n, "cmcp_vers=1.2.0");
     n = txt_put(p, n, "cmcp_min=1.0.0");
     n = txt_put(p, n, "server_vers=4.1.0");
-    // channels= is PER-DEVICE (AM2 0x6000004d vs A16R 0x6000017f), not the
-    // constant an early capture suggested. Value chosen to look like a
-    // 48-channel transmitter; refine if Dante Controller objects.
-    n = txt_put(p, n, "channels=0x60000130");
+    // channels= : USE THE KNOWN-GOOD CONSTANT. Do not invent one.
+    //
+    // This was 0x60000130, "chosen to look like a 48-channel transmitter" with
+    // the note "refine if Dante Controller objects". It objected -- by never
+    // sending us a single packet. Measured 2026-08-05: across 75 s of capture,
+    // a click on our device in Device View, and a subscription pushed to our RX
+    // channels, Dante Controller sent us NOTHING. No ARC, no CMC, no
+    // subscription command. It displays us and never speaks to us, which is why
+    // Subscription Status is blank, TX bandwidth reads 0 and Latency Status is
+    // grey -- three symptoms, one cause.
+    //
+    // The bit pattern says why the invented value was a bad idea:
+    //
+    //     AM2   0x6000004d   low bits 0100 1101   bits 0,2,3,6
+    //     A16R  0x6000017f   low bits 1 0111 1111 bits 0-6,8
+    //     ours  0x60000130   low bits 1 0011 0000 bits 4,5,8
+    //
+    // Every real device sets 0x4d; ours shared NOT ONE bit with it. Whatever
+    // those bits mean -- and nobody has decoded them -- asserting none of them
+    // is not a plausible device description.
+    //
+    // inferno hardcodes the AM2's exact value with a literal "// ???"
+    // (mdns_server.rs:78) rather than compute one, for the same reason. Follow
+    // that: a constant copied from working hardware beats a guess that parses
+    // into something no device would say.
+    n = txt_put(p, n, "channels=0x6000004d");
     n = txt_put(p, n, "mf=Inferno");
     n = txt_put(p, n, "model=_00000000000000ff");
     return n;

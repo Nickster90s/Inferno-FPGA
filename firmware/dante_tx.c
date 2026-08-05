@@ -827,6 +827,18 @@ int dante_tx_bind_multicast(uint16_t ext_id, const uint16_t *chans, uint8_t n)
     flows[f].in_use = 1;
     for (int i = 0; i < 4; i++) flows[f].dst[i] = dip[i];
     flows[f].dport = DANTE_PORT_MEDIA;
+    // RE-ANNOUNCE. mdns_announce() ran three times at BOOT, when there were no
+    // multicast flows -- bundles are created later, by ARC 0x2201 -- so the
+    // _netaudio-bund PTR set was empty every time we announced and nothing ever
+    // told the network a bundle had appeared.
+    //
+    // The responder has always been able to ANSWER a bundle query
+    // (match_bund_inst, W_BUND_PTR); the gap was purely that nobody knows to
+    // ask about a bundle whose existence was never advertised. Measured on the
+    // bench: a 70 s mDNS capture showed _netaudio-arc/-chan/-cmc from us and no
+    // -bund at all, while the A16R -- which does advertise its bundle -- is the
+    // one device Dante Controller attributes transmit bandwidth to.
+    mdns_announce();
     flows[f].nslots = n; flows[f].fpp = 16; flows[f].mcast = 1;
     flows[f].ext_id = ext_id;
     for (unsigned i = 0; i < 8; i++) flows[f].chans[i] = (i < n) ? chans[i] : 0;
