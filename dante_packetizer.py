@@ -717,6 +717,31 @@ class DantePacketizer(LiteXModule):
                       for i in range(n_ctx)]
         self.comb += any_due.eq(reduce(or_, [due_arr[i] for i in range(n_ctx)]))
 
+        # PENDING-EMIT LATCH.
+        #
+        # due_arr[i] is a ONE-STROBE pulse: it is high only on the sample where
+        # context i completes its fpp group. The builder walks the contexts one
+        # at a time and reaches context i many cycles later, by which point the
+        # phase counter has moved on and the pulse is gone -- so the packet is
+        # never built. Measured: due 800.1/s (exactly 48000/60, the pacing is
+        # correct) against emit 0..467/s.
+        #
+        # The old design did not have this problem because it gated on tick_hi,
+        # which its own comment describes as "stable for the whole block because
+        # tick_hi is latched at send_req". Replacing that with a live comparison
+        # dropped the latch without replacing it.
+        #
+        # Set wins over clear: a fresh due arriving in the same cycle the
+        # builder finishes must not be swallowed.
+        pend      = Array([Signal() for _ in range(n_ctx)])
+        serve_now = Signal()
+        for i in range(n_ctx):
+            self.sync += If(strobe & due_arr[i],
+                            pend[i].eq(1),
+                         ).Elif(serve_now & (stream_idx == i),
+                            pend[i].eq(0),
+                         )
+
         due_cnt  = Array([Signal(32) for _ in range(n_ctx)])
         emit_cnt = Array([Signal(32) for _ in range(n_ctx)])
         for i in range(n_ctx):
@@ -1023,7 +1048,11 @@ class DantePacketizer(LiteXModule):
         # build it. stream_idx changed only last cycle, so flow_off is valid now.
         fsm.act("CHECK",
             # Skip a context that is unconfigured OR not due on this tick.
-            If(flow_off | ~due_arr[stream_idx],
+            If(flow_off | ~pend[stream_idx],
+                # Not due (or unconfigured): nothing to consume. Do NOT assert
+                # serve_now here -- a context that is skipped because its bit is
+                # clear has nothing pending, and one skipped for flow_off must
+                # not have a later due silently dropped.
                 NextState("SKIP"),
             ).Else(
                 NextState("BUILD"),
@@ -1103,6 +1132,7 @@ class DantePacketizer(LiteXModule):
                 If(source.last,
                     NextValue(pkt_count, pkt_count + 1),
                     NextValue(emit_cnt[stream_idx], emit_cnt[stream_idx] + 1),
+                    serve_now.eq(1),        # this context's due is consumed
                     # (no sequence number: Dante's header has none)
                     If(stream_idx != (n_ctx - 1),
                         # More frames in this block: build the next stream's slice
