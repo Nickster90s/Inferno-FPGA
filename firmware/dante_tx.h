@@ -191,3 +191,6 @@ void dante_tx_flow_info(unsigned f, uint8_t *in_use, uint32_t *age_ms,
 
 int32_t dante_tx_get_ts_offset(void);
 void    dante_tx_set_ts_offset(int32_t samples);
+
+int      dante_tx_fpp_supported(uint16_t fpp);
+uint32_t dante_tx_fpp_index(uint16_t fpp);

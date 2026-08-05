@@ -106,8 +106,12 @@ static void flows_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
                    (unsigned long)g_dante.sample_rate, g_dante.bits_per_sample);
             code = 0x0301;
             g_flows_stats.rejected++;
-        } else if (fpp != 8 && fpp != 16) {
-            printf("[flow] rejected: fpp %u, we do 8 or 16\n", fpp);
+        } else if (!dante_tx_fpp_supported(fpp) ||
+                   (fpp == 2 && (nch & 1))) {
+            // fpp must be in FPP_TABLE (every entry divides 48000, which is
+            // what keeps the pacing phase aligned across the subsec wrap), and
+            // fpp=2 with an odd slot count breaks pay_len % 4 == 0.
+            printf("[flow] rejected: fpp %u unsupported (8/16/24/32/48/60/4/2)\n", fpp);
             code = 0x0301;
             g_flows_stats.rejected++;
         } else if (nch == 0 || nch > 8) {

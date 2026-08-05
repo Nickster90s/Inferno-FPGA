@@ -165,8 +165,24 @@ class DantePacketizer(LiteXModule):
         #   16 * 8 * 3 = 384  ->  435 total, which is what real devices emit.
         BYTES_PER_SAMPLE = 3                           # pcm=3 / enc=24 on the wire
         HDR_LEN  = 51
-        PAY_LEN  = samples_per_packet * channels * BYTES_PER_SAMPLE
-        TOTAL    = HDR_LEN + PAY_LEN                   # 435
+        # SUPPORTED fpp, indexed by flow_cfg[6:4]. Index 0 and 1 are 8 and 16,
+        # so the old encoding (bit [4] alone) still means what it did.
+        #
+        # Every entry MUST DIVIDE 48000 or the per-context phase counter drifts
+        # out of alignment when ts_sub wraps -- sims/sim_fpp_pacing.py proves
+        # both directions, including that 36 (a non-divisor) genuinely breaks.
+        #
+        # NOTHING ABOVE 60: at 8 slots the IP total is 37 + fpp*8*3, and
+        # (1500-37)/24 = 60.9. 60 leaves 23 bytes, so no VLAN headroom.
+        #
+        #   8,16   receivers at 1 and 2 ms      24,32  A16R at 4-5 ms
+        #   60     Dante Virtual Soundcard -- measured, it asks for this and
+        #          nothing else, at every latency setting it offers
+        #   4,2    for a 0.25 ms receiver
+        FPP_TABLE = [8, 16, 24, 32, 60, 4, 2, 48]
+        FPP_MAX_TBL = max(FPP_TABLE)
+        PAY_LEN  = FPP_MAX_TBL * channels * BYTES_PER_SAMPLE
+        TOTAL    = HDR_LEN + PAY_LEN                   # 51 + 1440 = 1491 worst case
         rem      = TOTAL % 4
         N_WORDS  = (TOTAL + 3) // 4                    # 59
         LAST_IDX = N_WORDS - 1
@@ -252,7 +268,10 @@ class DantePacketizer(LiteXModule):
         # map is eight consecutive channels.
         self.chmap_lo      = CSRStorage(32, description="Slots 0..3: per byte, [5:0] tx channel (0-based), [7] valid. 0 = silence.")
         self.chmap_hi      = CSRStorage(32, description="Slots 4..7, same encoding.")
-        self.flow_cfg      = CSRStorage(8,  description="[3:0] slot count (0 = flow disabled), [4] fpp: 0 = 8, 1 = 16. Write LAST -> latches the map.")
+        self.flow_cfg      = CSRStorage(8,  description="[3:0] slot count (0 = flow disabled), [6:4] fpp INDEX into FPP_TABLE. Write LAST -> latches the map.")
+        # (ts_sub % fpp) at bind/re-anchor. FIRMWARE does the modulo: fpp is no
+        # longer a power of two, and firmware already computes the anchor.
+        self.flow_phase    = CSRStorage(8,  description="Pacing phase seed for ctx_select. Write before flow_cfg.")
         self.ts_load       = CSRStorage(1,
                              description="Write 1 to adopt ts_load_sec/ts_load_sub at the next sample strobe.")
         # REMOVED (2026-06-23): pres_base CSR. It fed the (now-deleted) pres-ramp
@@ -537,8 +556,8 @@ class DantePacketizer(LiteXModule):
         ts_sub_emit = Signal(32)
         # Which half of a 16-sample period this tick is, latched at send_req.
         # due_mask is derived from it further down, once cfg_arr exists.
-        tick_hi     = Signal()
 
+        any_due   = Signal()      # driven below, once due_arr exists
         underruns = Signal(32)
         self.comb += [self.underrun_count.status.eq(underruns),
                       self.fifo_level.status.eq(level_u)]
@@ -551,6 +570,26 @@ class DantePacketizer(LiteXModule):
             # a nonzero baseline at startup (initial prime) is expected, watch the
             # DELTA after audio is flowing.
             If(strobe & ~primed, underruns.eq(underruns + 1)),
+            # SAMPLE-GRANULAR CONSUMPTION.
+            #
+            # rd used to advance +64 once per 8-sample block traversal, from
+            # inside the FSM. That tied the ring's consumption point to an
+            # 8-sample grid, and f_base = rd - fpp*8 cannot express a 60-sample
+            # window on such a grid -- 60 is not a multiple of 8. Advancing +8
+            # per media strobe decouples consumption from packetisation: the
+            # ring drains at the sample rate, which is what it physically does,
+            # and any fpp can index backwards from it.
+            #
+            # sims/sim_ring_sample_rd.py measured the effect on `level`, the USB
+            # feedback servo's input: peak-to-peak ripple falls from 56 addresses
+            # to 0 (2 with a jittery writer), because the block reader consumed
+            # 8 sample-times in a single instant and this does not. The servo
+            # gets a QUIETER input. Mean level drops 28 addresses (3.5 samples)
+            # as a one-time offset a closed loop absorbs.
+            #
+            # Gated on `primed` as before, so an un-primed ring still holds rd
+            # and refills rather than draining into silence.
+            If(strobe & primed, rd.eq(rd + channels)),
             # PACING off the timestamp counter, not a free-running blk_idx.
             # 48000 % 16 == 0, so firing when the low log2(fpp) bits wrap makes
             # every emitted timestamp an exact multiple of fpp -- the property
@@ -563,7 +602,7 @@ class DantePacketizer(LiteXModule):
             # negative -- which is what makes the subtraction below safe without a
             # borrow into seconds.
             If(strobe,
-                If(ts_sub[0:3] == 7,
+                If(any_due,
                     send_req.eq(1),
                     # Latch the timestamp for THIS packet: the counter is about
                     # to land on the first sample of the NEXT packet, so the
@@ -577,7 +616,6 @@ class DantePacketizer(LiteXModule):
                     # fpp=16 flow transmitted at 6000 pps instead of 3000, in
                     # overlapping 16-sample windows. The commit that introduced
                     # per-flow fpp described this gating but did not contain it.
-                    tick_hi.eq(ts_sub[3]),
                     ts_sec_emit.eq(ts_sec),
                     ts_sub_emit.eq(ts_sub + self.ts_offset.storage),
                 ),
@@ -620,6 +658,26 @@ class DantePacketizer(LiteXModule):
             ]),
         ]
 
+        # PER-CONTEXT PACING PHASE. Replaces "fire when the low log2(fpp) bits
+        # wrap, then gate fpp=16 to alternate ticks", which only worked because
+        # fpp was a power of two. Each context counts its own samples 0..fpp-1
+        # and is due on the last count.
+        fpp_arr   = Array([Signal(8) for _ in range(n_ctx)])
+        phase_arr = Array([Signal(max=FPP_MAX_TBL + 1) for _ in range(n_ctx)])
+        for i in range(n_ctx):
+            self.comb += fpp_arr[i].eq(Array(FPP_TABLE)[cfg_arr[i][4:7]])
+            self.sync += [
+                If(self.flow_cfg.re & (ctx_sel == i),
+                    phase_arr[i].eq(self.flow_phase.storage),
+                ).Elif(strobe,
+                    If(phase_arr[i] == (fpp_arr[i] - 1),
+                        phase_arr[i].eq(0),
+                    ).Else(
+                        phase_arr[i].eq(phase_arr[i] + 1),
+                    ),
+                ),
+            ]
+
         stream_idx = Signal(max=n_ctx) if n_ctx > 1 else Signal()
 
         # ---- Per-flow packet geometry, derived combinationally ----------------
@@ -636,24 +694,40 @@ class DantePacketizer(LiteXModule):
         # An Array, not a Signal: Migen cannot index a Signal with a Signal, and
         # stream_idx is one.
         due_arr = Array([Signal() for _ in range(n_ctx)])
-        self.comb += [due_arr[i].eq((cfg_arr[i][0:4] != 0) & (~cfg_arr[i][4] | tick_hi))
+        self.comb += [due_arr[i].eq((cfg_arr[i][0:4] != 0) &
+                                    (phase_arr[i] == (fpp_arr[i] - 1)))
                       for i in range(n_ctx)]
+        self.comb += any_due.eq(reduce(or_, [due_arr[i] for i in range(n_ctx)]))
         cfg_now   = cfg_arr[stream_idx]
         nslots    = Signal(4)
-        fpp16     = Signal()
-        self.comb += [nslots.eq(cfg_now[0:4]), fpp16.eq(cfg_now[4])]
+        fppidx    = Signal(3)
+        self.comb += [nslots.eq(cfg_now[0:4]), fppidx.eq(cfg_now[4:7])]
         cur_fpp   = Signal(8)
-        self.comb += cur_fpp.eq(Mux(fpp16, 16, 8))
+        self.comb += cur_fpp.eq(Array(FPP_TABLE)[fppidx])
         # This flow's window START. ts_sub_emit holds the counter at the tick.
         f_ts_sub  = Signal(32)
         self.comb += f_ts_sub.eq(ts_sub_emit - (cur_fpp - 1))
         ns3       = Signal(6)
         self.comb += ns3.eq(nslots + (nslots << 1))            # nslots * 3
-        pay_len   = Signal(10)
-        self.comb += pay_len.eq(Mux(fpp16, ns3 << 4, ns3 << 3))
+        # nslots*3*fpp as SHIFTS AND ADDS -- 24 = 16+8, 60 = 64-4 -- so no
+        # multiplier. 11 bits: 8 slots at fpp=60 is 1440 and a 10-bit signal
+        # truncates that silently.
+        pay_len   = Signal(11)
+        self.comb += Case(fppidx, {
+            0: pay_len.eq(ns3 << 3),                 # 8
+            1: pay_len.eq(ns3 << 4),                 # 16
+            2: pay_len.eq((ns3 << 4) + (ns3 << 3)),  # 24
+            3: pay_len.eq(ns3 << 5),                 # 32
+            4: pay_len.eq((ns3 << 6) - (ns3 << 2)),  # 60
+            5: pay_len.eq(ns3 << 2),                 # 4
+            6: pay_len.eq(ns3 << 1),                 # 2
+            7: pay_len.eq((ns3 << 5) + (ns3 << 4)),  # 48
+        })
         f_total   = Signal(11)
         self.comb += f_total.eq(HDR_LEN + pay_len)
-        f_last_idx = Signal(max=128)
+        # 12 + pay_len/4; worst case 8 slots at fpp=60 -> 12 + 360 = 372, so
+        # the old max=128 (sized for fpp=16) truncated.
+        f_last_idx = Signal(max=512)
         self.comb += f_last_idx.eq(12 + pay_len[2:])           # (52 + pay_len)/4 - 1
         f_ip_len  = Signal(16)
         f_udp_len = Signal(16)
@@ -837,7 +911,10 @@ class DantePacketizer(LiteXModule):
         # 8-sample tick at a time, so an fpp=16 flow simply starts 8 samples
         # earlier. That keeps ONE read pointer for flows of different fpp.
         f_base = Signal(32)
-        self.comb += f_base.eq(rd - Mux(fpp16, 64, 0))
+        # rd is now the SAMPLE-GRANULAR consumption point, so a flow simply
+        # reads the cur_fpp samples ending at it. channels == 8, so the offset
+        # is cur_fpp << 3 -- still no multiplier.
+        self.comb += f_base.eq(rd - (cur_fpp << 3))
         self.comb += rdf.eq(f_base + (cs_samp << 3) + cs_ch[0:3])
         for _s in range(streams):
             self.comb += rps[_s].adr.eq(rdf[0:log2depth])
@@ -908,7 +985,7 @@ class DantePacketizer(LiteXModule):
                 NextValue(cs_slot, 0), NextValue(cs_samp, 0),
                 NextState("CHECK"),
             ).Else(
-                If(pkt_primed, NextValue(rd, rd + 64)),
+                # rd now advances per media strobe -- see the sync block above.
                 NextState("IDLE"),
             ),
         )
@@ -1009,7 +1086,7 @@ class DantePacketizer(LiteXModule):
                         # slots = 64 entries, because pacing is now at the finest
                         # fpp. An fpp=16 flow reads from rd-64 and so still sees a
                         # full, correctly aligned 16-sample window.
-                        If(pkt_primed, NextValue(rd, rd + 64)),
+                        # rd now advances per media strobe -- see the sync block above.
                         NextState("IDLE"),
                     ),
                 ).Else(

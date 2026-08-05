@@ -101,6 +101,29 @@ static uint16_t ip_header_checksum(const uint8_t src[4], const uint8_t dst[4],
 // Flow binding
 // ---------------------------------------------------------------------------
 
+// Mirrors FPP_TABLE in dante_packetizer.py. Keep the two in step: a mismatch
+// makes the gateware pace at a different rate than the header advertises, which
+// is silent on every counter we have.
+static const uint16_t k_fpp_table[8] = { 8, 16, 24, 32, 60, 4, 2, 48 };
+
+int dante_tx_fpp_supported(uint16_t fpp)
+{
+    for (unsigned i = 0; i < 8; i++)
+        if (k_fpp_table[i] == fpp) {
+            // pay_len = nslots*3*fpp must stay a multiple of 4 (f_last_idx is
+            // pay_len/4). Only fpp=2 with an ODD slot count violates that.
+            return 1;
+        }
+    return 0;
+}
+
+uint32_t dante_tx_fpp_index(uint16_t fpp)
+{
+    for (unsigned i = 0; i < 8; i++)
+        if (k_fpp_table[i] == fpp) return i;
+    return 0;                                   /* unreachable: gated above */
+}
+
 static void bind_flow(unsigned f)
 {
     const uint16_t ip_total = 20 + 8 + 9 + (FPP * 8 * BYTES_PER_SAMP);   // 421
@@ -248,6 +271,10 @@ static void ts_anchor(void)
            (unsigned long)t.seconds, (unsigned long)t.nanoseconds,
            (unsigned long)sec, (unsigned long)sub, (int)ts_offset_samples);
 }
+
+// Defined below, once flows[] is in scope. Returns the smallest and largest
+// fpp among bound flows, or 16/16 if none are bound.
+static void dante_tx_fpp_range(uint16_t *lo, uint16_t *hi);
 
 void dante_tx_poll(void)
 {
@@ -415,13 +442,29 @@ void dante_tx_poll(void)
         int64_t ptp_smp = (int64_t)t.seconds * 48000
                         + (int64_t)((t.nanoseconds * 3u) / 62500u);
         int64_t emit    = (int64_t)esec * 48000 + (int64_t)esub;
-        int64_t err = emit - ptp_smp - DANTE_TX_TS_OFFSET;
+        // THE EMITTED VALUE IS fpp-DEPENDENT. `emit` is the counter minus
+        // (fpp-1), because a packet is labelled with the START of the window it
+        // covers. Comparing it against a constant only worked while fpp was
+        // always 16: at fpp=60 the same healthy clock reads 44 samples further
+        // back, which tripped this guard continuously (anchors climbing, one
+        // re-anchor every couple of seconds) the moment DVS subscribed.
+        //
+        // Add the bias back so the comparison is against the media-clock
+        // COUNTER, which is what DANTE_TX_TS_OFFSET was calibrated against.
+        // Flows may differ in fpp and firmware cannot tell which one emitted
+        // last, so use the spread: correct by the smallest bound fpp and widen
+        // the band by the range. With every flow on the same fpp -- the normal
+        // case -- the band is unchanged.
+        uint16_t fmin, fmax;
+        dante_tx_fpp_range(&fmin, &fmax);
+        int64_t err = emit - ptp_smp - DANTE_TX_TS_OFFSET + (int64_t)(fmin - 1);
+        int32_t band = DANTE_TX_REANCHOR_SAMPLES + (int32_t)(fmax - fmin);
         // CONFIRM BEFORE STEPPING. A re-anchor is audible, so one bad reading
         // must never cause one. Require the error to persist across two polls;
         // real phase error is monotonic and easily survives that, while a
         // measurement artefact does not.
         static uint8_t bad_streak;
-        if (err > DANTE_TX_REANCHOR_SAMPLES || err < -DANTE_TX_REANCHOR_SAMPLES)
+        if (err > band || err < -band)
             bad_streak++;
         else
             bad_streak = 0;
@@ -571,9 +614,47 @@ static void write_ctx(unsigned f, const uint8_t dst_ip[4], const uint8_t dmac[6]
                              ((uint32_t)dmac[4] << 8)  |  dmac[5]);
     aaf_pkt_udp_dport_write(dport);
 
-    // flow_cfg LAST: it latches the channel map with it, so the builder never
-    // sees a half-written map.
-    aaf_pkt_flow_cfg_write((uint32_t)(nslots & 0x0F) | ((fpp == 16) ? 0x10u : 0u));
+    // fpp is now an INDEX into the packetizer's FPP_TABLE, not a 0/1 bit.
+    // Index 0 and 1 are still 8 and 16, so the encoding is unchanged for the
+    // two values we used to support.
+    uint32_t fpp_idx = dante_tx_fpp_index(fpp);
+
+    // PACING PHASE. The packetizer counts each context's samples 0..fpp-1 and
+    // emits on the last, so the counter must start at (ts_sub % fpp) or the
+    // emitted timestamps stop being multiples of fpp. Firmware does the modulo
+    // because fpp is no longer a power of two and a divider in fabric is not
+    // worth it -- see sims/sim_fpp_pacing.py.
+    //
+    // Read the counter the packetizer is actually using, not the value we last
+    // anchored: the two differ by however long ago the anchor was.
+    {
+        uint32_t esec, esub;
+        dante_tx_read_emitted(&esec, &esub);
+        (void)esec;
+        // esub is the last EMITTED index, which is (counter - (fpp-1)) for
+        // whichever flow emitted last. Its residue mod fpp is what matters and
+        // a fresh context has not emitted yet, so seed from the live counter:
+        // the emitted value is a multiple of that flow's fpp, so for equal fpp
+        // the residue is 0 and for a different fpp it is still the correct
+        // phase of the shared sample counter.
+        aaf_pkt_flow_phase_write((uint32_t)((esub + (fpp - 1)) % fpp));
+    }
+
+    // flow_cfg LAST: it latches the channel map AND the phase seed with it, so
+    // the builder never sees a half-written context.
+    aaf_pkt_flow_cfg_write((uint32_t)(nslots & 0x0F) | ((fpp_idx & 0x7u) << 4));
+}
+
+static void dante_tx_fpp_range(uint16_t *lo, uint16_t *hi)
+{
+    uint16_t fmin = 0, fmax = 0;
+    for (unsigned i = 0; i < N_FLOWS; i++) {
+        if (!flows[i].in_use || !flows[i].fpp) continue;
+        if (!fmin || flows[i].fpp < fmin) fmin = flows[i].fpp;
+        if (flows[i].fpp > fmax) fmax = flows[i].fpp;
+    }
+    if (!fmin) { fmin = 16; fmax = 16; }
+    *lo = fmin; *hi = fmax;
 }
 
 // 4-byte IP compare. Not memcmp(): this picolibc build does not link one, which
