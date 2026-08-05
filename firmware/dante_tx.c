@@ -619,30 +619,38 @@ static void write_ctx(unsigned f, const uint8_t dst_ip[4], const uint8_t dmac[6]
     // two values we used to support.
     uint32_t fpp_idx = dante_tx_fpp_index(fpp);
 
-    // PACING PHASE. The packetizer counts each context's samples 0..fpp-1 and
-    // emits on the last, so the counter must start at (ts_sub % fpp) or the
-    // emitted timestamps stop being multiples of fpp. Firmware does the modulo
-    // because fpp is no longer a power of two and a divider in fabric is not
-    // worth it -- see sims/sim_fpp_pacing.py.
+    // PACING PHASE, seeded from the LIVE sample counter.
     //
-    // Read the counter the packetizer is actually using, not the value we last
-    // anchored: the two differ by however long ago the anchor was.
+    // The packetizer counts each context's samples 0..fpp-1 and emits on the
+    // last, so the counter must start at (ts_sub % fpp) or emitted timestamps
+    // stop being multiples of fpp. Firmware does the modulo because fpp is no
+    // longer a power of two.
+    //
+    // THE FIRST ATTEMPT SEEDED FROM dante_tx_read_emitted(), which returns the
+    // last EMITTED timestamp -- already (counter - (fpp-1)) for whichever flow
+    // emitted, and stale by however long ago that was. Every context therefore
+    // started at an arbitrary phase, and the measured packet rate came out at
+    // about a fifth of nominal. ts_now_sub exists so there is a correct value
+    // to read.
+    //
+    // SEQLOCK ACROSS THE LATCH. The phase must equal ts_sub at the instant
+    // flow_cfg is written, because that write is what loads the counter. A
+    // sample is 20.8 us and this sequence is a few us, so it usually holds --
+    // but "usually" leaves a 1-sample misalignment that would be invisible
+    // until someone decoded the stream. Re-read after the write and retry if
+    // the counter moved; re-writing flow_cfg just re-latches, which is
+    // harmless.
     {
-        uint32_t esec, esub;
-        dante_tx_read_emitted(&esec, &esub);
-        (void)esec;
-        // esub is the last EMITTED index, which is (counter - (fpp-1)) for
-        // whichever flow emitted last. Its residue mod fpp is what matters and
-        // a fresh context has not emitted yet, so seed from the live counter:
-        // the emitted value is a multiple of that flow's fpp, so for equal fpp
-        // the residue is 0 and for a different fpp it is still the correct
-        // phase of the shared sample counter.
-        aaf_pkt_flow_phase_write((uint32_t)((esub + (fpp - 1)) % fpp));
+        uint32_t cfg = (uint32_t)(nslots & 0x0F) | ((fpp_idx & 0x7u) << 4);
+        for (unsigned tries = 0; tries < 8; tries++) {
+            uint32_t s0 = aaf_pkt_ts_now_sub_read();
+            aaf_pkt_flow_phase_write(s0 % (uint32_t)fpp);
+            // flow_cfg LAST: it latches the channel map and the phase with it,
+            // so the builder never sees a half-written context.
+            aaf_pkt_flow_cfg_write(cfg);
+            if (aaf_pkt_ts_now_sub_read() == s0) break;
+        }
     }
-
-    // flow_cfg LAST: it latches the channel map AND the phase seed with it, so
-    // the builder never sees a half-written context.
-    aaf_pkt_flow_cfg_write((uint32_t)(nslots & 0x0F) | ((fpp_idx & 0x7u) << 4));
 }
 
 static void dante_tx_fpp_range(uint16_t *lo, uint16_t *hi)

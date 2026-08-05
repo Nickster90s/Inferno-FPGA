@@ -271,6 +271,21 @@ class DantePacketizer(LiteXModule):
         self.flow_cfg      = CSRStorage(8,  description="[3:0] slot count (0 = flow disabled), [6:4] fpp INDEX into FPP_TABLE. Write LAST -> latches the map.")
         # (ts_sub % fpp) at bind/re-anchor. FIRMWARE does the modulo: fpp is no
         # longer a power of two, and firmware already computes the anchor.
+        # Live media-clock subsecond counter, so firmware can compute
+        # (ts_sub % fpp) for the phase seed. There was no way to read this: the
+        # only visible timestamp was the last EMITTED one, which is already
+        # (counter - (fpp-1)) and stale, and seeding from it put every context
+        # at an arbitrary phase.
+        # PACING DIAGNOSTICS, indirect through ctx_select.
+        #
+        # Two counters, because "packets per second is a fifth of nominal" does
+        # not say WHERE the packets are lost, and inferring it from an aggregate
+        # failed three times. due_cnt is what the pacing decided; emit_cnt is
+        # what reached the wire. due low  -> the phase counters are wrong;
+        # due right and emit low -> the builder is dropping them.
+        self.flow_due_cnt  = CSRStatus(32, description="Times ctx_select was DUE to emit.")
+        self.flow_emit_cnt = CSRStatus(32, description="Packets ctx_select actually transmitted.")
+        self.ts_now_sub    = CSRStatus(32, description="Live media-clock subsecond sample counter (0..47999).")
         self.flow_phase    = CSRStorage(8,  description="Pacing phase seed for ctx_select. Write before flow_cfg.")
         self.ts_load       = CSRStorage(1,
                              description="Write 1 to adopt ts_load_sec/ts_load_sub at the next sample strobe.")
@@ -558,7 +573,9 @@ class DantePacketizer(LiteXModule):
         # due_mask is derived from it further down, once cfg_arr exists.
 
         any_due   = Signal()      # driven below, once due_arr exists
+        rd_snap   = Signal(32)    # rd sampled at send_req; see f_base
         underruns = Signal(32)
+        self.comb += self.ts_now_sub.status.eq(ts_sub)
         self.comb += [self.underrun_count.status.eq(underruns),
                       self.fifo_level.status.eq(level_u)]
         self.sync += [
@@ -616,6 +633,7 @@ class DantePacketizer(LiteXModule):
                     # fpp=16 flow transmitted at 6000 pps instead of 3000, in
                     # overlapping 16-sample windows. The commit that introduced
                     # per-flow fpp described this gating but did not contain it.
+                    rd_snap.eq(rd),
                     ts_sec_emit.eq(ts_sec),
                     ts_sub_emit.eq(ts_sub + self.ts_offset.storage),
                 ),
@@ -698,6 +716,15 @@ class DantePacketizer(LiteXModule):
                                     (phase_arr[i] == (fpp_arr[i] - 1)))
                       for i in range(n_ctx)]
         self.comb += any_due.eq(reduce(or_, [due_arr[i] for i in range(n_ctx)]))
+
+        due_cnt  = Array([Signal(32) for _ in range(n_ctx)])
+        emit_cnt = Array([Signal(32) for _ in range(n_ctx)])
+        for i in range(n_ctx):
+            self.sync += If(strobe & due_arr[i], due_cnt[i].eq(due_cnt[i] + 1))
+        self.comb += [
+            self.flow_due_cnt.status.eq(due_cnt[ctx_sel]),
+            self.flow_emit_cnt.status.eq(emit_cnt[ctx_sel]),
+        ]
         cfg_now   = cfg_arr[stream_idx]
         nslots    = Signal(4)
         fppidx    = Signal(3)
@@ -911,10 +938,13 @@ class DantePacketizer(LiteXModule):
         # 8-sample tick at a time, so an fpp=16 flow simply starts 8 samples
         # earlier. That keeps ONE read pointer for flows of different fpp.
         f_base = Signal(32)
-        # rd is now the SAMPLE-GRANULAR consumption point, so a flow simply
-        # reads the cur_fpp samples ending at it. channels == 8, so the offset
-        # is cur_fpp << 3 -- still no multiplier.
-        self.comb += f_base.eq(rd - (cur_fpp << 3))
+        # LATCHED rd. rd now advances every media strobe, and a strobe (1042
+        # sys cycles) lands in the middle of a packet build (~190 cycles, and
+        # six builds exceed one strobe). A combinational f_base would therefore
+        # move the read window underneath the builder mid-packet. The old code
+        # advanced rd only at the end of a block traversal, so it was stable by
+        # accident; with per-strobe advance the snapshot has to be explicit.
+        self.comb += f_base.eq(rd_snap - (cur_fpp << 3))
         self.comb += rdf.eq(f_base + (cs_samp << 3) + cs_ch[0:3])
         for _s in range(streams):
             self.comb += rps[_s].adr.eq(rdf[0:log2depth])
@@ -1072,6 +1102,7 @@ class DantePacketizer(LiteXModule):
             If(source.ready,
                 If(source.last,
                     NextValue(pkt_count, pkt_count + 1),
+                    NextValue(emit_cnt[stream_idx], emit_cnt[stream_idx] + 1),
                     # (no sequence number: Dante's header has none)
                     If(stream_idx != (n_ctx - 1),
                         # More frames in this block: build the next stream's slice

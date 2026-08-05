@@ -164,6 +164,25 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     // slot count, fpp and the slot->channel map. Exists because diagnosing "all
     // green in Dante Controller but no audio" repeatedly came down to guessing
     // at this from packet rates when the console had it written down.
+    // 'p' -- pacing diagnostics: per-context DUE vs EMIT counts.
+    //
+    // "packets per second is a fraction of nominal" does not localise the
+    // fault, and three attempts at inferring it from the aggregate were wrong.
+    // due tells us what the pacing decided, emit what reached the wire.
+    if (len >= 1 && req[0] == 'p') {
+        uint8_t *p3 = net_udp_payload_buf();
+        uint32_t n3 = 0;
+        put32(p3, n3, 0x50414331u); n3 += 4;                 // 'PAC1'
+        put32(p3, n3, DANTE_TX_CHANNELS / 8); n3 += 4;       // contexts
+        for (unsigned f = 0; f < DANTE_TX_CHANNELS / 8; f++) {
+            aaf_pkt_ctx_select_write(f);
+            put32(p3, n3, aaf_pkt_flow_due_cnt_read());  n3 += 4;
+            put32(p3, n3, aaf_pkt_flow_emit_cnt_read()); n3 += 4;
+        }
+        net_udp_commit(src_ip, src_port, STATS_PORT, n3, NET_TOS_BEST_EFFORT);
+        return;
+    }
+
     if (len >= 1 && req[0] == 'f') {
         uint8_t *p = net_udp_payload_buf();
         uint32_t n = 0;
