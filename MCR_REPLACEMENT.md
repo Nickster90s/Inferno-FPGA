@@ -308,3 +308,37 @@ A media clock has two error axes and this project had instruments for one.
 Every counter on the box read healthy through a total audio outage, because
 none of them measured phase. When adding a servo, ask what the OTHER axis is
 doing -- and if nothing reports it, that is the bug waiting to happen.
+
+---
+
+# RETRACTION: the "fpp=16 timestamp is 167 us late" claim was WRONG (2026-08-05)
+
+Commit 643a6a6 recorded, as a real unfixed bug, that fpp=16 flows are stamped
+8 samples (167 us) late relative to their own audio, and that a device on
+fpp=16 therefore renders 167 us apart from one on fpp=8.
+
+**That is not true.** The reasoning read `ts_sub_emit` being latched once per
+block and shared by every flow, saw the read base `rd - Mux(fpp16, 64, 0)`
+(64 ring entries = 8 sample-times), and concluded the two were inconsistent. It
+missed the line that reconciles them:
+
+    f_ts_sub.eq(ts_sub_emit - (cur_fpp - 1))
+
+The per-flow timestamp already compensates for fpp: 8 subtracts 7, 16 subtracts
+15 -- a difference of exactly the 8 sample-times the read base moves. So
+
+    fpp=8   reads [tick-7, tick],  stamps tick-7    correct
+    fpp=16  reads [tick-15, tick], stamps tick-15   correct
+
+Both label their own first sample. There is no inter-flow misalignment, and
+nothing to fix.
+
+Also checked while in there, since this file records a previous unsigned-wrap
+disaster in exactly this arithmetic (`sec=85673 subsec=4294967264`): send_req
+fires at `ts_sub[0:3] == 7`, so ts_sub_emit is congruent to 7 mod 8, and fpp=16
+only fires on tick_hi where ts_sub is congruent to 15 mod 16. Both subtractions
+bottom out at 0. No borrow, no wrap.
+
+LESSON: the claim was made from two fragments of an expression without reading
+the third, and stated confidently enough that the next step was a 20-minute
+gateware build and a seed re-roll to fix a bug that did not exist.
