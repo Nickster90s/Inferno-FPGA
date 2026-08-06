@@ -534,12 +534,23 @@ class DantePacketizer(LiteXModule):
             # it is needed and never accumulates the authority to correct the
             # host's ~1.8% under-delivery.
             #
-            # Un-priming at half-centre keeps the excursion inside err 0..32 --
-            # the servo's linear band -- so the integrator can actually work. It
-            # also emits silence EARLIER on a genuine drain, which is the safer
-            # direction: the original threshold existed to stop the reader
-            # wrapping through stale ring data, and this triggers sooner, not
-            # later.
+            # HALF-CENTRE (block 32). Lowering it to block 16 was tried and is
+            # WORSE, not better: a lower floor means the ring drains further
+            # before rd stops, so the excursions are deeper and longer and MORE
+            # strobes fall below the threshold. sims/sim_usb_servo.py, once its
+            # underrun metric was corrected to count strobes below the ACTUAL
+            # threshold (it had been hardcoded to block < 8):
+            #
+            #     un-prime block 32   1157 underrun frames
+            #     un-prime block 16   2849 underrun frames
+            #
+            # 1157/80000 frames is 1.4%, which at 48 kHz is ~700/s against 1051/s
+            # measured on the bench -- so the model is predictive once it counts
+            # the right thing.
+            #
+            # The residual ~2% silence is the ring LIMIT CYCLE, not this
+            # threshold. Moving the threshold only changes where the cycle
+            # bottoms out. Stopping the cycle is the open problem.
             ).Elif(level < (_center >> 1), primed.eq(0)),
         ]
         strobe = Signal()

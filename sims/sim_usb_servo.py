@@ -104,11 +104,15 @@ def run(unprime_block, host_bias=0.0, seconds=20.0, start_level=128.0):
     return hist
 
 
-def report(name, hist, tail_frac=0.5):
+def report(name, hist, unprime, tail_frac=0.5):
     tail = hist[int(len(hist) * tail_frac):]
     lo, hi = min(tail), max(tail)
     avg = sum(tail) / len(tail)
-    under = sum(1 for v in tail if block_of(v) < 8)
+    # COUNT SILENCE THE WAY THE HARDWARE DOES: the underrun counter increments
+    # on every strobe while UN-PRIMED, which is block < the un-prime threshold,
+    # NOT block < 8. Scoring it at 8 reported zero underruns for a threshold of
+    # 32 that produces ~1000/s on the bench, and that error shipped.
+    under = sum(1 for v in tail if block_of(v) < unprime)
     return lo, hi, avg, under, (
         f"  {name:<28} level {lo:6.1f}..{hi:6.1f} avg {avg:6.1f} samples"
         f"  (block {block_of(lo):3d}..{block_of(hi):3d} avg {block_of(avg):3d})")
@@ -126,8 +130,8 @@ if __name__ == "__main__":
         fails += 1
 
     print("\nHOST DELIVERS EXACTLY WHAT IS ASKED (host_bias = 0):")
-    for name, ub in (("un-prime block 8 (old)", 8), ("un-prime block 32 (new)", 32)):
-        lo, hi, avg, under, line = report(name, run(ub))
+    for name, ub in (("un-prime block 32 (too high)", 32), ("un-prime block 16 (new)", 16)):
+        lo, hi, avg, under, line = report(name, run(ub), ub)
         print(line)
 
     # The bench shows the host under-delivering ~1.8%. That is the condition the
@@ -135,15 +139,15 @@ if __name__ == "__main__":
     # band matters.
     print("\nHOST UNDER-DELIVERS 1.8% (the measured bench condition):")
     res = {}
-    for name, ub in (("un-prime block 8 (old)", 8), ("un-prime block 32 (new)", 32)):
+    for name, ub in (("un-prime block 32 (too high)", 32), ("un-prime block 16 (new)", 16)):
         h = run(ub, host_bias=-0.018)
-        lo, hi, avg, under, line = report(name, h)
+        lo, hi, avg, under, line = report(name, h, ub)
         res[ub] = (lo, hi, avg, under)
         print(line + f"   underrun frames {under}")
 
     print()
-    old_lo, old_hi, old_avg, old_un = res[8]
-    new_lo, new_hi, new_avg, new_un = res[32]
+    old_lo, old_hi, old_avg, old_un = res[32]
+    new_lo, new_hi, new_avg, new_un = res[16]
     swing_old, swing_new = old_hi - old_lo, new_hi - new_lo
     c1 = swing_new < swing_old
     print(f"  {'PASS' if c1 else 'FAIL'}  narrower swing: {swing_new:.1f} < "

@@ -101,6 +101,25 @@ static uint16_t ip_header_checksum(const uint8_t src[4], const uint8_t dst[4],
 // Flow binding
 // ---------------------------------------------------------------------------
 
+// PIPELINE ADJUSTMENT for the pacing phase seed.
+//
+// MEASURED, not derived. With the seed written as (ts_sub % fpp) the emitted
+// subsecond came out congruent to 2 mod fpp on every packet -- 2000 out of 2000
+// in a capture, dead constant:
+//
+//     subsec mod 16 histogram: {2: 2000}
+//     first subsec: 43714, 43730, 43746   (spacing 16, all == 2 mod 16)
+//
+// so the tick fires at ts_sub == 1 mod fpp instead of fpp-1. The value firmware
+// reads back over the CSR is two media samples behind what the datapath uses
+// when it evaluates the due comparison. Seeding two higher makes the counter
+// reach fpp-1 two samples earlier, which lands the tick where it belongs.
+//
+// If the packetizer's due/latch pipeline is ever restructured this constant has
+// to be re-measured -- decode a capture with tools/dante_decode.py and read the
+// "ts multiple of fpp" line, which is exactly what found it.
+#define PHASE_PIPELINE_ADJ  2u
+
 // Mirrors FPP_TABLE in dante_packetizer.py. Keep the two in step: a mismatch
 // makes the gateware pace at a different rate than the header advertises, which
 // is silent on every counter we have.
@@ -234,6 +253,9 @@ void dante_tx_init(void)
 //
 // sub = ns * 48000 / 1e9 = ns * 3 / 62500, exact and small enough for 32 bits
 // (ns < 1e9, so ns*3 < 3e9 -- unsigned, and it must stay unsigned).
+// Defined below, once flows[] is in scope.
+static void dante_tx_reseed_phases(uint32_t sub);
+
 static void ts_anchor(void)
 {
     ptp_timestamp_t t = gptp_read_time();
@@ -265,6 +287,24 @@ static void ts_anchor(void)
     aaf_pkt_ts_load_sec_write(sec);
     aaf_pkt_ts_load_sub_write((uint32_t)sub);
     aaf_pkt_ts_load_write(1);
+
+    // RESEED EVERY CONTEXT'S PACING PHASE.
+    //
+    // The per-context phase counter must track ts_sub % fpp, or the emitted
+    // timestamp -- ts_sub - (fpp-1), taken on the strobe where the counter
+    // reaches fpp-1 -- stops being a multiple of fpp. Seeding it once at bind
+    // is not enough: THIS FUNCTION JUST MOVED ts_sub, and nothing reloaded the
+    // counters, so every bound context is left offset by however far the anchor
+    // jumped. Permanently, since the counter free-runs from there.
+    //
+    // Measured on the wire after the borrow fix removed the 2^32 wrap:
+    //   step histogram: 16x1999   (spacing correct, no gaps)
+    //   ts multiple of fpp: NO    (alignment still wrong)
+    // which is exactly "phase is a fixed offset from where it should be".
+    //
+    // The load is adopted at the next media strobe, so the value to seed from
+    // is the sub we just wrote, not the live counter.
+    dante_tx_reseed_phases((uint32_t)sub);
     g_tx_stats.anchors++;
     telem_event(TELEM_E_ANCHOR, (int32_t)sec, (int32_t)sub);
     printf("[dtx] media clock anchored to PTP %lu.%09lu -> %lu.%lu (offset %d)\n",
@@ -274,6 +314,8 @@ static void ts_anchor(void)
 
 // Defined below, once flows[] is in scope. Returns the smallest and largest
 // fpp among bound flows, or 16/16 if none are bound.
+static void dante_tx_reseed_phases(uint32_t sub);
+
 static void dante_tx_fpp_range(uint16_t *lo, uint16_t *hi);
 
 void dante_tx_poll(void)
@@ -644,12 +686,24 @@ static void write_ctx(unsigned f, const uint8_t dst_ip[4], const uint8_t dmac[6]
         uint32_t cfg = (uint32_t)(nslots & 0x0F) | ((fpp_idx & 0x7u) << 4);
         for (unsigned tries = 0; tries < 8; tries++) {
             uint32_t s0 = aaf_pkt_ts_now_sub_read();
-            aaf_pkt_flow_phase_write(s0 % (uint32_t)fpp);
+            aaf_pkt_flow_phase_write((s0 + PHASE_PIPELINE_ADJ) % (uint32_t)fpp);
             // flow_cfg LAST: it latches the channel map and the phase with it,
             // so the builder never sees a half-written context.
             aaf_pkt_flow_cfg_write(cfg);
             if (aaf_pkt_ts_now_sub_read() == s0) break;
         }
+    }
+}
+
+static void dante_tx_reseed_phases(uint32_t sub)
+{
+    for (unsigned f = 0; f < N_FLOWS; f++) {
+        if (!flows[f].in_use || !flows[f].fpp) continue;
+        aaf_pkt_ctx_select_write(f);
+        aaf_pkt_flow_phase_write((sub + PHASE_PIPELINE_ADJ) % (uint32_t)flows[f].fpp);
+        // flow_cfg.re is what latches the phase; re-write the same config.
+        aaf_pkt_flow_cfg_write((uint32_t)(flows[f].nslots & 0x0F) |
+                               ((dante_tx_fpp_index(flows[f].fpp) & 0x7u) << 4));
     }
 }
 
