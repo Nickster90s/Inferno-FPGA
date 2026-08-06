@@ -175,11 +175,6 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         put32(p3, n3, 0x50414331u); n3 += 4;                 // 'PAC1'
         put32(p3, n3, DANTE_TX_CHANNELS / 8); n3 += 4;       // contexts
         put32(p3, n3, aaf_pkt_ts_now_sub_read()); n3 += 4;   // live sample counter
-        for (unsigned f = 0; f < DANTE_TX_CHANNELS / 8; f++) {
-            aaf_pkt_ctx_select_write(f);
-            put32(p3, n3, aaf_pkt_flow_due_cnt_read());  n3 += 4;
-            put32(p3, n3, aaf_pkt_flow_emit_cnt_read()); n3 += 4;
-        }
         net_udp_commit(src_ip, src_port, STATS_PORT, n3, NET_TOS_BEST_EFFORT);
         return;
     }

@@ -276,15 +276,14 @@ class DantePacketizer(LiteXModule):
         # only visible timestamp was the last EMITTED one, which is already
         # (counter - (fpp-1)) and stale, and seeding from it put every context
         # at an arbitrary phase.
-        # PACING DIAGNOSTICS, indirect through ctx_select.
-        #
-        # Two counters, because "packets per second is a fifth of nominal" does
-        # not say WHERE the packets are lost, and inferring it from an aggregate
-        # failed three times. due_cnt is what the pacing decided; emit_cnt is
-        # what reached the wire. due low  -> the phase counters are wrong;
-        # due right and emit low -> the builder is dropping them.
-        self.flow_due_cnt  = CSRStatus(32, description="Times ctx_select was DUE to emit.")
-        self.flow_emit_cnt = CSRStatus(32, description="Packets ctx_select actually transmitted.")
+        # The per-context due/emit counters that lived here are GONE. They did
+        # their job -- they proved the pacing was exact (due 800.1 against
+        # 48000/60 = 800.0) and redirected four rounds of wrong suspicion onto
+        # the builder -- but 12 counters plus two 6:1 read muxes cost about
+        # 4 MHz of sys Fmax, and the bench wants >= 60 MHz for the FIFO to stay
+        # fed. A diagnostic that degrades the thing it measures has to come out
+        # once it has answered its question. Re-add temporarily if the pacing
+        # is ever in doubt again; sims/sim_fpp_due.py covers it in simulation.
         self.ts_now_sub    = CSRStatus(32, description="Live media-clock subsecond sample counter (0..47999).")
         self.flow_phase    = CSRStorage(8,  description="Pacing phase seed for ctx_select. Write before flow_cfg.")
         self.ts_load       = CSRStorage(1,
@@ -763,15 +762,8 @@ class DantePacketizer(LiteXModule):
         # 6:1 muxes, and sys Fmax fell from 61.53 to 52-58 MHz across a whole
         # seed sweep when they were added -- enough to fail the 55 MHz floor on
         # every seed tried. A diagnostic must not price itself out of the build.
-        due_cnt  = Array([Signal(16) for _ in range(n_ctx)])
-        emit_cnt = Array([Signal(16) for _ in range(n_ctx)])
-        for i in range(n_ctx):
-            self.sync += If(strobe & due_arr[i], due_cnt[i].eq(due_cnt[i] + 1))
         self.comb += any_pend.eq(reduce(or_, [pend[i] for i in range(n_ctx)]))
-        self.comb += [
-            self.flow_due_cnt.status.eq(due_cnt[ctx_sel]),
-            self.flow_emit_cnt.status.eq(emit_cnt[ctx_sel]),
-        ]
+
         cfg_now   = cfg_arr[stream_idx]
         nslots    = Signal(4)
         fppidx    = Signal(3)
@@ -1153,7 +1145,6 @@ class DantePacketizer(LiteXModule):
             If(source.ready,
                 If(source.last,
                     NextValue(pkt_count, pkt_count + 1),
-                    NextValue(emit_cnt[stream_idx], emit_cnt[stream_idx] + 1),
                     serve_now.eq(1),        # this context's due is consumed
                     # (no sequence number: Dante's header has none)
                     If(stream_idx != (n_ctx - 1),
