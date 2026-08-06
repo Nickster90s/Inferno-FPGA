@@ -757,8 +757,14 @@ class DantePacketizer(LiteXModule):
         # restarting: it keeps walking until every latched due is consumed.
         any_pend = Signal()
 
-        due_cnt  = Array([Signal(32) for _ in range(n_ctx)])
-        emit_cnt = Array([Signal(32) for _ in range(n_ctx)])
+        # 16-BIT, not 32. These are diagnostics read as a DELTA over a few
+        # seconds, so 16 bits (wrapping every 82 s at 800/s, every 21 s at
+        # 3000/s) is ample. At 32 bits they cost 12 x 32 flops plus two 32-bit
+        # 6:1 muxes, and sys Fmax fell from 61.53 to 52-58 MHz across a whole
+        # seed sweep when they were added -- enough to fail the 55 MHz floor on
+        # every seed tried. A diagnostic must not price itself out of the build.
+        due_cnt  = Array([Signal(16) for _ in range(n_ctx)])
+        emit_cnt = Array([Signal(16) for _ in range(n_ctx)])
         for i in range(n_ctx):
             self.sync += If(strobe & due_arr[i], due_cnt[i].eq(due_cnt[i] + 1))
         self.comb += any_pend.eq(reduce(or_, [pend[i] for i in range(n_ctx)]))
