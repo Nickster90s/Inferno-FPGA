@@ -70,7 +70,12 @@ static uint8_t  aaf_gw_enabled;      // 1 = gateware packetizer owns the USB str
 static void     aaf_gw_set(uint8_t on);          // defined below check_uart_cmd
 static uint32_t usb_lock_calls;      // diag: USB-FIFO servo invocations
 static uint8_t  usb_nco_freeze;      // diag: hold NCO at base (test implicit feedback)
-static uint32_t usb_fb_manual;       // 0 = auto .v loop; nonzero = held fb_ovr (FBSWEEP 'F')
+uint32_t usb_fb_manual;              // 0 = auto .v loop; nonzero = held fb_ovr (FBSWEEP 'F')
+// NOT static: dstats.c sets this over UDP. Writing main_usb_fb_ovr CSR directly
+// does nothing -- the main loop pushes usb_fb_manual into it unconditionally on
+// every iteration (see the comment at that write), so a direct CSR write is
+// overwritten within a millisecond. An entire feedback sweep was run against a
+// value that never reached the hardware before this was noticed.
 // SRC src_step PI servo gains — RUNTIME-TUNABLE over the console ('k'/'j') so
 // the loop can be tuned live with no 20-min rebuild. KI=0 -> pure proportional.
 static int32_t  g_src_kp = 16384;    // proportional: step units per frame of level error

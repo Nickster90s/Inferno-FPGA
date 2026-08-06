@@ -9,6 +9,7 @@
 
 #include "net.h"
 #include "dante_dev.h"
+extern uint32_t usb_fb_manual;
 #include "dante_tx.h"
 #include "gptp.h"
 #include "ptpv1.h"
@@ -202,6 +203,32 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     // 'o' [ASCII signed decimal] -- set the TX timestamp offset in samples and
     // re-anchor. Replies with the value now in force so a sweep can confirm the
     // write landed rather than assuming it did.
+    // 'F' [ASCII decimal] -- hold the USB async-feedback value (0 = auto loop).
+    //
+    // The wrapper exposes this precisely to sweep hardcoded feedback live and
+    // characterise the host's response without a rebuild. There is a console
+    // 'F' command already, but driving the UART perturbs the system under
+    // measurement, so this is the same knob over UDP.
+    //
+    // Value is Q16.16 samples per microframe; nominal 6.0 = 393216.
+    if (len >= 1 && req[0] == 'F') {
+        if (len >= 2) {
+            uint32_t v = 0; uint32_t i = 1; int digits = 0;
+            for (; i < len && req[i] >= '0' && req[i] <= '9'; i++) {
+                v = v * 10u + (uint32_t)(req[i] - '0'); digits++;
+            }
+            // Set the FIRMWARE variable, not the CSR: the main loop rewrites
+            // the CSR from usb_fb_manual every iteration.
+            if (digits) usb_fb_manual = v;
+        }
+        uint8_t *p4 = net_udp_payload_buf();
+        uint32_t n4 = 0;
+        put32(p4, n4, 0x46425631u); n4 += 4;                 // 'FBV1'
+        put32(p4, n4, usb_fb_manual); n4 += 4;
+        net_udp_commit(src_ip, src_port, STATS_PORT, n4, NET_TOS_BEST_EFFORT);
+        return;
+    }
+
     if (len >= 1 && req[0] == 'o') {
         if (len >= 2) {
             int32_t v = 0, sign = 1; uint32_t i = 1;
