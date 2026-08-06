@@ -56,8 +56,27 @@
 #define UNDERRUN_NO_SOURCE_PER_S  24000u
 
 // Consecutive one-second polls the trip condition must hold before it is
-// believed. See the trip site for why this exists.
-#define TRIP_STREAK_S        6u
+// believed.
+//
+// 45, not 6. This guard has now fired spuriously FOUR times in this project:
+// lvl_max matching the talker-off constant, then a duty-cycle misread, then the
+// USB host starting playback, and now the firmware feedback loop's convergence.
+// That last one is instructive: the loop starts at nominal feedback with about
+// 40000 underruns/s and converges over roughly a minute, so the underrun rate
+// SWEEPS DOWN THROUGH the 4800..24000 trip band and sits inside it for tens of
+// consecutive seconds. Six was nowhere near enough.
+//
+// The cost of tripping late is bounded -- a genuine clock fault persists, so it
+// will still be caught, just 45 s later. The cost of tripping early is that the
+// media clock free-runs at the crystal's ~4.5 ppm and the timestamp walks out of
+// every receiver's window, which is exactly what happened: drift climbed +4 ->
+// +48 samples with the NCO pinned at nominal, and re-arming by hand brought it
+// straight back to -4.
+//
+// If this fires a fifth time, the answer is not another constant. The guard
+// should key on something that cannot be produced by a transient -- a ring that
+// is simultaneously un-primed AND not refilling, for instance.
+#define TRIP_STREAK_S        45u
 
 // ---- PHASE: a real PLL on PTP, deliberately feeble --------------------------
 //
