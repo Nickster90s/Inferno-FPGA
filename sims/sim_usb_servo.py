@@ -68,8 +68,14 @@ def run(unprime_block, host_bias=0.0, seconds=20.0, start_level=128.0):
     level = start_level
     primed = True
     integ = 0
-    nco_rate = int(NOMINAL_SOF)          # measured strobes per frame
-    fb = int(nco_rate * Q)
+    # nco_rate is the strobe COUNT over 256 SOFs, which is why the design
+    # shifts it by 8 to form the Q16.16 base: (6*256) << 8 == 6 << 16. Setting
+    # it to 6 makes fb 256x too small and the ring drains in every scenario --
+    # which is exactly what an earlier version of this model did, and a
+    # threshold decision was made on it.
+    NCO_WIN  = 256
+    nco_rate = int(NOMINAL_SOF * NCO_WIN)
+    fb = (nco_rate << 8)
     hist = []
     strobes = 0.0
 
@@ -99,7 +105,7 @@ def run(unprime_block, host_bias=0.0, seconds=20.0, start_level=128.0):
                 integ = max(-INTEG_MAX, min(INTEG_MAX, integ + err))
         # --- nco_rate re-measured every 256 SOFs --------------------------
         if k % 256 == 0:
-            nco_rate = int(NOMINAL_SOF)               # measured, self-correcting
+            nco_rate = int(NOMINAL_SOF * NCO_WIN)     # measured, self-correcting
         hist.append(level)
     return hist
 
@@ -121,8 +127,8 @@ def report(name, hist, unprime, tail_frac=0.5):
 if __name__ == "__main__":
     fails = 0
     print("scaling check against the servo source:")
-    print(f"  nominal fb  = {int(NOMINAL_SOF)}<<16 = {int(NOMINAL_SOF)*Q}")
-    auth = (INTEG_MAX >> KI_SHIFT) / (int(NOMINAL_SOF) * Q) * 100
+    print(f"  nominal fb  = (6*256)<<8 = {(int(NOMINAL_SOF*256))<<8}  (= 6<<16 = {6*Q})")
+    auth = (INTEG_MAX >> KI_SHIFT) / ((int(NOMINAL_SOF * 256)) << 8) * 100
     ok = 1.9 < auth < 2.3
     print(f"  {'PASS' if ok else 'FAIL'}  integral authority {auth:.2f}% "
           f"(source comment says 2.08%)")
