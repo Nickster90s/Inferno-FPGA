@@ -82,7 +82,12 @@ if __name__ == "__main__":
     # delivers per sample-time, so the ring can never reach the prime floor and
     # NOTHING is ever built -- fifo_level topped out at 31 against a centre of
     # 64. That is a timescale artifact of the sim, not a fault in the design.
-    DIV = 128
+    # 1042 = 50e6/48000, the REAL ratio. At DIV=128 a sample is 128 cycles while
+    # five fpp=60 packets take ~3855 cycles to build, so an fpp=16 context
+    # (due every 2048 cycles at that scale) cannot possibly be served -- the
+    # bench manufactures a throughput failure hardware does not have. Same trap
+    # sim_ring_accounting.py documents.
+    DIV = 1042
     dut = Top(div=DIV)
     p = dut.p
     fails = 0
@@ -93,9 +98,13 @@ if __name__ == "__main__":
     def tb():
         yield p.enable.storage.eq(1)
         yield
-        # ctx0 at fpp=16 (index 1), ctx1 at fpp=60 (index 4) -- the bench mix
-        yield from bind(p, 0, 4, 1, 0)
-        yield from bind(p, 1, 4, 4, 0)
+        # THE EXACT BENCH CONFIGURATION: one fpp=16 context (the AM2) alongside
+        # five fpp=60 contexts (DVS). The earlier version bound only TWO
+        # contexts and showed no half-rate, which is why it disagreed with
+        # hardware -- the fault, if it is real, needs the full set.
+        yield from bind(p, 0, 4, 1, 0)          # fpp=16
+        for c in range(1, 6):
+            yield from bind(p, c, 4, 4, 0)      # fpp=60
         yield p.ctx_select.storage.eq(0)
         # DRAIN THE OUTPUT. Nothing consumes p.source in this bench, so without
         # this source.ready stays low, the FSM stalls in STREAM forever and
@@ -111,7 +120,7 @@ if __name__ == "__main__":
         strobes = 0
         ch = 0
         owed = 0
-        for c in range(DIV * 600):
+        for c in range(DIV * 200):
             if (yield dut.mcr.sample_strobe):
                 strobes += 1
                 owed += BLOCK_CH
@@ -125,7 +134,7 @@ if __name__ == "__main__":
         obs["strobes"] = strobes
 
         # Read what the module thinks each context is configured as.
-        for c in (0, 1):
+        for c in range(6):
             yield p.ctx_select.storage.eq(c)
             yield
             yield
@@ -141,7 +150,7 @@ if __name__ == "__main__":
     print(f"strobes driven: {obs['strobes']}")
     print(f"ts_now_sub    : {obs['ts_now']}   (should track the strobe count)")
     print(f"fifo_level    : {obs['fifo']}   pkt_count: {obs['pkts']}   underrun: {obs['under']}")
-    for c, fpp in ((0, 16), (1, 60)):
+    for c, fpp in [(0, 16)] + [(i, 60) for i in range(1, 6)]:
         exp = obs["strobes"] // fpp
         got = obs[f"due_cnt{c}"]
         em = obs[f"emit_cnt{c}"]

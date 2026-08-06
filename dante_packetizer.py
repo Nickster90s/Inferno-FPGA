@@ -742,10 +742,26 @@ class DantePacketizer(LiteXModule):
                             pend[i].eq(0),
                          )
 
+        # START A TRAVERSAL WHILE ANYTHING IS PENDING.
+        #
+        # send_req is a ONE-CYCLE pulse and IDLE only sees it if the builder
+        # happens to be idle at that instant. A context with a short fpp raises
+        # its due while the builder is still working through the long ones, the
+        # pulse is lost, and although its pend bit survives nothing restarts the
+        # walk to consume it -- so it is served only when a due coincides with
+        # IDLE. Measured in sim with the bench mix (1x fpp16 + 5x fpp60):
+        # ctx0 due=37 emit=16, while the fpp=60 contexts were fine. Hardware
+        # showed the same context underperforming.
+        #
+        # Gating IDLE on "any bit pending" instead makes the builder self-
+        # restarting: it keeps walking until every latched due is consumed.
+        any_pend = Signal()
+
         due_cnt  = Array([Signal(32) for _ in range(n_ctx)])
         emit_cnt = Array([Signal(32) for _ in range(n_ctx)])
         for i in range(n_ctx):
             self.sync += If(strobe & due_arr[i], due_cnt[i].eq(due_cnt[i] + 1))
+        self.comb += any_pend.eq(reduce(or_, [pend[i] for i in range(n_ctx)]))
         self.comb += [
             self.flow_due_cnt.status.eq(due_cnt[ctx_sel]),
             self.flow_emit_cnt.status.eq(emit_cnt[ctx_sel]),
@@ -991,7 +1007,7 @@ class DantePacketizer(LiteXModule):
         fsm = FSM(reset_state="IDLE")
         self.submodules.fsm = fsm
         fsm.act("IDLE",
-            If(send_req,
+            If(any_pend,
                 NextValue(byte_idx, 0),
                 NextValue(bph, 0),          # every packet starts on sample byte 0
                 NextValue(cs_slot, 0), NextValue(cs_samp, 0),
