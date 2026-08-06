@@ -10,6 +10,7 @@
 #include "net.h"
 #include "dante_dev.h"
 extern uint32_t usb_fb_manual;
+extern uint8_t  usb_fb_sweep_hold;
 #include "dante_tx.h"
 #include "gptp.h"
 #include "ptpv1.h"
@@ -219,7 +220,9 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
             }
             // Set the FIRMWARE variable, not the CSR: the main loop rewrites
             // the CSR from usb_fb_manual every iteration.
-            if (digits) usb_fb_manual = v;
+            // A sweep takes manual control; writing 0 hands it back to the
+            // firmware outer loop.
+            if (digits) { usb_fb_manual = v; usb_fb_sweep_hold = (v != 0); }
         }
         uint8_t *p4 = net_udp_payload_buf();
         uint32_t n4 = 0;

@@ -70,6 +70,15 @@ static uint8_t  aaf_gw_enabled;      // 1 = gateware packetizer owns the USB str
 static void     aaf_gw_set(uint8_t on);          // defined below check_uart_cmd
 static uint32_t usb_lock_calls;      // diag: USB-FIFO servo invocations
 static uint8_t  usb_nco_freeze;      // diag: hold NCO at base (test implicit feedback)
+// Firmware outer feedback loop -- see the write site for why it exists.
+#define USB_FB_NOMINAL    (6u << 16)     /* 6.0 samples per microframe, Q16.16 */
+#define USB_FB_TARGET     64             /* block_level centre */
+#define USB_FB_KI         6              /* Q16.16 units per level-unit per tick */
+#define USB_FB_PERIOD_MS  100u
+#define USB_FB_TRIM_MAX   ((int32_t)(USB_FB_NOMINAL / 8))   /* +/-12.5% */
+static int32_t  usb_fb_trim;
+uint8_t         usb_fb_sweep_hold;   /* set by the UDP 'F' knob to take manual control */
+
 uint32_t usb_fb_manual;              // 0 = auto .v loop; nonzero = held fb_ovr (FBSWEEP 'F')
 // NOT static: dstats.c sets this over UDP. Writing main_usb_fb_ovr CSR directly
 // does nothing -- the main loop pushes usb_fb_manual into it unconditionally on
@@ -1025,6 +1034,47 @@ int main(void)
             if (now_ms != last_ms) {
                 last_ms = now_ms;
                 usb_lock_calls++;
+                // FIRMWARE OUTER LOOP, when nothing is holding fb manually.
+                //
+                // The wrapper's own integrator is clamped to +/-2.08%
+                // (INTEG_MAX = 0x2000 << KI_SHIFT). A feedback sweep over UDP
+                // showed the ring needs about +3.5% to stop underrunning:
+                //
+                //     +2.0%  underrun 916/s      +3.0%  379/s
+                //     +4.0%  underrun   0/s, ring pinned full
+                //
+                // so the hardware integrator SATURATES roughly 1.4% short and
+                // can never close the gap, no matter how long it runs. That is
+                // why the ring limit-cycled between the prime thresholds and
+                // ~2% of samples went out as silence.
+                //
+                // fb_ovr != 0 bypasses the hardware loop entirely, so firmware
+                // can own it and supply the authority the clamp denies. Slow
+                // integral only: the ring responds with a lag of many
+                // milliseconds and there is no hurry -- the whole error is a
+                // few percent of a rate, not a transient.
+                if (!usb_fb_sweep_hold) {
+                    static uint32_t fb_last_ms;
+                    static uint32_t fb_acc, fb_n;
+                    uint32_t nowms = gptp_uptime_ms();
+                    // AVERAGE THE LEVEL. block_level is not a steady value: the
+                    // prime hysteresis makes it sweep its whole band many times
+                    // a second, so one sample per period integrates noise and
+                    // the loop hunts (observed: ring avg 92 -> 57 -> 48 with the
+                    // trim still moving). Accumulate every pass and use the mean.
+                    fb_acc += aaf_pkt_fifo_level_read();
+                    fb_n++;
+                    if ((uint32_t)(nowms - fb_last_ms) >= USB_FB_PERIOD_MS && fb_n) {
+                        fb_last_ms = nowms;
+                        int32_t lvl = (int32_t)(fb_acc / fb_n);
+                        fb_acc = 0; fb_n = 0;
+                        int32_t err = USB_FB_TARGET - lvl;      /* +ve = too low */
+                        usb_fb_trim += err * USB_FB_KI;
+                        if (usb_fb_trim >  USB_FB_TRIM_MAX) usb_fb_trim =  USB_FB_TRIM_MAX;
+                        if (usb_fb_trim < -USB_FB_TRIM_MAX) usb_fb_trim = -USB_FB_TRIM_MAX;
+                        usb_fb_manual = (uint32_t)((int32_t)USB_FB_NOMINAL + usb_fb_trim);
+                    }
+                }
                 main_usb_fb_ovr_write(usb_fb_manual);   // 0 = auto measured loop
                 uint32_t _lvl = aaf_pkt_fifo_level_read();
                 mcr.usb_last_level = (int)_lvl;
