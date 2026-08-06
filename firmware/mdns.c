@@ -493,7 +493,23 @@ static uint32_t build_txt_chan(uint8_t *p, unsigned ch1)
     n = txt_put(p, n, "en=24");
     n = txt_put(p, n, "pcm=3 4");
     n = txt_put(p, n, "enc=24");
-    n = txt_put(p, n, "latency_ns=500000");
+    // latency_ns MUST COVER OUR OWN PACKET WINDOW.
+    //
+    // A receiver takes max(this, its own minimum) as the playout latency --
+    // inferno channels_subscriber.rs:807, reading the value back from this TXT
+    // key via mdns_client.rs:288. So advertising too little tells a receiver it
+    // may buffer less than our packets can possibly arrive in.
+    //
+    // The emitted timestamp labels the OLDEST sample of the window a packet
+    // covers, so the packet cannot exist until fpp samples after its own
+    // timestamp. At the largest fpp we now accept (60, which is what Dante
+    // Virtual Soundcard asks for) that is 60/48000 = 1.25 ms -- two and a half
+    // times the 500 us this used to claim. The old value was written when fpp
+    // could only be 8 or 16 (0.17 / 0.33 ms) and was never revisited.
+    //
+    // 2 ms covers fpp=60 with margin for network transit. inferno flags its own
+    // use of this field with "FIXME should be tx latency"; this is that.
+    n = txt_put(p, n, "latency_ns=2000000");
     // fpp=<MAX>,<MIN>, per inferno mdns_server.rs:120
     // (format!("fpp={},{}", FPP_MAX_ADVERTISED, FPP_MIN) = 32,2).
     //

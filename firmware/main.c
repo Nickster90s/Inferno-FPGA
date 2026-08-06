@@ -73,7 +73,8 @@ static uint8_t  usb_nco_freeze;      // diag: hold NCO at base (test implicit fe
 // Firmware outer feedback loop -- see the write site for why it exists.
 #define USB_FB_NOMINAL    (6u << 16)     /* 6.0 samples per microframe, Q16.16 */
 #define USB_FB_TARGET     64             /* block_level centre */
-#define USB_FB_KI         6              /* Q16.16 units per level-unit per tick */
+#define USB_FB_KI         6              /* Q16.16 units per error-unit per tick */
+#define USB_FB_EVENT_DIV  16             /* underrun/overrun events per error unit */
 #define USB_FB_PERIOD_MS  100u
 #define USB_FB_TRIM_MAX   ((int32_t)(USB_FB_NOMINAL / 8))   /* +/-12.5% */
 static int32_t  usb_fb_trim;
@@ -1066,9 +1067,32 @@ int main(void)
                     fb_n++;
                     if ((uint32_t)(nowms - fb_last_ms) >= USB_FB_PERIOD_MS && fb_n) {
                         fb_last_ms = nowms;
-                        int32_t lvl = (int32_t)(fb_acc / fb_n);
                         fb_acc = 0; fb_n = 0;
-                        int32_t err = USB_FB_TARGET - lvl;      /* +ve = too low */
+                        // TARGET THE UNDERRUN/OVERRUN BALANCE, NOT A LEVEL.
+                        //
+                        // Targeting block_level == 64 does not work: the prime
+                        // hysteresis clamps the average near 50, so the target
+                        // is unreachable in steady state and the integrator
+                        // runs to its rail. Observed: the trim wound up to
+                        // +3.96%, which is the value the feedback sweep showed
+                        // pins the ring FULL, and underruns were traded for
+                        // ~9600 overruns/s. A loop whose setpoint the plant
+                        // cannot reach will always wind up.
+                        //
+                        // Underrun means starved, overrun means flooded. Their
+                        // difference is zero exactly at the balance point, and
+                        // that point IS reachable whatever the hysteresis does.
+                        static uint32_t u_prev, o_prev;
+                        uint32_t u = aaf_pkt_underrun_count_read();
+                        uint32_t o = aaf_pkt_overrun_count_read();
+                        int32_t du = (int32_t)(u - u_prev);
+                        int32_t doo = (int32_t)(o - o_prev);
+                        u_prev = u; o_prev = o;
+                        if (du < 0) du = 0;
+                        if (doo < 0) doo = 0;
+                        // Scale down: these count per-sample events, so a raw
+                        // difference is thousands where the level error was tens.
+                        int32_t err = (du - doo) / USB_FB_EVENT_DIV;
                         usb_fb_trim += err * USB_FB_KI;
                         if (usb_fb_trim >  USB_FB_TRIM_MAX) usb_fb_trim =  USB_FB_TRIM_MAX;
                         if (usb_fb_trim < -USB_FB_TRIM_MAX) usb_fb_trim = -USB_FB_TRIM_MAX;
