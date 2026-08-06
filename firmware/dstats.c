@@ -212,6 +212,23 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     // measurement, so this is the same knob over UDP.
     //
     // Value is Q16.16 samples per microframe; nominal 6.0 = 393216.
+    // 'u' -- USB ingress localisation. rx_beats is what the core hands the
+    // endpoint; ep_out is what the endpoint hands the decoder. A gap between
+    // them is audio arriving over USB and never reaching the ring, which is a
+    // LEAK, not a rate error -- and a leak is what the feedback loop has been
+    // silently compensating for.
+    if (len >= 1 && req[0] == 'u') {
+        uint8_t *p5 = net_udp_payload_buf();
+        uint32_t n5 = 0;
+        put32(p5, n5, 0x55534231u); n5 += 4;                      // 'USB1'
+        put32(p5, n5, main_usb_dbg_rx_beats_read()); n5 += 4;
+        put32(p5, n5, main_usb_dbg_ep_out_read());   n5 += 4;
+        put32(p5, n5, aaf_pkt_overrun_count_read()); n5 += 4;
+        put32(p5, n5, aaf_pkt_underrun_count_read());n5 += 4;
+        net_udp_commit(src_ip, src_port, STATS_PORT, n5, NET_TOS_BEST_EFFORT);
+        return;
+    }
+
     if (len >= 1 && req[0] == 'F') {
         if (len >= 2) {
             uint32_t v = 0; uint32_t i = 1; int digits = 0;
