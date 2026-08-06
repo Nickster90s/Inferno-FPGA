@@ -517,7 +517,30 @@ class DantePacketizer(LiteXModule):
         self.sync += [
             If(~en, primed.eq(0)
             ).Elif(level >= _center, primed.eq(1)
-            ).Elif(level < FRAME_SAMPLES, primed.eq(0)),
+            # UN-PRIME AT HALF-CENTRE, NOT AT ONE PACKET.
+            #
+            # The USB feedback servo (usb_avb_subsystem.py:455) integrates ONLY
+            # while |err| <= 32, where err = 64 - block_level -- a deliberate
+            # anti-windup band sized for a ring that stays near centre. It also
+            # hard-clamps the accumulator to +/-2.08%, so the conditional is
+            # belt-and-braces rather than the only guard.
+            #
+            # With rd advancing every media strobe, the ring traverses the whole
+            # prime hysteresis band as a limit cycle: it primes at _center
+            # (block_level 64), drains, un-primes at FRAME_SAMPLES (block_level
+            # 8), refills with rd stopped, and repeats. Measured on the bench:
+            # level 8..67 against a centre of 64, ~1400 underruns/s. Over most of
+            # that cycle err exceeds 32, so the integrator is FROZEN exactly when
+            # it is needed and never accumulates the authority to correct the
+            # host's ~1.8% under-delivery.
+            #
+            # Un-priming at half-centre keeps the excursion inside err 0..32 --
+            # the servo's linear band -- so the integrator can actually work. It
+            # also emits silence EARLIER on a genuine drain, which is the safer
+            # direction: the original threshold existed to stop the reader
+            # wrapping through stale ring data, and this triggers sooner, not
+            # later.
+            ).Elif(level < (_center >> 1), primed.eq(0)),
         ]
         strobe = Signal()
         self.comb += strobe.eq(mcr.sample_strobe & en)
