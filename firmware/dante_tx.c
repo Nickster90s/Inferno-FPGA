@@ -52,6 +52,7 @@ dante_tx_stats_t g_tx_stats;
 
 static uint8_t  flow_ip[N_FLOWS][4];
 static uint8_t  talker_on;
+uint16_t g_mcast_fpp = 16;       // fpp for ARC-created multicast bundles
 
 // RUNTIME-TUNABLE TIMESTAMP OFFSET.
 //
@@ -118,7 +119,7 @@ static uint16_t ip_header_checksum(const uint8_t src[4], const uint8_t dst[4],
 // If the packetizer's due/latch pipeline is ever restructured this constant has
 // to be re-measured -- decode a capture with tools/dante_decode.py and read the
 // "ts multiple of fpp" line, which is exactly what found it.
-#define PHASE_PIPELINE_ADJ  2u
+uint32_t g_phase_adj = 2;   /* was #define PHASE_PIPELINE_ADJ; see below */
 
 // Mirrors FPP_TABLE in dante_packetizer.py. Keep the two in step: a mismatch
 // makes the gateware pace at a different rate than the header advertises, which
@@ -686,7 +687,7 @@ static void write_ctx(unsigned f, const uint8_t dst_ip[4], const uint8_t dmac[6]
         uint32_t cfg = (uint32_t)(nslots & 0x0F) | ((fpp_idx & 0x7u) << 4);
         for (unsigned tries = 0; tries < 8; tries++) {
             uint32_t s0 = aaf_pkt_ts_now_sub_read();
-            aaf_pkt_flow_phase_write((s0 + PHASE_PIPELINE_ADJ) % (uint32_t)fpp);
+            aaf_pkt_flow_phase_write((s0 + g_phase_adj) % (uint32_t)fpp);
             // flow_cfg LAST: it latches the channel map and the phase with it,
             // so the builder never sees a half-written context.
             aaf_pkt_flow_cfg_write(cfg);
@@ -700,7 +701,26 @@ static void dante_tx_reseed_phases(uint32_t sub)
     for (unsigned f = 0; f < N_FLOWS; f++) {
         if (!flows[f].in_use || !flows[f].fpp) continue;
         aaf_pkt_ctx_select_write(f);
-        aaf_pkt_flow_phase_write((sub + PHASE_PIPELINE_ADJ) % (uint32_t)flows[f].fpp);
+        // MINUS ONE, unlike the bind path. The two seeding paths sample the
+        // counter at different instants:
+        //
+        //   bind   seeds from ts_now_sub -- the counter's CURRENT value
+        //   anchor seeds from `sub`      -- the value the counter will ADOPT
+        //                                  at the next media strobe
+        //
+        // The phase register loads immediately on flow_cfg.re, but ts_sub does
+        // not take `sub` until that next strobe, by which point phase has
+        // already incremented once. Seeding (sub + adj) therefore lands one
+        // sample high.
+        //
+        // Measured: a freshly bound fpp=60 flow emitted subsec congruent to 0,
+        // and the same flow after a re-anchor emitted 59 -- exactly -1. It went
+        // unnoticed at fpp=16 for a while because the misalignment only appears
+        // once an anchor has fired.
+        //
+        // + fpp before the modulo so the subtraction cannot go negative.
+        aaf_pkt_flow_phase_write((sub + g_phase_adj + flows[f].fpp - 1u)
+                                 % (uint32_t)flows[f].fpp);
         // flow_cfg.re is what latches the phase; re-write the same config.
         aaf_pkt_flow_cfg_write((uint32_t)(flows[f].nslots & 0x0F) |
                                ((dante_tx_fpp_index(flows[f].fpp) & 0x7u) << 4));
@@ -965,7 +985,12 @@ int dante_tx_bind_multicast(uint16_t ext_id, const uint16_t *chans, uint8_t n)
 
     const uint8_t *dip = flow_ip[f];
     uint8_t dmac[6] = { 0x01, 0x00, 0x5E, (uint8_t)(dip[1] & 0x7F), dip[2], dip[3] };
-    write_ctx((unsigned)f, dip, dmac, DANTE_PORT_MEDIA, chans, n, 16);
+    // fpp is settable so a multicast stream -- the only stream visible on the
+    // wire from the build host -- can be put at the SAME fpp a unicast receiver
+    // negotiated. DVS asks for 60 and stays red while the fpp=16 multicast it
+    // also receives is green, so the fault is fpp=60-specific and could not be
+    // decoded until now: unicast is never flooded to the capture port.
+    write_ctx((unsigned)f, dip, dmac, DANTE_PORT_MEDIA, chans, n, g_mcast_fpp);
 
     flows[f].in_use = 1;
     for (int i = 0; i < 4; i++) flows[f].dst[i] = dip[i];
@@ -982,7 +1007,7 @@ int dante_tx_bind_multicast(uint16_t ext_id, const uint16_t *chans, uint8_t n)
     // -bund at all, while the A16R -- which does advertise its bundle -- is the
     // one device Dante Controller attributes transmit bandwidth to.
     mdns_announce();
-    flows[f].nslots = n; flows[f].fpp = 16; flows[f].mcast = 1;
+    flows[f].nslots = n; flows[f].fpp = (uint8_t)g_mcast_fpp; flows[f].mcast = 1;
     flows[f].ext_id = ext_id;
     for (unsigned i = 0; i < 8; i++) flows[f].chans[i] = (i < n) ? chans[i] : 0;
     flows[f].last_ms = gptp_uptime_ms();

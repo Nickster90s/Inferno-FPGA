@@ -10,6 +10,8 @@
 #include "net.h"
 #include "dante_dev.h"
 extern uint32_t usb_fb_manual;
+extern uint16_t g_mcast_fpp;
+extern uint32_t g_phase_adj;
 extern uint8_t  usb_fb_sweep_hold;
 #include "dante_tx.h"
 #include "gptp.h"
@@ -217,6 +219,46 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     // them is audio arriving over USB and never reaching the ring, which is a
     // LEAK, not a rate error -- and a leak is what the feedback loop has been
     // silently compensating for.
+    // 'M' [ASCII fpp] -- set the fpp used for ARC-created multicast bundles,
+    // and (with no digits) create one on channels 1-2 so a stream at any fpp can
+    // be decoded from the build host without Dante Controller.
+    // 'P' [ASCII] -- pacing phase seed adjustment, swept live. It was a
+    // #define tuned at fpp=16; at fpp=60 the emitted subsec comes out congruent
+    // to 59 (i.e. -1) with the same value, so the correction is not the simple
+    // fixed pipeline delay it was assumed to be.
+    if (len >= 1 && req[0] == 'P') {
+        if (len >= 2 && req[1] >= '0' && req[1] <= '9') {
+            uint32_t v = 0; uint32_t i = 1;
+            for (; i < len && req[i] >= '0' && req[i] <= '9'; i++)
+                v = v * 10u + (uint32_t)(req[i] - '0');
+            g_phase_adj = v;
+        }
+        uint8_t *p7 = net_udp_payload_buf();
+        uint32_t n7 = 0;
+        put32(p7, n7, 0x50485631u); n7 += 4;              // 'PHV1'
+        put32(p7, n7, g_phase_adj); n7 += 4;
+        net_udp_commit(src_ip, src_port, STATS_PORT, n7, NET_TOS_BEST_EFFORT);
+        return;
+    }
+
+    if (len >= 1 && req[0] == 'M') {
+        if (len >= 2 && req[1] >= '0' && req[1] <= '9') {
+            uint16_t v = 0; uint32_t i = 1;
+            for (; i < len && req[i] >= '0' && req[i] <= '9'; i++)
+                v = (uint16_t)(v * 10 + (req[i] - '0'));
+            if (dante_tx_fpp_supported(v)) g_mcast_fpp = v;
+        } else {
+            uint16_t ch[2] = { 1, 2 };
+            dante_tx_bind_multicast(0x40, ch, 2);
+        }
+        uint8_t *p6 = net_udp_payload_buf();
+        uint32_t n6 = 0;
+        put32(p6, n6, 0x4D434131u); n6 += 4;              // 'MCA1'
+        put32(p6, n6, g_mcast_fpp); n6 += 4;
+        net_udp_commit(src_ip, src_port, STATS_PORT, n6, NET_TOS_BEST_EFFORT);
+        return;
+    }
+
     if (len >= 1 && req[0] == 'u') {
         uint8_t *p5 = net_udp_payload_buf();
         uint32_t n5 = 0;
