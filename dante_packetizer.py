@@ -534,24 +534,27 @@ class DantePacketizer(LiteXModule):
             # it is needed and never accumulates the authority to correct the
             # host's ~1.8% under-delivery.
             #
-            # HALF-CENTRE (block 32). Lowering it to block 16 was tried and is
-            # WORSE, not better: a lower floor means the ring drains further
-            # before rd stops, so the excursions are deeper and longer and MORE
-            # strobes fall below the threshold. sims/sim_usb_servo.py, once its
-            # underrun metric was corrected to count strobes below the ACTUAL
-            # threshold (it had been hardcoded to block < 8):
+            # BACK TO FRAME_SAMPLES (block 8). Raising this to block 32 was a
+            # REGRESSION, measured against the known-good build:
             #
-            #     un-prime block 32   1157 underrun frames
-            #     un-prime block 16   2849 underrun frames
+            #                       baseline (main)   with block 32
+            #     rx_beats            9,217,989         9,042,899
+            #     ep_out              9,216,207         8,705,608   (need 9,216,000)
+            #     leak                    0.02%             3.73%
+            #     underrun                   0/s            2645/s
             #
-            # 1157/80000 frames is 1.4%, which at 48 kHz is ~700/s against 1051/s
-            # measured on the bench -- so the model is predictive once it counts
-            # the right thing.
+            # The leak is in the EP->decoder path, i.e. USB BACK-PRESSURE, which
+            # happens when the ring cannot accept writes. rd stops DEAD when
+            # un-primed, so every un-prime is a refill at full host rate into a
+            # ring with zero drain -- and at block 32 that happens four times
+            # more readily than at block 8, slamming the top rail and pushing
+            # back on USB.
             #
-            # The residual ~2% silence is the ring LIMIT CYCLE, not this
-            # threshold. Moving the threshold only changes where the cycle
-            # bottoms out. Stopping the cycle is the open problem.
-            ).Elif(level < (_center >> 1), primed.eq(0)),
+            # sims/sim_usb_servo.py did not catch this: it models only the LOWER
+            # rail and has no notion of the ring's upper limit or of USB
+            # back-pressure. It scored block 32 as best on silence alone, which
+            # was true and irrelevant -- the cost was paid at the other end.
+            ).Elif(level < FRAME_SAMPLES, primed.eq(0)),
         ]
         strobe = Signal()
         self.comb += strobe.eq(mcr.sample_strobe & en)
