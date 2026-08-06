@@ -794,8 +794,37 @@ class DantePacketizer(LiteXModule):
         cur_fpp   = Signal(8)
         self.comb += cur_fpp.eq(Array(FPP_TABLE)[fppidx])
         # This flow's window START. ts_sub_emit holds the counter at the tick.
+        # BORROW INTO SECONDS. The emitted timestamp is the START of the window
+        # this packet covers, ts_sub_emit - (fpp-1). With fpp fixed at 8 or 16
+        # the old pacing guaranteed ts_sub was congruent to 15 mod 16 at the
+        # tick, so the subtraction could never go negative and no borrow was
+        # needed. With ARBITRARY fpp the tick can fire while ts_sub < fpp-1:
+        # e.g. ts_sub = 5 with fpp = 60 gives -54, which wraps to 4294967242 in
+        # an unsigned 32-bit subsec field -- with the seconds left untouched.
+        #
+        # Measured off the wire with tools/dante_decode.py:
+        #     step histogram: 16x1998, 4294967312x1, -4294967280x1
+        #     ts multiple of fpp: NO
+        # i.e. one packet per second carrying a timestamp 2^32 samples away.
+        # That is once per ts_sub wrap, which is why the audio was "better but
+        # not clean" (a periodic glitch) and why DVS rejected the stream
+        # outright as having no valid audio data.
+        #
+        # ts_anchor() in dante_tx.c does exactly this borrow in C for the anchor
+        # value; the emitted value needs the same and never had it.
         f_ts_sub  = Signal(32)
-        self.comb += f_ts_sub.eq(ts_sub_emit - (cur_fpp - 1))
+        f_ts_sec  = Signal(32)
+        _borrow   = Signal()
+        self.comb += [
+            _borrow.eq(ts_sub_emit < (cur_fpp - 1)),
+            If(_borrow,
+                f_ts_sub.eq(ts_sub_emit + SUBSEC_MAX - (cur_fpp - 1)),
+                f_ts_sec.eq(ts_sec_emit - 1),
+            ).Else(
+                f_ts_sub.eq(ts_sub_emit - (cur_fpp - 1)),
+                f_ts_sec.eq(ts_sec_emit),
+            ),
+        ]
         ns3       = Signal(6)
         self.comb += ns3.eq(nslots + (nslots << 1))            # nslots * 3
         # nslots*3*fpp as SHIFTS AND ADDS -- 24 = 16+8, 60 = 64-4 -- so no
@@ -876,8 +905,8 @@ class DantePacketizer(LiteXModule):
             Constant(0x00, 8), Constant(0x00, 8),                               # 40,41 checksum = 0
             # ---- Dante, 9 bytes (42..50) ----
             Constant(0x02, 8),                                                  # 42 constant tag
-            ts_sec_emit[24:32], ts_sec_emit[16:24],
-            ts_sec_emit[8:16],  ts_sec_emit[0:8],                                # 43..46 seconds
+            f_ts_sec[24:32], f_ts_sec[16:24],
+            f_ts_sec[8:16],  f_ts_sec[0:8],                                      # 43..46 seconds (borrow-corrected)
             f_ts_sub[24:32], f_ts_sub[16:24],
             f_ts_sub[8:16],  f_ts_sub[0:8],                                      # 47..50 subsec samples (PER FLOW)
         ]

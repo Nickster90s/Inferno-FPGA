@@ -222,5 +222,30 @@ if __name__ == "__main__":
     print("    fpp=16 is today's maximum at 384 B; fpp=60 needs 720 B and the")
     print("    per-context FIFO is sized for the old figure.")
 
+    # --- 6. BORROW INTO SECONDS at the subsec wrap ------------------------
+    # The emitted value is ts_sub - (fpp-1). With fpp fixed at 8/16 the pacing
+    # guaranteed ts_sub >= fpp-1 at the tick, so it never went negative. With
+    # arbitrary fpp it can, and an unsigned subsec field wraps to ~4.29e9 with
+    # the seconds left alone. Measured on the wire before the fix:
+    #   step histogram: 16x1998, 4294967312x1, -4294967280x1
+    print("\nborrow into seconds (emitted = ts_sub - (fpp-1)):")
+    for fpp in (8, 16, 24, 32, 60):
+        bad = 0
+        for sub in range(0, SUBSEC_MAX, 7):
+            if sub % fpp != (fpp - 1):
+                continue                       # tick only fires here
+            raw = sub - (fpp - 1)
+            if raw < 0:
+                sec_adj, sub_adj = -1, raw + SUBSEC_MAX
+            else:
+                sec_adj, sub_adj = 0, raw
+            if not (0 <= sub_adj < SUBSEC_MAX) or sub_adj % fpp != 0:
+                bad += 1
+        ok = bad == 0
+        print(f"  {'PASS' if ok else 'FAIL'}  fpp={fpp:3d}: every emitted subsec "
+              f"in [0,48000) and a multiple of fpp ({bad} bad)")
+        if not ok:
+            fails += 1
+
     print(f"\n{'ALL CHECKS PASSED' if not fails else str(fails) + ' CHECK(S) FAILED'}")
     sys.exit(1 if fails else 0)
