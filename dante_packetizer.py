@@ -1089,6 +1089,20 @@ class DantePacketizer(LiteXModule):
         aligned_once = Signal()   # read anchored to the first block (anchor-once align)
         fsm = FSM(reset_state="IDLE")
         self.submodules.fsm = fsm
+        # LITESCOPE TAPS. The 4-slot fpp=60 case binds, counts packets at the
+        # correct rate, and puts nothing on the wire; everything that scales
+        # with nslots has been checked from the outside. These expose the
+        # producing end so the trace can show whether the packetizer stalls or
+        # the sink refuses.
+        self.dbg_byte_idx   = byte_idx
+        self.dbg_rd_idx     = rd_idx
+        self.dbg_f_last_idx = f_last_idx
+        self.dbg_f_total    = f_total
+        self.dbg_stream_idx = stream_idx
+        self.dbg_pay_len    = pay_len
+        self.dbg_send_req   = send_req
+        self.dbg_any_pend   = any_pend
+
         fsm.act("IDLE",
             If(any_pend,
                 NextValue(byte_idx, 0),

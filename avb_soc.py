@@ -394,6 +394,7 @@ class AVBSoC(SoCCore):
     def __init__(self, sys_clk_freq=int(50e6), **kwargs):
         # Pop our own kwarg before SoCCore sees it (it rejects unknown kwargs).
         bake_firmware = kwargs.pop("bake_firmware", False)
+        litescope     = kwargs.pop("litescope", False)
 
         platform = colorlight_i9plus.Platform(toolchain="openxc7")
 
@@ -1009,6 +1010,34 @@ class AVBSoC(SoCCore):
         # talker can't overwrite the egress timestamp firmware reads.
         self.comb += self.tsu.tsu.tx_latch.eq(self._tx_sof & tx_arbiter.firmware_granted)
 
+        # ---- LiteScope on the TX seam (--litescope) ------------------------
+        #
+        # Probes the PRODUCING end (packetizer source + its build pointers) and
+        # the CONSUMING end (arbiter -> MAC core sink) in one trace, so a stall
+        # can be attributed. The open question it exists for: 4 slots at fpp=60
+        # binds, packet_count rises at exactly the right rate -- and that
+        # counter increments on (source.last & source.ready), so the sink is
+        # ACCEPTING -- yet no frame reaches the wire. Either the last beat never
+        # carries the right byte enables, or the MAC discards the frame after
+        # accepting it.
+        if litescope:
+            from litescope import LiteScopeAnalyzer
+            analyzer_signals = [
+                aaf_pkt.source.valid, aaf_pkt.source.ready,
+                aaf_pkt.source.last,  aaf_pkt.source.last_be,
+                tx_arbiter.source.valid, tx_arbiter.source.ready,
+                tx_arbiter.source.last,  tx_arbiter.source.last_be,
+                tx_arbiter.firmware_granted,
+                mac.core.sink.valid, mac.core.sink.ready, mac.core.sink.last,
+                aaf_pkt.dbg_byte_idx, aaf_pkt.dbg_rd_idx,
+                aaf_pkt.dbg_f_last_idx, aaf_pkt.dbg_f_total,
+                aaf_pkt.dbg_stream_idx, aaf_pkt.dbg_pay_len,
+                aaf_pkt.dbg_send_req, aaf_pkt.dbg_any_pend,
+            ]
+            self.submodules.analyzer = LiteScopeAnalyzer(
+                analyzer_signals, depth=2048, clock_domain="sys", csr_csv="analyzer.csv")
+            self.add_jtagbone()
+
         # LED.
         self.leds = LedChaser(
             pads         = platform.request_all("user_led"),
@@ -1054,6 +1083,11 @@ def main():
              "→ enumerate as full-speed + error -71. The proximity floorplan "
              "deterministically pins USB near the pins. Only pass --no-floorplan "
              "for debugging.")
+    parser.add_argument("--litescope", action="store_true",
+        help="Add a LiteScope analyzer on the TX seam plus jtagbone, for tracing "
+             "why a bound context can count packets without any frame reaching "
+             "the wire. Costs LUTs/BRAM and re-rolls placement, so it is off by "
+             "default and its bitstream is a debug artefact, not a shipping one.")
     parser.add_argument("--sys-clk-freq", default=50e6, type=float, help="System clock frequency.")
     parser.add_argument("--firmware",     default=None,
         help="Image to embed in the BRAM ROM (replaces the LiteX BIOS). In the "
@@ -1108,6 +1142,7 @@ def main():
                                            # the print flood, so 64 is plenty.
     )
     soc_kwargs["bake_firmware"] = args.bake_firmware
+    soc_kwargs["litescope"] = args.litescope
 
     if args.firmware:
         # Pre-load the image ourselves so SoCCore doesn't shrink the ROM region
