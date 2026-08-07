@@ -95,7 +95,29 @@ static void sub_copy(char *dst, const uint8_t *req, uint32_t len, uint16_t off)
 // property values. If it flips DC to v1/Follower it confirms where the clock
 // columns come from, and the next step is to decode the individual keys and
 // report our own values rather than the AM2's.
-static const uint8_t arc_1100_body[202] = {
+// NOT const: patchable at runtime through UDP opcode 'K' (key, value).
+//
+// This table is a byte-exact replay of a RedNet AM2, and Dante Controller
+// offers us exactly the AM2's latency choices -- 1/2/5 ms -- because that is
+// literally the capability we claim. A RedNet A16R (Brooklyn-3), which DOES
+// offer 0.25/0.5, differs on these inline keys and nowhere else that is not a
+// message offset:
+//
+//     key      A16R    AM2/ours
+//     0x0210     16       0
+//     0x0211     16       0
+//     0x0213      2       0
+//     0x0214    128       0
+//     0x0303      4       2
+//     0x0311      2      16
+//
+// Which of those gates the latency list is not documented anywhere we have, and
+// each guess otherwise costs a firmware push and an audio dropout. Patching at
+// runtime turns that into seconds. Keys with bit 15 set are OFFSETS into the
+// trailing blob and must never be patched -- their values are positions in a
+// message whose length differs between devices, so copying the A16R's would
+// point into the wrong bytes. arc_1100_patch() refuses them.
+static uint8_t arc_1100_body[202] = {
     0x24, 0x1f, 0x80, 0x20, 0x00, 0x9c, 0x80, 0x21, 0x00, 0xa0, 0x00, 0x22,
     0x00, 0x01, 0x00, 0x23, 0x00, 0x18, 0x00, 0x24, 0x00, 0x01, 0x80, 0x60,
     0x00, 0xb0, 0x00, 0x62, 0x00, 0x01, 0x00, 0x63, 0x00, 0x01, 0x02, 0x01,
@@ -220,6 +242,32 @@ static inline void put_u16_at(uint8_t *p, uint32_t off, uint16_t v)
 // Off unless a collector is set (tools/stats.py opcode 'A'), so it costs one
 // compare per request in normal operation.
 uint8_t g_arc_mirror_ip[4];
+
+// Patch one inline (key, value) in the 0x1100 property table.
+// Layout: u16 header (flags<<8 | count), then count x (u16 key, u16 value).
+static int arc_1100_patch(uint16_t key, uint16_t val)
+{
+    if (key & 0x8000) return -1;                  // offset key -- never patch
+    uint32_t count = arc_1100_body[1];
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t o = 2 + i * 4;
+        if (o + 4 > sizeof(arc_1100_body)) break;
+        uint16_t k = (uint16_t)((arc_1100_body[o] << 8) | arc_1100_body[o + 1]);
+        if (k == key) {
+            arc_1100_body[o + 2] = (uint8_t)(val >> 8);
+            arc_1100_body[o + 3] = (uint8_t)val;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int dante_arc_patch_1100(uint16_t key, uint16_t val)
+{
+    int r = arc_1100_patch(key, val);
+    printf("[arc] 1100 key 0x%04x %s %u\n", key, r ? "NOT FOUND" : "->", val);
+    return r;
+}
 
 static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
                    uint16_t src_port, const uint8_t *req, uint32_t len)

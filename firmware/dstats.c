@@ -9,6 +9,7 @@
 
 #include "net.h"
 #include "dante_dev.h"
+#include "dante_arc.h"
 #include "mdns.h"
 extern uint32_t usb_fb_manual;
 extern uint16_t g_mcast_fpp;
@@ -273,6 +274,20 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     // and every transmit-side counter stays green.
     // 'A' + 4 bytes IP -> mirror every ARC request to that host on port 7780.
     // 'A' alone         -> report the current collector.
+    // 'K' + u16 key + u16 value -> patch the 0x1100 property table in RAM.
+    // Finds which capability key gates Dante Controller's latency list.
+    if (len >= 5 && req[0] == 'K') {
+        uint16_t k = (uint16_t)((req[1] << 8) | req[2]);
+        uint16_t v = (uint16_t)((req[3] << 8) | req[4]);
+        int r = dante_arc_patch_1100(k, v);
+        uint8_t *pk = net_udp_payload_buf();
+        uint32_t nk = 0;
+        put32(pk, nk, r ? 0x4b455242u : 0x4b45594fu);   // 'KERB' bad / 'KEYO' ok
+        nk += 4;
+        net_udp_commit(src_ip, src_port, STATS_PORT, nk, NET_TOS_BEST_EFFORT);
+        return;
+    }
+
     if (len >= 1 && req[0] == 'A') {
         if (len >= 5) {
             for (int i = 0; i < 4; i++) g_arc_mirror_ip[i] = req[1 + i];

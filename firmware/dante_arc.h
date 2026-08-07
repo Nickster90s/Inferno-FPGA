@@ -19,3 +19,6 @@ typedef struct {
 extern dante_arc_stats_t g_arc_stats;
 
 #endif // DANTE_ARC_H
+
+// Patch an inline key in the 0x1100 property table (latency-capability probing).
+int dante_arc_patch_1100(uint16_t key, uint16_t val);

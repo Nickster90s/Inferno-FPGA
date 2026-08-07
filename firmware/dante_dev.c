@@ -6,10 +6,24 @@
 
 dante_dev_t g_dante;
 
-// Default 2 ms: the value the chan record already advertised, chosen to cover
-// fpp=60. Starting from the LOWER (1 ms) bundle value would have quietly told
-// every receiver it may buffer less than a DVS flow can possibly arrive in.
-uint32_t g_latency_ns = 2000000;
+// 0.5 ms. This is a FLOOR we impose on every receiver -- a receiver plays out
+// at max(this, its own setting) -- so it decides how low the link can go.
+//
+// Measured on the bench at this value, from the receivers' own 0x8003 heartbeat
+// reports: A16R peak 0.00 ms, AM2 peak 0.23 ms, nothing exceeding its setting.
+// Our transmit side has far more margin than that -- tools/ts_lag.py against the
+// PTP timeline puts us 8 samples EARLY with a 2.3-sample spread, inside even a
+// 0.25 ms budget, and a RedNet A16R transmitting alongside us measures +12.5.
+//
+// THE COST: a packet cannot exist until fpp samples after its own timestamp, so
+// fpp/48000 is a hard floor per flow. Dante Virtual Soundcard demands fpp=60 =
+// 1.25 ms and therefore CANNOT be served at 0.5 ms -- it will be told it may
+// buffer less than our packets can possibly arrive in, and will drop silently.
+// That trade is deliberate: N-Series to a Brooklyn-3 console is the common path
+// and those do 0.25/0.5, while N-Series to DVS is rare. Raise this to 2000000
+// if DVS matters more on a given system -- Dante Controller can set it live
+// (ARC 0x1101), or tools/stats.py opcode 'L' can, with no rebuild.
+uint32_t g_latency_ns = 500000;
 
 static int append_str(char *dst, int pos, int maxlen, const char *s)
 {
