@@ -22,3 +22,9 @@ extern dante_arc_stats_t g_arc_stats;
 
 // Patch an inline key in the 0x1100 property table (latency-capability probing).
 int dante_arc_patch_1100(uint16_t key, uint16_t val);
+
+// 0x1000 capability bytes (latency-list probing).
+extern uint8_t g_dev_flags0;
+extern uint8_t g_dev_flags2;
+extern uint16_t g_router_vers;
+extern uint16_t g_arcp_vers;

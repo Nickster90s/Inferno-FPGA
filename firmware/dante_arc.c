@@ -245,6 +245,12 @@ uint8_t g_arc_mirror_ip[4];
 
 // Patch one inline (key, value) in the 0x1100 property table.
 // Layout: u16 header (flags<<8 | count), then count x (u16 key, u16 value).
+// 0x1000 capability bytes; see the OP_CHANNELS_AND_FLOWS_COUNT case.
+uint16_t g_router_vers = 0x0404;      // 4.4.0, matching our mDNS router_vers
+uint16_t g_arcp_vers   = 0x280c;      // 2.8.12 -- the A16R's; ours advertises 2.8.9
+uint8_t g_dev_flags0 = 0x00;
+uint8_t g_dev_flags2 = (1u << 4) | (1u << 5);
+
 static int arc_1100_patch(uint16_t key, uint16_t val)
 {
     if (key & 0x8000) return -1;                  // offset key -- never patch
@@ -308,8 +314,22 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         // The response DC uses to size everything else.
         // flags2 is an LSB-first bitfield: bit4 = supports_tx_channel_rename,
         // bit5 = supports_tx_multicast. We claim both.
-        dante_msg_u8 (&m, 0);                              // unknown1_0
-        dante_msg_u8 (&m, (1u << 4) | (1u << 5));          // flags2
+        // THE FIRST TWO BYTES ARE A CAPABILITY WORD, and ours claimed almost
+        // nothing. Read off the bench with tools/arc_query.py:
+        //
+        //     A16R (offers 0.25/0.5)   0x0F 0xF9
+        //     AM2  (offers 1/2/5)      0x0D 0xF9
+        //     ours                     0x00 0x30
+        //
+        // Both real devices set flags2 = 0xF9; we set only bits 4 and 5. And
+        // the two differ from each other in byte0 by exactly ONE bit -- 0x02 --
+        // present on the device that offers the low latencies. That is the best
+        // candidate for the capability gating Controller's latency list.
+        //
+        // Runtime-settable (opcode 'G') so the hypothesis can be tested against
+        // Controller in seconds rather than one firmware push per guess.
+        dante_msg_u8 (&m, g_dev_flags0);                   // unknown1_0
+        dante_msg_u8 (&m, g_dev_flags2);                   // flags2
         dante_msg_u16(&m, DANTE_TX_CHANNELS);
         dante_msg_u16(&m, DANTE_RX_CHANNELS);
         dante_msg_u16(&m, 4);                              // unknown2_4
@@ -330,21 +350,68 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         break;
 
     case OP_GET_DEVICE_NAMES: {
-        // 38-byte header of offsets, then the strings it points at.
+        // REWRITTEN to the layout real Dante devices actually emit.
+        //
+        // The previous version followed inferno's proto_arc.rs
+        // get_device_names::ResponseHeader: a 38-byte header with the name
+        // offsets at +12/+14/+16. Neither RedNet on this bench does that. Both
+        // an A16R (Brooklyn-3) and an AM2 (UltimoX2) return a byte-identical
+        // structure, differing only in their strings and version numbers, and
+        // it does not match inferno's:
+        //
+        //   +0   0x001c        +18  0x0500        +34  router_vers (0x0404)
+        //   +2   0x001c        +20  friendly      +38  arcp_vers   (0x280c)
+        //   +4   0x0028        +22  factory       +40  0x0204
+        //   +6   board str     +24  friendly      +42  0x1200
+        //   +8   revision str  +30  0x0a0a        +44  0x1004
+        //
+        //   48-byte header, 2 pad bytes, then FIXED 32-byte name fields:
+        //     friendly @ +50, factory @ +82, then board and revision inline.
+        //   A16R total = 48 + 2 + 32 + 32 + 13 + 5 = 132 bytes. Exact.
+        //
+        // The version fields decode against those devices' own mDNS records,
+        // which is what confirms the mapping rather than assuming it:
+        //   AM2  0x0403 / 0x2809 = router 4.3.0, arcp 2.8.9   (mDNS agrees)
+        //   A16R 0x0404 / 0x280c = router 4.4.0, arcp 2.8.12  (mDNS agrees)
+        //
+        // WHY THIS MATTERS: with the 0x1000 capability word claiming low-latency
+        // support, Dante Controller starts asking for latency detail and parses
+        // THIS reply. Against our old 95-byte format it failed with "Cannot
+        // retrieve Device Latency", which is how the format mismatch was found.
         uint32_t head = m.len;
-        dante_msg_zeros(&m, 38);
-        uint16_t friendly = dante_msg_str(&m, g_dante.name);
-        uint16_t factory  = dante_msg_str(&m, g_dante.hostname);
+        dante_msg_zeros(&m, 48);
+        dante_msg_zeros(&m, 2);                       // pad, as both devices send
+
+        uint16_t friendly = (uint16_t)m.len;          // fixed 32-byte field
+        dante_msg_bytes(&m, g_dante.name, strnlen(g_dante.name, 31));
+        dante_msg_zeros(&m, 32 - strnlen(g_dante.name, 31));
+
+        uint16_t factory = (uint16_t)m.len;           // fixed 32-byte field
+        dante_msg_bytes(&m, g_dante.hostname, strnlen(g_dante.hostname, 31));
+        dante_msg_zeros(&m, 32 - strnlen(g_dante.hostname, 31));
+
         uint16_t board    = dante_msg_str(&m, "InfernoFPGA");
         uint16_t revision = dante_msg_str(&m, ":705");
-        // Field order per proto_arc.rs get_device_names::ResponseHeader.
+
+        put_u16_at(m.buf, head +  0, 0x001c);
+        put_u16_at(m.buf, head +  2, 0x001c);
+        put_u16_at(m.buf, head +  4, 0x0028);
         put_u16_at(m.buf, head +  6, board);
         put_u16_at(m.buf, head +  8, revision);
-        put_u16_at(m.buf, head + 12, friendly);
-        put_u16_at(m.buf, head + 14, factory);
-        put_u16_at(m.buf, head + 16, friendly);
-        put_u16_at(m.buf, head + 30, 0x2729);              // start_code
-        put_u16_at(m.buf, head + 34, 0x1102);              // unknown_opcode_1102
+        put_u16_at(m.buf, head + 18, 0x0500);
+        put_u16_at(m.buf, head + 20, friendly);
+        put_u16_at(m.buf, head + 22, factory);
+        put_u16_at(m.buf, head + 24, friendly);
+        put_u16_at(m.buf, head + 30, 0x0a0a);
+        // Runtime-settable (opcode 'V'): the two devices differ here as well as
+        // in the capability word, and 2.8.12-vs-2.8.9 is a live candidate for
+        // what actually gates the latency list. Being able to try it without a
+        // firmware push is the difference between minutes and an hour.
+        put_u16_at(m.buf, head + 34, g_router_vers);
+        put_u16_at(m.buf, head + 38, g_arcp_vers);
+        put_u16_at(m.buf, head + 40, 0x0204);
+        put_u16_at(m.buf, head + 42, 0x1200);
+        put_u16_at(m.buf, head + 44, 0x1004);
         break;
     }
 
@@ -736,6 +803,14 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
 
     case 0x4100:
         code = 0x30;
+        break;
+
+    // Dante Controller asks this once per Device View open. Both a RedNet A16R
+    // and an AM2 answer OK with two zero bytes; we answered 0x22 unsupported.
+    // Identical on both devices, so it does NOT gate the latency list -- but a
+    // rejection Controller did not expect is worth not sending.
+    case 0x2032:
+        dante_msg_u16(&m, 0);
         break;
 
     // DANTE CONTROLLER'S LATENCY SET. Found by mirroring ARC requests to a

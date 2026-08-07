@@ -276,6 +276,31 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     // 'A' alone         -> report the current collector.
     // 'K' + u16 key + u16 value -> patch the 0x1100 property table in RAM.
     // Finds which capability key gates Dante Controller's latency list.
+    // 'G' + u8 flags0 + u8 flags2 -> patch the 0x1000 capability word.
+    // 'V' + u16 router_vers + u16 arcp_vers -> patch the 0x1003 version fields.
+    if (len >= 5 && req[0] == 'V') {
+        g_router_vers = (uint16_t)((req[1] << 8) | req[2]);
+        g_arcp_vers   = (uint16_t)((req[3] << 8) | req[4]);
+        printf("[arc] vers router=%04x arcp=%04x\n", g_router_vers, g_arcp_vers);
+        uint8_t *pv = net_udp_payload_buf();
+        uint32_t nv = 0;
+        put32(pv, nv, 0x56455231u); nv += 4;               // 'VER1'
+        net_udp_commit(src_ip, src_port, STATS_PORT, nv, NET_TOS_BEST_EFFORT);
+        return;
+    }
+
+    if (len >= 3 && req[0] == 'G') {
+        g_dev_flags0 = req[1];
+        g_dev_flags2 = req[2];
+        printf("[arc] 1000 caps = %02x %02x\n", g_dev_flags0, g_dev_flags2);
+        uint8_t *pg = net_udp_payload_buf();
+        uint32_t ng = 0;
+        put32(pg, ng, 0x43415031u); ng += 4;               // 'CAP1'
+        pg[ng++] = g_dev_flags0; pg[ng++] = g_dev_flags2;
+        net_udp_commit(src_ip, src_port, STATS_PORT, ng, NET_TOS_BEST_EFFORT);
+        return;
+    }
+
     if (len >= 5 && req[0] == 'K') {
         uint16_t k = (uint16_t)((req[1] << 8) | req[2]);
         uint16_t v = (uint16_t)((req[3] << 8) | req[4]);

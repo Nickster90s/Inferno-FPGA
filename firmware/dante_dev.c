@@ -23,7 +23,7 @@ dante_dev_t g_dante;
 // and those do 0.25/0.5, while N-Series to DVS is rare. Raise this to 2000000
 // if DVS matters more on a given system -- Dante Controller can set it live
 // (ARC 0x1101), or tools/stats.py opcode 'L' can, with no rebuild.
-uint32_t g_latency_ns = 500000;
+uint32_t g_latency_ns = 1000000;
 
 static int append_str(char *dst, int pos, int maxlen, const char *s)
 {
