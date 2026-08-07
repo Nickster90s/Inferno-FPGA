@@ -39,3 +39,4 @@ firmware/*.img
 build_seed*/
 tools/seed_sweep_logs/
 tools/seed_sweep_results.txt
+firmware/loader/.build.lock
