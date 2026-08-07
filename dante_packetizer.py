@@ -940,31 +940,26 @@ class DantePacketizer(LiteXModule):
         #
         # One RAMB18 replaces the mux. The read is registered, so STREAM prefetches
         # the next word rather than reading combinationally -- see rd_idx handling.
-        # BACK TO 128 WORDS -- the configuration that ran clean overnight.
+        # SIZED FOR THE WORST CASE, rounded to a power of two.
         #
-        # 128 is too small for 4 slots at fpp=60 (193 words), and that IS why
-        # DVS unicast never worked. But both attempts to enlarge it made things
-        # worse, not better:
+        # 128 words holds 512 bytes. The largest packet is now 8 slots at
+        # fpp=60 = 1491 bytes = 373 words, and 4 slots at fpp=60 -- exactly what
+        # Dante Virtual Soundcard negotiates -- is 771 bytes = 193 words. With
+        # 128 that context binds, packet_count rises at the correct rate, and
+        # NOTHING reaches the wire. That is why DVS unicast never worked while
+        # every multicast test passed: the debug bundle was 2 slots (103 words)
+        # and could not reach the failing case.
         #
-        #   Memory(32, 373)  -- N_WORDS exactly, not a power of two. Built clean,
-        #                       same BRAM count, all four clock criteria passed,
-        #                       and transmitted NOTHING at any size.
-        #   Memory(32, 512)  -- power of two. 2 slots at fpp=60 transmits, 4
-        #                       slots still does not, and the receivers then
-        #                       stopped refreshing entirely ("Receiver setup
-        #                       failed" on an AM2 that had been clean).
+        # Rounded up to 512: Memory(32, 373) built clean, placed in the same
+        # BRAM count, passed every clock criterion and transmitted nothing at
+        # any size. 128 had been a power of two and 373 is not.
         #
-        # So the buffer is a necessary but not sufficient part of the fpp=60
-        # 4-slot fix, and enlarging it alone destabilises something else between
-        # source.ready and the PHY. Reverting to the known-good size until that
-        # is understood, because a bench that works at fpp<=16 beats one that
-        # works nowhere.
-        #
-        # Whoever resumes: packet_count is NOT a transmit check -- it counts
-        # (source.last & source.ready) and reported 4601 pps, exactly right,
-        # while nothing reached the wire. Verify with a capture, and only via a
-        # MULTICAST flow, since unicast is not flooded to the capture port.
-        frame_mem = Memory(32, 128)
+        # A first attempt at 512 was judged a failure, but it was tested on a
+        # seed with a 13% USB ingress leak (see tools/seed_sweep.sh) which
+        # produces starved audio indistinguishable from a broken packetizer.
+        # Retested here with the seed chosen on MEASURED USB quality, not Fmax.
+        FRAME_WORDS = 1 << max(1, ((TOTAL + 3) // 4 - 1).bit_length())
+        frame_mem = Memory(32, FRAME_WORDS)
         frame_wp  = frame_mem.get_port(write_capable=True)
         frame_rp  = frame_mem.get_port(async_read=False)
         self.specials += frame_mem, frame_wp, frame_rp
