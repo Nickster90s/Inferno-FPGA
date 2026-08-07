@@ -280,8 +280,8 @@ static uint32_t build_txt_arc(uint8_t *p)
     n = txt_put(p, n, "arcp_vers=2.8.9");
     n = txt_put(p, n, "arcp_min=0.2.4");
     n = txt_put(p, n, "router_vers=4.4.0");
-    n = txt_put(p, n, "router_info=InfernoFPGA");
-    n = txt_put(p, n, "mf=Inferno");
+    n = txt_put(p, n, "router_info=N-Series AOIP");   // "Dante Model" in DC
+    n = txt_put(p, n, "mf=N-Series");
     n = txt_put(p, n, "model=_00000000000000ff");
     return n;
 }
@@ -320,7 +320,7 @@ static uint32_t build_txt_cmc(uint8_t *p)
     // that: a constant copied from working hardware beats a guess that parses
     // into something no device would say.
     n = txt_put(p, n, "channels=0x6000004d");
-    n = txt_put(p, n, "mf=Inferno");
+    n = txt_put(p, n, "mf=N-Series");
     n = txt_put(p, n, "model=_00000000000000ff");
     return n;
 }

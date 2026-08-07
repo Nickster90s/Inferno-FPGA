@@ -359,12 +359,20 @@ static void send_device_info(const uint8_t *dst_ip, uint16_t dst_port)
     c[0xbb] = 0x1f;
 
     // Board name at 12 (8 bytes) and again at 0x38 (16 bytes).
-    // put_fixed is defined below; forward-declared at the top of the file.
-    // Same names as send_product_info, kept in step so DC never sees two
-    // different models for one device. Lengths are the FIELD widths (8 and 16),
-    // and put_fixed zero-pads, which the raw memcpys here did not.
-    put_fixed(c, 12,   8,  "NSerUSB");
-    put_fixed(c, 0x38, 16, "N-Series USB 48");
+    //
+    // THIS IS "Dante Model" IN CONTROLLER -- a DIFFERENT field from the "Model
+    // Name" that send_product_info writes at 0xac. An older comment here said
+    // the two were "kept in step so DC never sees two different models for one
+    // device"; that was wrong, and it hid the distinction because both records
+    // happened to carry the same string. Setting them to one value made
+    // Controller show Model Name and Dante Model identically, which is what
+    // exposed it.
+    //
+    // Lengths are the FIELD widths (8 and 16), and put_fixed zero-pads without
+    // reserving a terminator -- a string of exactly `width` characters runs
+    // into the next field, so the 8-byte code stays at 7.
+    put_fixed(c, 12,   8,  "NSerAOI");
+    put_fixed(c, 0x38, 16, "N-Series AOIP");
 
     n += 200;
     put_u16(p, 2, (uint16_t)n);
@@ -403,8 +411,12 @@ static void send_product_info(const uint8_t *dst_ip, uint16_t dst_port)
     uint8_t *c = p + n;
     memset(c, 0, 336);
 
-    put_fixed(c, 0x00, 8,  "Inferno");
-    put_fixed(c, 0x08, 8,  "NSerUSB");   // 8-byte field, short model code
+    // 8-BYTE FIELDS, and put_fixed() does NOT reserve a terminator: a string of
+    // exactly `width` chars fills the field with no NUL and runs into the next
+    // one. "N-Series" is exactly 8, so the short codes stay <= 7 chars and the
+    // full names go in the 16-byte fields below.
+    put_fixed(c, 0x00, 8,  "NSeries");
+    put_fixed(c, 0x08, 8,  "USBSwtc");   // 8-byte field, short model code
     // Product Version, the column Dante Controller shows next to Model Name.
     // 4 bytes. The render is INFERRED, not confirmed: DVS shows 4.5.1.1 (four
     // components) and the AM2 shows 0.0.1 (three), which fits DC dropping a
@@ -416,11 +428,11 @@ static void send_product_info(const uint8_t *dst_ip, uint16_t dst_port)
     // something beyond the raw bytes gates it; if this still shows blank, that
     // is the thing to chase rather than the value.
     c[0x1c] = 0; c[0x1d] = 0; c[0x1e] = 1; c[0x1f] = 0;      // product 0.1.0
-    put_fixed(c, 0x2c, 16, "Inferno");
+    put_fixed(c, 0x2c, 16, "N-Series");        // Manufacturer, as DC shows it
     // Model Name as Dante Controller displays it. 16-byte FIXED field, so the
     // string must be <= 16 characters -- "N-Series USB 48" is 15 and fits;
     // "N-Series USB 48CH" would be 17 and would silently truncate.
-    put_fixed(c, 0xac, 16, "N-Series USB 48");
+    put_fixed(c, 0xac, 16, "USB Switchover");  // 14 chars, fits the 16-byte field
 
     n += 336;
     put_u16(p, 2, (uint16_t)n);

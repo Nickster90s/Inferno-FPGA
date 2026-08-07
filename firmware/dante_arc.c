@@ -455,7 +455,7 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         dante_msg_bytes(&m, g_dante.hostname, strnlen(g_dante.hostname, 31));
         dante_msg_zeros(&m, 32 - strnlen(g_dante.hostname, 31));
 
-        uint16_t board    = dante_msg_str(&m, "InfernoFPGA");
+        uint16_t board    = dante_msg_str(&m, "N-Series AOIP");
         uint16_t revision = dante_msg_str(&m, ":705");
 
         put_u16_at(m.buf, head +  0, 0x001c);
