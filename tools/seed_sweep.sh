@@ -15,6 +15,23 @@
 # Each seed builds into its own output dir so builds don't collide. Results land
 # in tools/seed_sweep_results.txt, sorted best-first.
 #
+# FMAX IS NOT ENOUGH -- CONFIRM USB ON HARDWARE. Measured 2026-08-07, same
+# netlist and firmware, three seeds:
+#
+#     seed 4   USB leak +0.04%   shortfall -0.00%   underrun    0/s
+#     seed 6   USB leak +0.01%   shortfall -0.00%   underrun    0/s
+#     seed 5   USB leak +13.06%  shortfall +10.84%  underrun 5200/s
+#
+# Seed 5 passed every criterion below AND had the highest sys Fmax (65.68), so
+# picking on Fmax chose the WORST seed. The ingress loss shows as a starved ring
+# and gritty audio, and looks exactly like a firmware or design regression.
+#
+# After choosing a PASS seed, flash it and read the USB counters over UDP:
+#     tools/stats.py ... opcode 'u'  -> rx_beats, ep_out
+# leak = (rx_beats - ep_out)/rx_beats must be < 1%, and ep_out must be within
+# ~0.1% of channels*rate*4 bytes/s (9,216,000 for 48ch @ 48k). If it is not,
+# try the next PASS seed -- it is placement, not code.
+#
 # REQUIREMENTS TO PASS (all must hold):
 #   sys_clk    >= 55 MHz   (target 50; below 55 is a build-reject -- sub-50
 #                           setup violations have silently corrupted audio)

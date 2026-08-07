@@ -940,28 +940,31 @@ class DantePacketizer(LiteXModule):
         #
         # One RAMB18 replaces the mux. The read is registered, so STREAM prefetches
         # the next word rather than reading combinationally -- see rd_idx handling.
-        # SIZED FROM N_WORDS, not hardcoded. This was Memory(32, 128), which
-        # was ample while the largest packet was 8 slots at fpp=16 (435 bytes =
-        # 109 words). With fpp=60 in the table the worst case is 1491 bytes =
-        # 373 words, and PAY_LEN/TOTAL were resized for that while THIS was not.
+        # BACK TO 128 WORDS -- the configuration that ran clean overnight.
         #
-        # The failure mode is silent and total: the context binds, the FSM runs,
-        # and nothing reaches the wire. Measured -- a 4-slot fpp=60 multicast
-        # (192 words) bound and transmitted NOTHING, while a 2-slot fpp=60
-        # bundle (102 words) was byte-perfect. 4 slots at fpp=60 is exactly what
-        # DVS negotiates on unicast, which is why that one case never worked
-        # while every fpp=60 test through a 2-slot multicast passed.
-        # ROUNDED UP TO A POWER OF TWO. Memory(32, 373) -- N_WORDS exactly --
-        # built cleanly and placed within the same BRAM count, but transmitted
-        # NOTHING: packet_count kept incrementing at the right rate while not a
-        # single port-4321 frame left the MAC. 128 had been a power of two and
-        # 373 is not, which changes how the depth is inferred.
+        # 128 is too small for 4 slots at fpp=60 (193 words), and that IS why
+        # DVS unicast never worked. But both attempts to enlarge it made things
+        # worse, not better:
         #
-        # Round up instead. The address signals are already sized from
-        # Signal(max=...) so nothing else needs to change, and the cost is
-        # 512 vs 373 words of a buffer that is one BRAM either way.
-        FRAME_WORDS = 1 << max(1, (N_WORDS - 1).bit_length())
-        frame_mem = Memory(32, FRAME_WORDS)
+        #   Memory(32, 373)  -- N_WORDS exactly, not a power of two. Built clean,
+        #                       same BRAM count, all four clock criteria passed,
+        #                       and transmitted NOTHING at any size.
+        #   Memory(32, 512)  -- power of two. 2 slots at fpp=60 transmits, 4
+        #                       slots still does not, and the receivers then
+        #                       stopped refreshing entirely ("Receiver setup
+        #                       failed" on an AM2 that had been clean).
+        #
+        # So the buffer is a necessary but not sufficient part of the fpp=60
+        # 4-slot fix, and enlarging it alone destabilises something else between
+        # source.ready and the PHY. Reverting to the known-good size until that
+        # is understood, because a bench that works at fpp<=16 beats one that
+        # works nowhere.
+        #
+        # Whoever resumes: packet_count is NOT a transmit check -- it counts
+        # (source.last & source.ready) and reported 4601 pps, exactly right,
+        # while nothing reached the wire. Verify with a capture, and only via a
+        # MULTICAST flow, since unicast is not flooded to the capture port.
+        frame_mem = Memory(32, 128)
         frame_wp  = frame_mem.get_port(write_capable=True)
         frame_rp  = frame_mem.get_port(async_read=False)
         self.specials += frame_mem, frame_wp, frame_rp
