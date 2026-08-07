@@ -371,8 +371,8 @@ static void send_device_info(const uint8_t *dst_ip, uint16_t dst_port)
     // Lengths are the FIELD widths (8 and 16), and put_fixed zero-pads without
     // reserving a terminator -- a string of exactly `width` characters runs
     // into the next field, so the 8-byte code stays at 7.
-    put_fixed(c, 12,   8,  "NSerAOI");
-    put_fixed(c, 0x38, 16, "N-Series AOIP");
+    put_fixed(c, 12,   8,  "NSerAoI");
+    put_fixed(c, 0x38, 16, "N-Series AoIP");
 
     n += 200;
     put_u16(p, 2, (uint16_t)n);

@@ -280,7 +280,7 @@ static uint32_t build_txt_arc(uint8_t *p)
     n = txt_put(p, n, "arcp_vers=2.8.9");
     n = txt_put(p, n, "arcp_min=0.2.4");
     n = txt_put(p, n, "router_vers=4.4.0");
-    n = txt_put(p, n, "router_info=N-Series AOIP");   // "Dante Model" in DC
+    n = txt_put(p, n, "router_info=N-Series AoIP");   // "Dante Model" in DC
     n = txt_put(p, n, "mf=N-Series");
     n = txt_put(p, n, "model=_00000000000000ff");
     return n;
