@@ -6,6 +6,11 @@
 
 dante_dev_t g_dante;
 
+// Default 2 ms: the value the chan record already advertised, chosen to cover
+// fpp=60. Starting from the LOWER (1 ms) bundle value would have quietly told
+// every receiver it may buffer less than a DVS flow can possibly arrive in.
+uint32_t g_latency_ns = 2000000;
+
 static int append_str(char *dst, int pos, int maxlen, const char *s)
 {
     while (*s && pos < maxlen - 1) dst[pos++] = *s++;

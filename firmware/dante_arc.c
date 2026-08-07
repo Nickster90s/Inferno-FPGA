@@ -13,6 +13,7 @@
 #include "dante_msg.h"
 #include "dante_tx.h"
 #include "dante_dev.h"
+#include "mdns.h"
 #include "net.h"
 #include <string.h>
 #include <stdio.h>
@@ -205,6 +206,21 @@ static inline void put_u16_at(uint8_t *p, uint32_t off, uint16_t v)
 // Opcode handlers
 // ---------------------------------------------------------------------------
 
+// ARC REQUEST MIRROR -- forward every request we receive to a collector over
+// UDP, so what Dante Controller sends can be read off a machine that is not in
+// the unicast path.
+//
+// The console CANNOT do this job. Its output is dropped under load: a printf in
+// the 'L' handler never appeared even though the opcode demonstrably ran and
+// returned the right value, while [flow] lines from the same network path came
+// through. A diagnostic that silently loses the one line you need is worse than
+// none. The unhandled-opcode logger also fires once per boot, so anything DC
+// sent before the capture started is invisible.
+//
+// Off unless a collector is set (tools/stats.py opcode 'A'), so it costs one
+// compare per request in normal operation.
+uint8_t g_arc_mirror_ip[4];
+
 static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
                    uint16_t src_port, const uint8_t *req, uint32_t len)
 {
@@ -224,6 +240,14 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     // few bytes we need on the stack.
     uint8_t hdr[DANTE_HDR_LEN];
     memcpy(hdr, req, DANTE_HDR_LEN);
+
+    // Stash for the mirror BEFORE building into net_udp_payload_buf(). `req`
+    // must not be read after the reply is committed.
+    uint8_t  mir[96];
+    uint32_t mirn = len > sizeof(mir) ? sizeof(mir) : len;
+    int      do_mirror = (g_arc_mirror_ip[0] | g_arc_mirror_ip[1] |
+                          g_arc_mirror_ip[2] | g_arc_mirror_ip[3]) != 0;
+    if (do_mirror) memcpy(mir, req, mirn);
 
     uint8_t   *buf = net_udp_payload_buf();
     dante_msg_t m;
@@ -457,7 +481,7 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
             dante_msg_u16(&m, local_flow_name_off);
             // For a multicast flow the first 4 bytes of this trailing field are
             // the latency in ns; the bundle record advertises 1 ms, so match it.
-            dante_msg_u32(&m, 1000000);
+            dante_msg_u32(&m, g_latency_ns);
             dante_msg_u32(&m, 0);
 
             uint16_t descr_off = (uint16_t)m.len;
@@ -666,6 +690,51 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         code = 0x30;
         break;
 
+    // DANTE CONTROLLER'S LATENCY SET. Found by mirroring ARC requests to a
+    // collector while an operator used the Latency tab -- it is not in inferno,
+    // which never implemented it, so there was nothing to read it off.
+    //
+    // Two captures, the two values clicked, nothing else in the message
+    // changing:
+    //   ...0000 0000 0000 0000 004c4b40 004c4b40   5 ms  (0x4C4B40 = 5000000)
+    //   ...0000 0000 0000 0000 001e8480 001e8480   2 ms  (0x1E8480 = 2000000)
+    //
+    // Content layout (30 bytes): seven u16 whose meaning we do not know, then
+    // two zero u32, then the latency in NANOSECONDS twice. Both copies have
+    // always been equal; require that rather than guessing which one leads, so
+    // a message we have misread is rejected instead of silently applied.
+    //
+    // Answering 0x22 here is why the setting would not stick: Controller sent
+    // the value, we said "unsupported", and it fell back to showing 1.0 ms.
+    case 0x1101: {
+        if (clen < 30) { code = 0x22; break; }
+        uint32_t v1 = ((uint32_t)content[22] << 24) | ((uint32_t)content[23] << 16) |
+                      ((uint32_t)content[24] << 8)  |  (uint32_t)content[25];
+        uint32_t v2 = ((uint32_t)content[26] << 24) | ((uint32_t)content[27] << 16) |
+                      ((uint32_t)content[28] << 8)  |  (uint32_t)content[29];
+        if (v1 != v2 || v1 < 100000u || v1 > 40000000u) {
+            printf("[arc] 1101 latency rejected: %lu / %lu\n",
+                   (unsigned long)v1, (unsigned long)v2);
+            code = 0x22;
+            break;
+        }
+        int changed = (v1 != g_latency_ns);
+        g_latency_ns = v1;
+        mdns_announce();          // republish so receivers see the new value
+        // Only renegotiate on a REAL change. Controller re-sends the current
+        // latency whenever the Latency tab is opened, and tearing flows down
+        // for that would be an unexplained dropout every time someone looked.
+        if (changed) dante_tx_drop_all();
+        printf("[arc] latency set to %lu ns (%lu.%02lu ms)\n",
+               (unsigned long)v1, (unsigned long)(v1 / 1000000u),
+               (unsigned long)((v1 / 10000u) % 100u));
+        // Echo the content back. We do not know what Controller expects, but
+        // echoing the request is the common pattern in this protocol and is
+        // strictly more informative than an empty OK.
+        dante_msg_bytes(&m, content, clen);
+        break;
+    }
+
     default:
         // Answer anyway. The previous "silence beats a wrong answer" here was
         // the wrong instinct for this protocol: every real device replies to
@@ -689,9 +758,19 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         uint64_t bit = 1ULL << (opcode & 63);
         int first_time = !(seen_opcodes & bit);
         seen_opcodes |= bit;
-        if (first_time)
+        if (first_time) {
             printf("[arc] unhandled opcode %#06x from %u.%u.%u.%u (answering 0x22)\n",
                    opcode, src_ip[0], src_ip[1], src_ip[2], src_ip[3]);
+            // DUMP THE BODY, not just the opcode number. Knowing that Dante
+            // Controller asked something is useless for implementing it; the
+            // payload is where the requested value lives -- e.g. a latency
+            // selection. Capped at 48 bytes so a chatty poller cannot flood the
+            // console (the UART is 1 Mbaud and the main loop shares it).
+            uint32_t dn = len > 48 ? 48 : len;
+            printf("[arc]   body[%lu]:", (unsigned long)len);
+            for (uint32_t i = 0; i < dn; i++) printf(" %02x", req[i]);
+            printf("\n");
+        }
         code = 0x22;
         break;
     }
@@ -700,6 +779,20 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     if (net_udp_commit(src_ip, src_port, DANTE_PORT_ARC, total,
                        NET_TOS_BEST_EFFORT) == 0)
         g_arc_stats.tx++;
+
+    // Mirror AFTER the reply: both share net_udp_payload_buf(), and answering
+    // Dante Controller matters more than the diagnostic.
+    if (do_mirror) {
+        uint8_t *mp = net_udp_payload_buf();
+        uint32_t n  = 0;
+        mp[n++] = 'A'; mp[n++] = 'R'; mp[n++] = 'C'; mp[n++] = '1';
+        mp[n++] = (uint8_t)(code >> 8); mp[n++] = (uint8_t)code;
+        mp[n++] = src_ip[0]; mp[n++] = src_ip[1];
+        mp[n++] = src_ip[2]; mp[n++] = src_ip[3];
+        for (uint32_t i = 0; i < mirn; i++) mp[n++] = mir[i];
+        net_udp_commit(g_arc_mirror_ip, 7780, DANTE_PORT_ARC, n,
+                       NET_TOS_BEST_EFFORT);
+    }
 }
 
 void dante_arc_init(void)

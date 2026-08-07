@@ -510,7 +510,7 @@ static uint32_t build_txt_chan(uint8_t *p, unsigned ch1)
     //
     // 2 ms covers fpp=60 with margin for network transit. inferno flags its own
     // use of this field with "FIXME should be tx latency"; this is that.
-    n = txt_put(p, n, "latency_ns=2000000");
+    n = txt_put_kv_u(p, n, "latency_ns=", g_latency_ns);
     // fpp=<MAX>,<MIN>, per inferno mdns_server.rs:120
     // (format!("fpp={},{}", FPP_MAX_ADVERTISED, FPP_MIN) = 32,2).
     //
@@ -596,7 +596,10 @@ static uint32_t build_txt_bund(uint8_t *p, unsigned b1)
     n = txt_put(p, n, "txtvers=1");
     n = txt_put_kv_u(p, n, "id=", b1);
     n = txt_put_kv_u(p, n, "nchan=", ns);
-    n = txt_put(p, n, "latency_ns=1000000");
+    // SAME variable as the chan record. These two disagreed (2 ms vs 1 ms) and
+    // Dante Controller reads THIS one, which is why the offered latency choices
+    // started at 1 ms while the chan record claimed 2.
+    n = txt_put_kv_u(p, n, "latency_ns=", g_latency_ns);
     // GENERATED FROM THE SAME VARIABLE THE PACKETIZER USES. This was hardcoded
     // "fpp=16" while dante_tx bound the context from g_mcast_fpp, so the two
     // could disagree -- and did: a debug sweep left the transmit fpp at 60 while

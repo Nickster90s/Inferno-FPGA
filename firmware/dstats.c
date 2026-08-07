@@ -9,6 +9,7 @@
 
 #include "net.h"
 #include "dante_dev.h"
+#include "mdns.h"
 extern uint32_t usb_fb_manual;
 extern uint16_t g_mcast_fpp;
 extern uint32_t g_phase_adj;
@@ -260,6 +261,54 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         put32(p6, n6, 0x4D434131u); n6 += 4;              // 'MCA1'
         put32(p6, n6, g_mcast_fpp); n6 += 4;
         net_udp_commit(src_ip, src_port, STATS_PORT, n6, NET_TOS_BEST_EFFORT);
+        return;
+    }
+
+    // 'L'            -> report advertised latency_ns
+    // 'L' + u32 BE   -> set it and re-announce mDNS
+    //
+    // Runtime-settable so a latency target can be tried and REVERTED in seconds
+    // without a firmware push, which matters because advertising too little is
+    // a SILENT failure: receivers drop packets that miss the playout deadline
+    // and every transmit-side counter stays green.
+    // 'A' + 4 bytes IP -> mirror every ARC request to that host on port 7780.
+    // 'A' alone         -> report the current collector.
+    if (len >= 1 && req[0] == 'A') {
+        if (len >= 5) {
+            for (int i = 0; i < 4; i++) g_arc_mirror_ip[i] = req[1 + i];
+            printf("[arc] mirror -> %u.%u.%u.%u:7780\n",
+                   g_arc_mirror_ip[0], g_arc_mirror_ip[1],
+                   g_arc_mirror_ip[2], g_arc_mirror_ip[3]);
+        }
+        uint8_t *pa = net_udp_payload_buf();
+        uint32_t na = 0;
+        put32(pa, na, 0x4d495231u); na += 4;            // 'MIR1'
+        for (int i = 0; i < 4; i++) pa[na++] = g_arc_mirror_ip[i];
+        net_udp_commit(src_ip, src_port, STATS_PORT, na, NET_TOS_BEST_EFFORT);
+        return;
+    }
+
+    if (len >= 1 && req[0] == 'L') {
+        if (len >= 5) {
+            uint32_t v = ((uint32_t)req[1] << 24) | ((uint32_t)req[2] << 16) |
+                         ((uint32_t)req[3] << 8)  |  (uint32_t)req[4];
+            // Floor at one packet window for the largest fpp we ACCEPT (60 =
+            // 1.25 ms), not the largest we advertise (8). Those differ, and the
+            // accepted one is what can actually be on the wire.
+            if (v >= 100000u && v <= 40000000u) {
+                g_latency_ns = v;
+                mdns_announce();
+                printf("[lat] latency_ns = %lu\n", (unsigned long)v);
+            } else {
+                printf("[lat] rejected %lu (range 100000..40000000)\n",
+                       (unsigned long)v);
+            }
+        }
+        uint8_t *pl = net_udp_payload_buf();
+        uint32_t nl = 0;
+        put32(pl, nl, 0x4c415431u); nl += 4;            // 'LAT1'
+        put32(pl, nl, g_latency_ns); nl += 4;
+        net_udp_commit(src_ip, src_port, STATS_PORT, nl, NET_TOS_BEST_EFFORT);
         return;
     }
 

@@ -1065,6 +1065,29 @@ int dante_tx_flow_desc(unsigned f, uint8_t ip[4], uint16_t *port,
     return 1;
 }
 
+// Drop every bound flow so receivers renegotiate NOW.
+//
+// A receiver reads our advertised latency when it SETS UP a flow, not while one
+// is running, so changing latency_ns had no effect on live audio until each
+// receiver happened to re-subscribe -- which is the "it changes but it takes a
+// while" this exists to fix. Releasing the contexts makes every receiver
+// re-request on its next keepalive (~5 s observed) and re-read the new value.
+//
+// This DOES interrupt audio briefly. That is inherent: changing latency is a
+// re-buffering event, and a receiver cannot move its playout point without a
+// discontinuity. Real Dante hardware glitches on a latency change too. The
+// caller must therefore only invoke this when the value ACTUALLY changed --
+// Controller re-sends the same latency on every view refresh, and dropping
+// flows for a no-op change would be an unexplained dropout every time an
+// operator opened a tab.
+void dante_tx_drop_all(void)
+{
+    unsigned n = 0;
+    for (unsigned f = 0; f < N_FLOWS; f++)
+        if (flows[f].in_use && dante_tx_unbind(f) == 0) n++;
+    printf("[dtx] dropped %u flow(s) to force renegotiation\n", n);
+}
+
 // Tear a flow down on request (ARC 0x2202). nslots = 0 makes the builder skip
 // the context entirely.
 int dante_tx_unbind(unsigned f)

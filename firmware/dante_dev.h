@@ -52,6 +52,23 @@ typedef struct {
 
 extern dante_dev_t g_dante;
 
+// ADVERTISED RECEIVE LATENCY, nanoseconds -- ONE source of truth.
+//
+// This was hardcoded in three places that had drifted apart: the mDNS chan
+// record said 2 ms, the mDNS bundle record said 1 ms, and the ARC flow
+// descriptor said 1 ms. Dante Controller reads the bundle value, so it showed
+// 1.0 ms while the chan record claimed 2 ms -- a device disagreeing with itself
+// about its own latency, and the reason the selectable choices start at 1 ms.
+//
+// A receiver takes max(this, its own minimum) as playout latency (inferno
+// channels_subscriber.rs:807), so LOWERING this is what makes 0.5 / 0.25 ms
+// offerable -- but it is only safe while every accepted flow's packet window
+// (fpp/48000) fits inside it. fpp=60, which DVS demands, is 1.25 ms on its own.
+extern uint32_t g_latency_ns;
+
+// Collector for the ARC request mirror; all-zero disables it.
+extern uint8_t g_arc_mirror_ip[4];
+
 void dante_dev_init(const uint8_t mac[6]);
 
 // Channel names are generated on demand rather than stored: 48 of them at 32
