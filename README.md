@@ -159,6 +159,7 @@ Two properties are load-bearing and must survive every future change:
 | 4 | `ptpv1.c` — PTPv1 slave | locks to a PTPv1 master | **done** — locks in ~30 s, offset sub-µs |
 | 5 | `dante_packetizer.py` + `dante_tx.c` | audio received by real hardware | **done** — clean audio on the bench |
 | 6 | Hardening / long-run | 24 h, no dropouts | not started |
+| 8 | Persistent settings + RX patch | survives a power cycle | **not started** |
 | 7 | Unicast flows + subscriptions | subscribe from Dante Controller | **done** — per-flow map, slots and fpp |
 
 Discovery deliberately precedes clock and audio: it is firmware-only, needs no
@@ -357,6 +358,28 @@ had the highest clean sys Fmax (63.54) and the LOWEST USB margin (79.62), and
 flashed, the MacBook enumerated the audio device and showed **no outputs at
 all**. Prefer the higher `USB_MHz` when seeds tie, then confirm on hardware --
 see the header of `tools/seed_sweep.sh`.
+
+**Settings and the RX patch do not survive a reboot.** `cfgflash.c` / `config.c`
+already persist a versioned, CRC'd blob in SPI flash — static IP, media-clock
+source, the converged PTP addend and media-clock rate — but three things an
+operator sets are NOT in it, and come back at their compiled defaults:
+
+- **advertised latency** (`g_latency_ns`). Select 0.25 ms in Dante Controller,
+  power cycle, and the device is back at the 1 ms default while Controller still
+  believes it chose 0.25.
+- **device name**, if renamed from Controller.
+- **the RX patch** — `sub_tx_name[]` / `sub_tx_host[]` in `dante_arc.c` are plain
+  statics, so every subscription made into this device is lost.
+
+Latency is trivial to add: `config.h` documents the procedure (new field before
+`reserved`, shrink `reserved` by the same size, bump `CFG_VERSION`) and there are
+55 reserved bytes. The RX patch is the awkward one — `DANTE_RX_CHANNELS` x 2
+name strings will not fit in what is spare, so it needs either a second flash
+region or a larger config record.
+
+Worth doing together with a **write policy**: a setting that is saved on every
+Controller poll would write flash constantly, so saves must be debounced and
+only on actual change.
 
 **Our advertised `latency_ns` is a FLOOR, not a setting — keep it LOW.**
 A receiver plays out at `max(our advertised latency_ns, its own setting)`, so
