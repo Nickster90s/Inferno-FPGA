@@ -951,7 +951,17 @@ class DantePacketizer(LiteXModule):
         # bundle (102 words) was byte-perfect. 4 slots at fpp=60 is exactly what
         # DVS negotiates on unicast, which is why that one case never worked
         # while every fpp=60 test through a 2-slot multicast passed.
-        frame_mem = Memory(32, N_WORDS)
+        # ROUNDED UP TO A POWER OF TWO. Memory(32, 373) -- N_WORDS exactly --
+        # built cleanly and placed within the same BRAM count, but transmitted
+        # NOTHING: packet_count kept incrementing at the right rate while not a
+        # single port-4321 frame left the MAC. 128 had been a power of two and
+        # 373 is not, which changes how the depth is inferred.
+        #
+        # Round up instead. The address signals are already sized from
+        # Signal(max=...) so nothing else needs to change, and the cost is
+        # 512 vs 373 words of a buffer that is one BRAM either way.
+        FRAME_WORDS = 1 << max(1, (N_WORDS - 1).bit_length())
+        frame_mem = Memory(32, FRAME_WORDS)
         frame_wp  = frame_mem.get_port(write_capable=True)
         frame_rp  = frame_mem.get_port(async_read=False)
         self.specials += frame_mem, frame_wp, frame_rp
