@@ -28,3 +28,4 @@ extern uint8_t g_dev_flags0;
 extern uint8_t g_dev_flags2;
 extern uint16_t g_router_vers;
 extern uint16_t g_arcp_vers;
+int dante_arc_patch_1100_u32(uint16_t key, uint32_t val);

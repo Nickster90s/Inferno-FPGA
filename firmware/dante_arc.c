@@ -95,7 +95,28 @@ static void sub_copy(char *dst, const uint8_t *req, uint32_t len, uint16_t off)
 // property values. If it flips DC to v1/Follower it confirms where the clock
 // columns come from, and the next step is to decode the individual keys and
 // report our own values rather than the AM2's.
-// NOT const: patchable at runtime through UDP opcode 'K' (key, value).
+// NOT const: patchable at runtime ('K' inline key, 'B' u32 in the data blob).
+//
+// THE LATENCY CAPABILITY LIVES IN THE DATA BLOB, addressed by the offset keys:
+//
+//     key      A16R        AM2        meaning
+//     0x8204   1,000,000   1,000,000
+//     0x8205     500,000   1,000,000
+//     0x8301     500,000   1,000,000
+//     0x8306     250,000   1,000,000  MINIMUM supported latency
+//     0x8321   2,000,000   2,000,000
+//
+// A16R minimum 0.25 ms -> Dante Controller offers 0.25/0.5/1/2/5.
+// AM2  minimum 1 ms    -> Controller offers 1/2/5.
+//
+// This table is an AM2 replay, so we inherited the AM2's 1 ms minimum and were
+// offered 1/2/5 no matter what else we matched -- the capability word, the
+// 0x1003 layout, the inline keys, the model ID, even the arcp version. Those
+// were all dead ends. 0x8205/0x8301/0x8306 below are now OURS, not the AM2's.
+//
+// Found by sweeping opcodes against BOTH RedNets and searching their replies
+// for the latency values as nanoseconds -- the encoding 0x1101 already uses.
+// 0x1100 was the only opcode whose values tracked what each device offers.
 //
 // This table is a byte-exact replay of a RedNet AM2, and Dante Controller
 // offers us exactly the AM2's latency choices -- 1/2/5 ms -- because that is
@@ -132,8 +153,8 @@ static uint8_t arc_1100_body[202] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0xbb, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xef, 0x45,
-    0x00, 0x00, 0x00, 0x0f, 0x42, 0x40, 0x00, 0x0f, 0x42, 0x40, 0x00, 0x0f,
-    0x42, 0x40, 0x00, 0x0f, 0x42, 0x40, 0x01, 0x35, 0xf1, 0xb4, 0x00, 0x1e,
+    0x00, 0x00, 0x00, 0x0f, 0x42, 0x40, 0x00, 0x07, 0xa1, 0x20, 0x00, 0x07,
+    0xa1, 0x20, 0x00, 0x03, 0xd0, 0x90, 0x01, 0x35, 0xf1, 0xb4, 0x00, 0x1e,
     0x84, 0x80, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00,
 };
 static const uint8_t arc_1102_body[126] = {
@@ -264,6 +285,50 @@ static int arc_1100_patch(uint16_t key, uint16_t val)
             arc_1100_body[o + 3] = (uint8_t)val;
             return 0;
         }
+    }
+    return -1;
+}
+
+// Write a u32 into the 0x1100 DATA BLOB, addressed by the offset key that
+// points at it.
+//
+// THIS is where the latency capability lives, and it took far too long to find
+// because arc_1100_patch() deliberately refused keys with bit 15 set as "just
+// offsets". They are offsets -- to the u32s that decide what Dante Controller
+// offers. Read off the bench:
+//
+//     key      A16R        AM2/ours     offers
+//     0x8204   1,000,000   1,000,000
+//     0x8205     500,000   1,000,000
+//     0x8301     500,000   1,000,000
+//     0x8306     250,000   1,000,000    <- minimum supported latency
+//     0x8321   2,000,000   2,000,000
+//
+// A16R minimum 0.25 ms -> Controller offers 0.25/0.5/1/2/5.
+// AM2  minimum 1 ms    -> Controller offers 1/2/5. We replay the AM2's table,
+// which is exactly why we were offered 1/2/5 no matter what else we matched.
+//
+// Offsets in this protocol are ABSOLUTE from the start of the packet and our
+// header is 10 bytes, so the blob index is (offset - DANTE_HDR_LEN).
+int dante_arc_patch_1100_u32(uint16_t key, uint32_t val)
+{
+    uint32_t count = arc_1100_body[1];
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t o = 2 + i * 4;
+        if (o + 4 > sizeof(arc_1100_body)) break;
+        uint16_t k = (uint16_t)((arc_1100_body[o] << 8) | arc_1100_body[o + 1]);
+        if (k != key) continue;
+        uint32_t off = (uint32_t)((arc_1100_body[o + 2] << 8) | arc_1100_body[o + 3]);
+        if (off < DANTE_HDR_LEN) return -1;
+        uint32_t bi = off - DANTE_HDR_LEN;
+        if (bi + 4 > sizeof(arc_1100_body)) return -1;
+        arc_1100_body[bi + 0] = (uint8_t)(val >> 24);
+        arc_1100_body[bi + 1] = (uint8_t)(val >> 16);
+        arc_1100_body[bi + 2] = (uint8_t)(val >> 8);
+        arc_1100_body[bi + 3] = (uint8_t)val;
+        printf("[arc] 1100 key 0x%04x @%lu = %lu\n", key,
+               (unsigned long)off, (unsigned long)val);
+        return 0;
     }
     return -1;
 }

@@ -301,6 +301,20 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         return;
     }
 
+    // 'B' + u16 key + u32 value -> patch a u32 in the 0x1100 data blob.
+    if (len >= 7 && req[0] == 'B') {
+        uint16_t k = (uint16_t)((req[1] << 8) | req[2]);
+        uint32_t v = ((uint32_t)req[3] << 24) | ((uint32_t)req[4] << 16) |
+                     ((uint32_t)req[5] << 8)  |  (uint32_t)req[6];
+        int r = dante_arc_patch_1100_u32(k, v);
+        uint8_t *pb = net_udp_payload_buf();
+        uint32_t nb = 0;
+        put32(pb, nb, r ? 0x424c4242u : 0x424c424fu);      // 'BLBB' / 'BLBO'
+        nb += 4;
+        net_udp_commit(src_ip, src_port, STATS_PORT, nb, NET_TOS_BEST_EFFORT);
+        return;
+    }
+
     if (len >= 5 && req[0] == 'K') {
         uint16_t k = (uint16_t)((req[1] << 8) | req[2]);
         uint16_t v = (uint16_t)((req[3] << 8) | req[4]);
