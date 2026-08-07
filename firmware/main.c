@@ -1054,7 +1054,25 @@ int main(void)
                 // integral only: the ring responds with a lag of many
                 // milliseconds and there is no hurry -- the whole error is a
                 // few percent of a rate, not a transient.
-                if (!usb_fb_sweep_hold) {
+                // FIRMWARE OUTER LOOP: OFF BY DEFAULT.
+                //
+                // It existed to supply the +3.5% the hardware integrator could
+                // not reach (clamped to +/-2.08%). That deficit was NOT real:
+                // it was the USB back-pressure leak caused by raising the
+                // un-prime threshold, measured at 3.73% and gone the moment the
+                // threshold was reverted. With the leak fixed the required
+                // correction is near zero, comfortably inside the hardware
+                // loop's authority, and fb_ovr = 0 selects that loop.
+                //
+                // Leaving the firmware loop on made things WORSE: it targets
+                // underrun == overrun, which settles where BOTH occur -- 511/s
+                // and 400/s measured overnight, about 1% each, which is the
+                // AM2's "audio not 100% ok". Targeting a balance is not the
+                // same as targeting zero.
+                //
+                // Kept, disabled, because the UDP 'F' sweep that found the leak
+                // depends on this path and is worth having again.
+                if (0 && !usb_fb_sweep_hold) {
                     static uint32_t fb_last_ms;
                     static uint32_t fb_acc, fb_n;
                     uint32_t nowms = gptp_uptime_ms();

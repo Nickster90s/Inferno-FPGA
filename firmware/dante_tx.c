@@ -52,7 +52,13 @@ dante_tx_stats_t g_tx_stats;
 
 static uint8_t  flow_ip[N_FLOWS][4];
 static uint8_t  talker_on;
-uint16_t g_mcast_fpp = 16;       // fpp for ARC-created multicast bundles
+// fpp for ARC-created multicast bundles. MUST MATCH the fpp advertised in the
+// _netaudio-bund TXT record (mdns.c, "fpp=16") -- a receiver subscribes on the
+// advertised value and cannot decode packets in another format. Left at 60
+// after a debug sweep once, which showed as a GREEN subscription with no audio:
+// the flow resolves, the payload is unreadable. If this is ever made variable
+// for real, the mDNS record has to be generated from the same variable.
+uint16_t g_mcast_fpp = 16;
 
 // RUNTIME-TUNABLE TIMESTAMP OFFSET.
 //
