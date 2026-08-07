@@ -179,6 +179,35 @@ proportional to actual subscriptions (0.03 Mbit/s idle).
 
 ## Open bugs
 
+**`tools/netload.py` reports a bogus CRC — it can strand the board.** It printed
+`crc32 0x2144df1c` for an 80,212-byte image and *the same* `0x2144df1c` for an
+82,988-byte one; two different images cannot share a CRC32. One push was NAKed
+by the loader (`NAKed EXEC ... CRC mismatch or short image`) and the board then
+answered neither UDP nor the loader, needing a JTAG bitstream reload to recover.
+The value the sender computes, and what the loader is asked to verify against,
+both need checking before this bites during a session with no JTAG to hand.
+
+**Fixed (2026-08-07): frames larger than 512 bytes never left the device.**
+`rd_idx_next` and `fr_adr` in `dante_packetizer.py` addressed the 512-word frame
+memory with `Signal(max=128)` — 7 bits. 128 words is 512 bytes, and that was a
+hard ceiling: 6 slots × fpp=24 (483 B) worked, 5 × fpp=32 (531 B) did not.
+
+It presented as "the frame never reaches the wire", which was wrong twice over.
+The frames were transmitted the whole time at the correct length and rate — the
+truncated *write* address wrapped past word 127 onto words 0..k, which hold the
+destination MAC, source MAC and ethertype, so each frame left with its own
+headers overwritten by audio. Every filter used to look for them (`udp port N`,
+`ether src <board>`) keyed on a field the bug destroys, and `packet_count` —
+which counts the packetizer's own last beat — was correct throughout. Capturing
+unfiltered showed 771-byte frames, `ethertype 0xee00`, garbage MACs, at exactly
+the paced 800/s.
+
+This blocked every receiver needing a large packet: DVS at 4 slots × fpp=60 is
+771 bytes. `f_last_idx` three lines above already carried a comment about the
+same `max=128` truncation, so the bug class had been found once and these two
+were missed.
+
+
 **Media clock: rate discipline now works (2026-08-03), audio interaction still
 untested.** `mcr_dante.c` replaces `mcr`'s ownership of the NCO — one writer,
 rate only (`g_ptpv1.rate_ppb`, the servo integral, never the phase term),
@@ -433,6 +462,35 @@ Phase 1 brings it up for the capture ring and cold heap.
 UART runs at **1 Mbaud** with a 64-byte HW FIFO so periodic status prints never
 stall the main loop. Both JTAG and UART share `/dev/ttyACM0`.
 
+**The UART drops output under load.** A `printf` in a UDP handler was verified
+not to reach the console while the opcode demonstrably ran and returned the
+right value, and `[flow]` lines from the same path came through. Do not build a
+diagnostic that depends on the console alone -- use UDP (below).
+
+### UDP control surface (port 7779)
+
+`tools/stats.py` speaks this. One-byte opcode, optional payload, binary reply.
+It is the reliable channel: it works while the console is dropping output, and
+it does not need the CH347 (which JTAG and the UART share).
+
+| op | payload | does |
+|---|---|---|
+| `?` | | all runtime counters (the default `stats.py` read) |
+| `f` | | per-flow detail: dst, port, slots, **fpp**, age |
+| `u` | | USB ingress counters -- `rx_beats`, `ep_out`, over/underrun |
+| `s` `g` `p` `t` `m` | | PTP servo status, gPTP, phase, telemetry, media clock |
+| `L` | u32 ns | advertised latency; no payload = read it back |
+| `M` | | multicast fpp / create |
+| `P` `o` `F` | | phase adjust, TX timestamp offset, USB feedback override |
+| `A` | 4-byte IP | mirror every ARC request to that host on port 7780 |
+| `K` | u16 key, u16 val | patch an inline key in the ARC 0x1100 table |
+| `B` | u16 key, u32 val | patch a u32 in the 0x1100 **data blob** |
+| `G` | u8, u8 | patch the 0x1000 capability bytes |
+| `V` | u16, u16 | patch the 0x1003 router / arcp version fields |
+
+`A`/`K`/`B`/`G`/`V` are protocol-archaeology probes. They are RAM-only and a
+reboot reverts them.
+
 ### USB3300 ULPI breakout (P2 / SODIMM header)
 
 | Signal | FPGA pin | SODIMM | Notes |
@@ -499,10 +557,23 @@ build.sh                deterministic build wrapper (PYTHONHASHSEED + setarch -R
 
 tools/
   netload.py            push firmware into coderam over raw Ethernet (dev loop)
+  stats.py              runtime counters over UDP:7779 -- the main telemetry
+  telemetry.py          event stream decoder
   rx_gate.py            arm / back out / measure the RX MAC allow-list
   mclk.py               arm / back out / measure the media-clock discipline
   mkimage.py            wrap firmware in the loader's header for SPI flash
   seed_sweep.sh         build N seeds, tabulate Fmax per clock
+  arc_query.py          query ANY device's ARC server -- the tool that decoded
+                        the property tables by comparing real hardware
+  flow_req.py           send a real flow-control request from the bench, so
+                        unicast can be exercised without Dante Controller
+  dante_latency.py      decode receivers' own reported latency from the 8708
+                        heartbeat -- the authoritative "is the receiver happy"
+  ts_lag.py             absolute transmit timestamp lag against the PTP timeline
+  ts_offset.py          two-point runtime calibration of DANTE_TX_TS_OFFSET
+  dante_decode.py       pcap -> Dante audio header fields
+  cap_fetch.py          pull the on-FPGA capture ring
+  rx_ts_probe.py        RX timestamp probe
   test_netload_protocol.py
                         host-side conformance test: a model of the loader's
                         receive state machine driven by the real sender
