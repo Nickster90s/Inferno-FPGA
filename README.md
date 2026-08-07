@@ -358,20 +358,31 @@ flashed, the MacBook enumerated the audio device and showed **no outputs at
 all**. Prefer the higher `USB_MHz` when seeds tie, then confirm on hardware --
 see the header of `tools/seed_sweep.sh`.
 
-**A latency selection can silently kill a receiver that cannot meet it.**
-Dante Controller offers 0.25/0.5/1/2/5 ms from one device-wide capability, but
-the real floor is PER-FLOW: a packet cannot exist until `fpp` samples after its
-own timestamp, so each subscription is bounded by `fpp/48000`. Measured with all
-three receivers subscribed at once: A16R `fpp=8` (0.167 ms), AM2 `fpp=16`
-(0.333 ms), DVS `fpp=60` (**1.25 ms**).
+**Our advertised `latency_ns` is a FLOOR, not a setting — keep it LOW.**
+A receiver plays out at `max(our advertised latency_ns, its own setting)`, so
+the value here can only ever RAISE a receiver's latency. Mixed latencies coexist
+without interfering: a console set to 1 ms and a DVS set to 4 ms run side by
+side, each at its own figure.
 
-Select 0.25 ms while DVS is subscribed and DVS is told it may buffer less than
-our packets can possibly arrive in. It does not refuse — it drops, silently,
-with every transmit-side counter still green. Nothing in the firmware clamps a
-selection against the fpp its live flows negotiated, and nothing warns. The
-honest fix is to reject or clamp a latency that a bound flow cannot satisfy;
-until then, read the receivers' own reported peaks with `tools/dante_latency.py`
-after changing latency, not the transmit counters.
+The hazard is a floor that is too HIGH, and it cost hours before it was
+understood: advertising 2 ms pinned a RedNet A16R to >=2 ms no matter what its
+own Latency tab said, and no amount of work on Dante Controller's UI could
+change that. A low floor costs nothing — a receiver that wants more simply asks
+for more.
+
+Per-flow `fpp` is a separate, real bound: a packet cannot exist until `fpp`
+samples after its own timestamp, so each subscription needs at least
+`fpp/48000` — A16R `fpp=8` 0.167 ms, AM2 `fpp=16` 0.333 ms, DVS `fpp=60`
+1.25 ms. A receiver picks `fpp` to suit the latency IT is configured for, so
+this is normally the receiver's own business; our floor cannot push it below its
+own choice. Verified on the bench: with the device advertising 250 us, DVS still
+bound at `fpp=60` and ran clean at 4 ms.
+
+> An earlier revision of this file claimed that selecting 0.25 ms while DVS was
+> subscribed would make DVS drop silently. That was wrong — `max()` means our
+> floor cannot lower a receiver below its own setting — and the bench had
+> already disproved it. Corrected rather than deleted, because the reasoning
+> error (reading a floor as if it were an assignment) is the easy one to repeat.
 
 **Clipping at full source volume** is unconfirmed as ours. The digital path is
 a bit-exact MSB-justified truncation with no gain stage, so it cannot create
