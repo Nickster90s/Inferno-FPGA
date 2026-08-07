@@ -26,6 +26,30 @@
 # picking on Fmax chose the WORST seed. The ingress loss shows as a starved ring
 # and gritty audio, and looks exactly like a firmware or design regression.
 #
+# 2026-08-07, arbitrary-fpp netlist (after the 512-byte frame-ceiling fix).
+# THE SAME TRAP FIRED AGAIN, so it is worth restating with fresh numbers:
+#
+#     seed 1   sys 63.54 (HIGHEST clean)  USB 79.62   -> MacBook enumerated the
+#                                                        device and showed NO
+#                                                        OUTPUTS AT ALL. Dead.
+#     seed 8   sys 63.26                  USB 85.55   -> ep_out 9,216,211/s vs
+#                                                        9,216,000 baseline
+#                                                        (+0.002%), leak +0.00%,
+#                                                        underrun 0/s, ring 65,
+#                                                        unicast audio confirmed
+#                                                        to AM2 + A16R + DVS.
+#
+# Seed 1 was picked on sys Fmax, exactly what the paragraph above says not to do,
+# and it broke USB outright. USB_MHz was the column that predicted it (79.62 vs
+# 85.55) -- when two seeds are within a MHz on sys, PREFER THE HIGHER USB_MHz.
+#
+# AND: sys Fmax here is not reproducible. Seed 8 measured 54.97 in a serial
+# build and 63.26 in this sweep, same source, same loader, same parsing. That is
+# the run-to-run scatter avb_soc.py:37 documents (52-65 MHz on ONE seed); the
+# PYTHONHASHSEED=0 re-exec reduced it but has NOT eliminated it. So treat the
+# BITSTREAM as the validated artifact, not the seed number -- rebuilding "seed 8"
+# may not give you the bitstream that was measured. Keep build_seed8/.
+#
 # After choosing a PASS seed, flash it and read the USB counters over UDP:
 #     tools/stats.py ... opcode 'u'  -> rx_beats, ep_out
 # leak = (rx_beats - ep_out)/rx_beats must be < 1%, and ep_out must be within
