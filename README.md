@@ -179,13 +179,25 @@ proportional to actual subscriptions (0.03 Mbit/s idle).
 
 ## Open bugs
 
-**`tools/netload.py` reports a bogus CRC — it can strand the board.** It printed
-`crc32 0x2144df1c` for an 80,212-byte image and *the same* `0x2144df1c` for an
-82,988-byte one; two different images cannot share a CRC32. One push was NAKed
-by the loader (`NAKed EXEC ... CRC mismatch or short image`) and the board then
-answered neither UDP nor the loader, needing a JTAG bitstream reload to recover.
-The value the sender computes, and what the loader is asked to verify against,
-both need checking before this bites during a session with no JTAG to hand.
+**Fixed (2026-08-07): `netload.py` gave up on a NAK the loader wanted retried.**
+One push was NAKed (`NAKed EXEC ... CRC mismatch or short image`); the tool
+exited, and the board then answered neither UDP nor a further netload, needing a
+JTAG bitstream reload. The loader sets `started = 0` on that path with the
+comment *"let the host retry cleanly"* — it was explicitly asking for another
+attempt, and the sender was calling `sys.exit()` instead. It now retries the
+whole image up to three times.
+
+A lost or duplicated DATA frame already self-corrected, because the loader
+reports where it actually is and the sender resyncs. What does not self-correct
+is a frame accepted at the RIGHT offset with damaged payload: offsets stay
+consistent, every ACK looks normal, and it only surfaces as a CRC mismatch at
+EXEC.
+
+> Note for anyone reading the logs: `netload.py` prints `crc32 0x2144df1c` for
+> **every** image, and that is correct, not a bug. `0x2144DF1C` is the CRC-32
+> residue — the value you get computing CRC32 over a message that already has
+> its own CRC appended, which `firmware/Makefile` does via `crcfbigen`. It was
+> briefly recorded here as a defect on exactly that misreading.
 
 **Fixed (2026-08-07): frames larger than 512 bytes never left the device.**
 `rd_idx_next` and `fr_adr` in `dante_packetizer.py` addressed the 512-word frame

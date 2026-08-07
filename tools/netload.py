@@ -124,62 +124,100 @@ def main():
             if got:
                 return got
 
-    # --- START: repeat until the loader answers (it only listens after reset) --
-    print("waiting for loader... (reset the board now: 'r' on the console)")
-    dst = BROADCAST
-    t_end = time.monotonic() + args.start_wait
-    while True:
-        if time.monotonic() > t_end:
-            sys.exit("no loader responded. Is the board reset? Right interface?")
-        send(OP_START, len(image), crc)
-        got = wait_ack(time.monotonic() + 0.02)
-        if got and got[0] == OP_ACK:
-            dst = got[2]  # unicast the rest to the board
-            print("loader responded at {}".format(dst.hex(":")))
-            break
+    # --- one full pass: START -> DATA -> EXEC ---------------------------------
+    #
+    # RETRY THE WHOLE IMAGE ON A NAK. The loader answers EXEC with NAK when the
+    # CRC over coderam does not match, and it sets `started = 0` at that point
+    # with the comment "let the host retry cleanly" -- it is explicitly asking
+    # for another attempt. This tool used to sys.exit() instead, so a single
+    # corrupted payload ended the session with the board sitting in the loader
+    # and no firmware running. That happened on this bench: one push NAKed, the
+    # board then answered neither UDP nor a further netload, and it took a JTAG
+    # bitstream reload to recover.
+    #
+    # A lost or duplicated DATA frame already self-corrects, because the loader
+    # reports where it actually is and the sender resyncs to that offset. What
+    # does NOT self-correct is a frame accepted at the RIGHT offset with damaged
+    # payload: offsets stay consistent, every ACK looks normal, and the fault
+    # only appears as a CRC mismatch at EXEC. Retrying the transfer is the only
+    # recovery, and it costs a fraction of a second.
+    def one_pass(first_pass):
+        nonlocal_dst = BROADCAST
+        # The loader only listens for START after a reset. On the first pass we
+        # wait for the operator to reset it; on a retry it is already sitting in
+        # the loader loop, so a short wait is enough.
+        deadline = time.monotonic() + (args.start_wait if first_pass else 3.0)
+        if first_pass:
+            print("waiting for loader... (reset the board now: 'r' on the console)")
+        while True:
+            if time.monotonic() > deadline:
+                return None if first_pass else False
+            send(OP_START, len(image), crc)
+            got = wait_ack(time.monotonic() + 0.02)
+            if got and got[0] == OP_ACK:
+                nonlocal_dst = got[2]        # unicast the rest to the board
+                if first_pass:
+                    print("loader responded at {}".format(nonlocal_dst.hex(":")))
+                break
 
-    # --- DATA -----------------------------------------------------------------
-    off = 0
-    t0 = time.monotonic()
-    while off < len(image):
-        chunk = image[off:off + CHUNK]
+        off = 0
+        t0 = time.monotonic()
+        while off < len(image):
+            chunk = image[off:off + CHUNK]
+            for attempt in range(args.retries):
+                # arg1 = explicit payload length (see the protocol note above).
+                send(OP_DATA, off, len(chunk), chunk, dst=nonlocal_dst)
+                got = wait_ack(time.monotonic() + args.timeout)
+                if got is None:
+                    continue
+                op, next_off, _ = got
+                if op == OP_NAK:
+                    print("\n  loader NAKed at offset {} -- restarting transfer".format(off))
+                    return False
+                if next_off == off + len(chunk):
+                    off = next_off
+                    break
+                # Loader is somewhere else (lost/duplicated frame): resync to it.
+                if next_off != off:
+                    off = next_off
+                    break
+            else:
+                print("\n  no ACK for offset {} after {} retries".format(off, args.retries))
+                return False
+
+            pct = 100 * off // len(image)
+            print("\r  {:3d}%  {}/{} bytes".format(pct, off, len(image)), end="", flush=True)
+
+        dt = time.monotonic() - t0
+        print("\r  100%  {}/{} bytes in {:.2f}s".format(len(image), len(image), dt))
+
         for attempt in range(args.retries):
-            # arg1 = explicit payload length (see the protocol note above).
-            send(OP_DATA, off, len(chunk), chunk, dst=dst)
+            send(OP_EXEC, dst=nonlocal_dst)
             got = wait_ack(time.monotonic() + args.timeout)
             if got is None:
                 continue
-            op, next_off, _ = got
-            if op == OP_NAK:
-                sys.exit("loader NAKed at offset {}".format(off))
-            if next_off == off + len(chunk):
-                off = next_off
-                break
-            # Loader is somewhere else (lost/duplicated frame): resync to it.
-            if next_off != off:
-                off = next_off
-                break
-        else:
-            sys.exit("no ACK for offset {} after {} retries".format(off, args.retries))
+            op, arg0, _ = got
+            if op == OP_ACK:
+                print("loader verified CRC and is jumping to firmware.")
+                return True
+            # NAK: short image, or the CRC over coderam did not match. The
+            # loader has cleared `started`, so a fresh START is accepted.
+            print("loader NAKed EXEC at offset {} (CRC mismatch or short image)"
+                  .format(arg0))
+            return False
+        print("no ACK for EXEC")
+        return False
 
-        pct = 100 * off // len(image)
-        print("\r  {:3d}%  {}/{} bytes".format(pct, off, len(image)), end="", flush=True)
-
-    dt = time.monotonic() - t0
-    print("\r  100%  {}/{} bytes in {:.2f}s".format(len(image), len(image), dt))
-
-    # --- EXEC -----------------------------------------------------------------
-    for attempt in range(args.retries):
-        send(OP_EXEC, dst=dst)
-        got = wait_ack(time.monotonic() + args.timeout)
-        if got is None:
-            continue
-        op, arg0, _ = got
-        if op == OP_ACK:
-            print("loader verified CRC and is jumping to firmware.")
+    PASSES = 3
+    for p in range(PASSES):
+        r = one_pass(p == 0)
+        if r is None:
+            sys.exit("no loader responded. Is the board reset? Right interface?")
+        if r:
             return 0
-        sys.exit("loader NAKed EXEC at offset {} (CRC mismatch or short image)".format(arg0))
-    sys.exit("no ACK for EXEC")
+        if p + 1 < PASSES:
+            print("  retrying full image ({}/{})...".format(p + 2, PASSES))
+    sys.exit("image did not verify after {} attempts".format(PASSES))
 
 
 if __name__ == "__main__":
