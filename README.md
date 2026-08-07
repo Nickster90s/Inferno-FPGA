@@ -31,16 +31,17 @@ driver stack, no Dante Virtual Soundcard, no licensed Audinate module.
 > samples after its own timestamp, so `fpp/48000` is a hard floor for each
 > subscription:
 >
-> | receiver | negotiated `fpp` | floor | runs at |
+> | receiver | negotiated `fpp` | floor | tested at |
 > |---|---|---|---|
 > | RedNet A16R (Brooklyn-3) | 8 | 0.167 ms | **0.25 ms, 125 µs peak** |
 > | RedNet AM2 (UltimoX2) | 16 | 0.333 ms | 1 ms (its own minimum) |
-> | Dante Virtual Soundcard | 60 | **1.25 ms** | >= 1.25 ms |
+> | Dante Virtual Soundcard | 60 | 1.25 ms | **4 ms** |
 >
 > DVS streams cleanly but **always requests `fpp=60`** and therefore cannot run
 > at 0.25 or 0.5 ms — measured, not assumed: with the device advertising 250 µs,
-> its flow still binds at `fpp=60`. Low latency is a console/Brooklyn-3-class
-> capability here, not a device-wide one.
+> its flow still binds at `fpp=60` (`tools/stats.py` opcode `f`). It is tested
+> at 4 ms. Low latency is a console/Brooklyn-3-class capability here, not a
+> device-wide one.
 >
 > Long-run hardening (Phase 6) has not been done; see [Open bugs](#open-bugs)
 > for what remains.
