@@ -248,8 +248,12 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
                 v = (uint16_t)(v * 10 + (req[i] - '0'));
             if (dante_tx_fpp_supported(v)) g_mcast_fpp = v;
         } else {
-            uint16_t ch[2] = { 1, 2 };
-            dante_tx_bind_multicast(0x40, ch, 2);
+            // FOUR channels, matching what DVS negotiates on unicast. The
+            // remaining failure is DVS-unicast-only, and fpp=60 is proven good
+            // (DVS has audio on a fpp=60 multicast), so slot count is the next
+            // variable: 2 slots is 360 B of payload, 4 slots is 720 B.
+            uint16_t ch[4] = { 1, 2, 3, 4 };
+            dante_tx_bind_multicast(0x40, ch, 4);
         }
         uint8_t *p6 = net_udp_payload_buf();
         uint32_t n6 = 0;

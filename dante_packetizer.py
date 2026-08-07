@@ -184,7 +184,7 @@ class DantePacketizer(LiteXModule):
         PAY_LEN  = FPP_MAX_TBL * channels * BYTES_PER_SAMPLE
         TOTAL    = HDR_LEN + PAY_LEN                   # 51 + 1440 = 1491 worst case
         rem      = TOTAL % 4
-        N_WORDS  = (TOTAL + 3) // 4                    # 59
+        N_WORDS  = (TOTAL + 3) // 4                    # 373 at fpp=60 x 8 slots
         LAST_IDX = N_WORDS - 1
         # last_be is a ONE-HOT of the LAST VALID BYTE (LiteEth mac/sram.py:238-245:
         # 1 byte->0b0001, 2->0b0010, 3->0b0100, 4->0b1000), NOT a byte mask.
@@ -940,7 +940,18 @@ class DantePacketizer(LiteXModule):
         #
         # One RAMB18 replaces the mux. The read is registered, so STREAM prefetches
         # the next word rather than reading combinationally -- see rd_idx handling.
-        frame_mem = Memory(32, 128)
+        # SIZED FROM N_WORDS, not hardcoded. This was Memory(32, 128), which
+        # was ample while the largest packet was 8 slots at fpp=16 (435 bytes =
+        # 109 words). With fpp=60 in the table the worst case is 1491 bytes =
+        # 373 words, and PAY_LEN/TOTAL were resized for that while THIS was not.
+        #
+        # The failure mode is silent and total: the context binds, the FSM runs,
+        # and nothing reaches the wire. Measured -- a 4-slot fpp=60 multicast
+        # (192 words) bound and transmitted NOTHING, while a 2-slot fpp=60
+        # bundle (102 words) was byte-perfect. 4 slots at fpp=60 is exactly what
+        # DVS negotiates on unicast, which is why that one case never worked
+        # while every fpp=60 test through a 2-slot multicast passed.
+        frame_mem = Memory(32, N_WORDS)
         frame_wp  = frame_mem.get_port(write_capable=True)
         frame_rp  = frame_mem.get_port(async_read=False)
         self.specials += frame_mem, frame_wp, frame_rp

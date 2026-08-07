@@ -9,6 +9,7 @@
 #include "net.h"
 #include "dante_dev.h"
 #include "dante_tx.h"
+extern uint16_t g_mcast_fpp;
 #include "gptp.h"
 #include <string.h>
 #include <stdio.h>
@@ -596,7 +597,13 @@ static uint32_t build_txt_bund(uint8_t *p, unsigned b1)
     n = txt_put_kv_u(p, n, "id=", b1);
     n = txt_put_kv_u(p, n, "nchan=", ns);
     n = txt_put(p, n, "latency_ns=1000000");
-    n = txt_put(p, n, "fpp=16");
+    // GENERATED FROM THE SAME VARIABLE THE PACKETIZER USES. This was hardcoded
+    // "fpp=16" while dante_tx bound the context from g_mcast_fpp, so the two
+    // could disagree -- and did: a debug sweep left the transmit fpp at 60 while
+    // this still said 16, which shows as a GREEN subscription with NO AUDIO
+    // (the flow resolves, the payload is in a format the receiver is not
+    // expecting). Two places holding one fact is the bug; this removes one.
+    n = txt_put_kv_u(p, n, "fpp=", g_mcast_fpp);
     n = txt_put(p, n, "rate=48000");
     n = txt_put(p, n, "enc=24");
     n = txt_put(p, n, "at2");
