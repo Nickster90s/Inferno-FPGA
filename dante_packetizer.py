@@ -963,9 +963,27 @@ class DantePacketizer(LiteXModule):
         frame_wp  = frame_mem.get_port(write_capable=True)
         frame_rp  = frame_mem.get_port(async_read=False)
         self.specials += frame_mem, frame_wp, frame_rp
-        rd_idx_next = Signal(max=128)
+        # BOTH of these address the 512-word frame_mem and BOTH were left at
+        # max=128 (7 bits, words 0..127) when it grew from 128 words. 128 words
+        # = 512 bytes, and that is exactly where transmission died: 6 slots x
+        # fpp=24 (483 B on the wire) worked, 5 slots x fpp=32 (531 B) did not.
+        #
+        # This looked like "the frame never reaches the wire" for a long time.
+        # It does reach the wire, at the correct length -- the truncated WRITE
+        # address wraps past word 127 back onto words 0..k, which hold the
+        # destination MAC, source MAC and ethertype. The frame goes out with its
+        # own headers overwritten by audio, so every filter used to look for it
+        # (udp port N, ether src <board>) keyed on a field the bug destroys, and
+        # packet_count -- which counts the packetizer's own last beat -- was
+        # correct the whole time. Confirmed on the wire with no MAC filter:
+        # 771-byte frames, ethertype 0xee00, garbage MACs, at the paced 800/s.
+        #
+        # f_last_idx above already carries a comment about this SAME max=128
+        # truncation, so the bug class was found once and these two were missed.
+        # Size them from FRAME_WORDS so they track the memory.
+        rd_idx_next = Signal(max=FRAME_WORDS)
         fr_we   = Signal()
-        fr_adr  = Signal(max=128)
+        fr_adr  = Signal(max=FRAME_WORDS)
         fr_dat  = Signal(32)
         self.comb += [
             frame_wp.adr.eq(fr_adr), frame_wp.dat_w.eq(fr_dat), frame_wp.we.eq(fr_we),
