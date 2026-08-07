@@ -583,14 +583,34 @@ firmware/
                         image into coderam from Ethernet or SPI flash and jumps.
                         Changing it re-rolls placement -- avoid.
   main.c                boot, RX dispatcher, UART CLI, main polling loop
+  net.c                 IPv4 / UDP / ICMP / IGMP / ARP.  Replaced osc.c
   gptp.c                802.1AS gPTP slave + PI servo on the 52-bit TSU addend.
                         Phase 4 factors the servo out for reuse by ptpv1.c
+  ptpv1.c               PTPv1 slave -- the clock Dante actually speaks
   mcr.c                 media-clock NCO servo
-  osc.c                 minimal ARP/IPv4/UDP shim.  Phase 2 → net.c
-  cap.c                 on-FPGA packet capture ring
-  rx_gate.c             CSR programming + auto-revert for the RX allow-list
   mcr_dante.c           the Dante media clock: sole NCO owner, rate-only,
                         slew-limited.  Replaces mcr.c's ownership
+
+  --- Dante control plane ---
+  mdns.c                _netaudio-{arc,cmc,chan,bund} discovery records
+  dante_dev.c           device identity + g_latency_ns, the ONE advertised
+                        latency all three publishers read
+  dante_msg.c           the 10-byte control header and message builder
+  dante_arc.c           ARC server (4440): channels, flows, subscriptions, the
+                        0x1100/0x1102 property tables, 0x1003 device names and
+                        0x1101 latency set
+  dante_cmc.c           CMC server (8800) -- device advertisement
+  dante_info.c          device / product info records + the 8708 heartbeat.
+                        Manufacturer, Model Name and Dante Model live here
+  dante_flows.c         flow-control server (4455): parses a receiver's request
+                        for channels, fpp and destination socket
+  dante_tx.c            binds those requests to packetizer contexts; owns the
+                        timestamp anchor and flow eviction
+
+  cap.c                 on-FPGA packet capture ring
+  rx_gate.c             CSR programming + auto-revert for the RX allow-list
+  dstats.c              the UDP:7779 control surface (see Console)
+  telem.c               event stream
   cfgflash.c config.c   NV config in SPI flash (versioned + CRC)
   pkt_geom.h            packetizer stream geometry
 
@@ -625,6 +645,44 @@ Neither is a dependency; both are read as specifications.
   under `statime/src/datastructures/messages_v1/`. Permissively licensed, so
   safe to reference or vendor. `statime-stm32/src/ptp_clock.rs` is a good
   template for mapping a PTP servo onto a hardware addend register.
+
+### Decoded on this bench — not in inferno
+
+inferno is the best reference available, but it is not complete. These were
+worked out here by querying real hardware with `tools/arc_query.py` and
+comparing devices that differ in the behaviour of interest — a RedNet A16R
+(Brooklyn-3) against a RedNet AM2 (UltimoX2). Probing our own device could not
+have found any of them; the comparison had to be against hardware that works.
+
+- **ARC `0x1101` — Dante Controller's latency SET.** Carries the latency in
+  nanoseconds as u32, **twice**; both copies have always been equal, and we
+  require that before applying, so a misparsed message is rejected rather than
+  believed. inferno does not implement this opcode. Answering `0x22` to it is
+  why a latency selection would not stick.
+- **The latency CAPABILITY lives in the `0x1100` DATA BLOB**, addressed by the
+  offset keys — not in the inline key/value table:
+
+  | key | A16R | AM2 | |
+  |---|---|---|---|
+  | `0x8306` | 250,000 | 1,000,000 | **minimum supported latency** |
+  | `0x8205` / `0x8301` | 500,000 | 1,000,000 | |
+
+  A16R minimum 0.25 ms → Controller offers 0.25/0.5/1/2/5. AM2 minimum 1 ms →
+  1/2/5. Found by sweeping opcodes against both devices and searching the
+  replies for the latency values as nanoseconds.
+- **`0x1003` is not inferno's `get_device_names` layout.** Both RedNets emit a
+  48-byte header, 2 pad bytes, then FIXED 32-byte name fields, with the names at
+  `+20/+22/+24` (inferno has a 38-byte header and `+12/+14/+16`) and
+  router/arcp versions at `+34`/`+38`. Confirmed rather than assumed: those
+  version fields decode to 4.4.0 / 2.8.12 for the A16R and 4.3.0 / 2.8.9 for the
+  AM2, matching each device's own mDNS. Serving the wrong layout made Controller
+  fail with "Cannot retrieve Device Latency" and retry ~1300 times a minute.
+- **`0x2032`** — a request Controller makes once per Device View open; both
+  RedNets answer OK with two zero bytes.
+
+Dead ends recorded so they are not retried: the `0x1000` capability word, the
+inline `0x1100` keys, the missing `0x0064`/`0x00f0` keys, the arcp version, and
+the `(mf, model)` identity all left Controller's latency list unchanged.
 
 Standards worth having open: IEEE 1588-2002 (PTPv1), IEEE 1588-2008,
 RFC 1112/2236 (IGMP), RFC 6762/6763 (mDNS/DNS-SD).
