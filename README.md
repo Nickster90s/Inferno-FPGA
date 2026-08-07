@@ -9,15 +9,39 @@ driver stack, no Dante Virtual Soundcard, no licensed Audinate module.
 **SoC:** LiteX + VexRiscv, bare-metal C firmware
 **USB:** LUNA/Amaranth UAC2 high-speed device on a USB3300 ULPI PHY
 
-> ### Status: audio works. Phases 0-5 and 7 complete on the bench.
+> ### Status: audio works, down to 0.25 ms. Phases 0-5 and 7 complete on the bench.
 >
 > The device appears in Dante Controller, locks to PTPv1, and streams audio to
 > real Dante hardware over **unicast flows** negotiated on port 4455 — verified
-> against a Focusrite RedNet A16R and a RedNet AM2 simultaneously, at different
-> `fpp` and channel counts, sustained at exactly 9001 pps with zero underruns or
-> overruns. Multicast flows can be created and deleted from Dante Controller.
+> against a Focusrite RedNet A16R, a RedNet AM2 and Dante Virtual Soundcard
+> **simultaneously**, at different `fpp` and channel counts, with zero underruns
+> and USB ingress within +0.002% of nominal. Multicast flows can be created and
+> deleted from Dante Controller.
 >
-> Two receivers stream simultaneously at different `fpp` and channel counts.
+> **0.25 ms latency is selectable and measured working** — Dante Controller
+> offers 0.25/0.5/1/2/5 ms, sets the value over ARC `0x1101`, and the change
+> takes effect immediately. At a 0.25 ms setting a RedNet A16R negotiates
+> `fpp=8` (0.167 ms of packetization) and reports a **125 µs peak — half the
+> budget**. On the transmit side `tools/ts_lag.py` puts our timestamps 8 samples
+> EARLY against the PTP timeline with a 2.3-sample spread; a RedNet A16R
+> transmitting on the same bench measures +12.5 samples and cannot itself meet
+> 0.25 ms.
+>
+> **Latency is per-flow, not per-device.** A packet cannot exist until `fpp`
+> samples after its own timestamp, so `fpp/48000` is a hard floor for each
+> subscription:
+>
+> | receiver | negotiated `fpp` | floor | runs at |
+> |---|---|---|---|
+> | RedNet A16R (Brooklyn-3) | 8 | 0.167 ms | **0.25 ms, 125 µs peak** |
+> | RedNet AM2 (UltimoX2) | 16 | 0.333 ms | 1 ms (its own minimum) |
+> | Dante Virtual Soundcard | 60 | **1.25 ms** | >= 1.25 ms |
+>
+> DVS streams cleanly but **always requests `fpp=60`** and therefore cannot run
+> at 0.25 or 0.5 ms — measured, not assumed: with the device advertising 250 µs,
+> its flow still binds at `fpp=60`. Low latency is a console/Brooklyn-3-class
+> capability here, not a device-wide one.
+>
 > Long-run hardening (Phase 6) has not been done; see [Open bugs](#open-bugs)
 > for what remains.
 
