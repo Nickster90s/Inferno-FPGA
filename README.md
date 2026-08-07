@@ -268,8 +268,11 @@ Phase now −4 samples; audio confirmed by ear. See `MCR_REPLACEMENT.md`.
 
 **Remaining gap:** the auto-disable guard needs `lvl_max >= 32` to tell "ring
 active" from "no USB source", so it cannot catch a clock that stops the ring
-priming at all. Nothing has made it fire yet. Worth closing before an unattended
-overnight run.
+priming at all. Nothing has made it fire yet.
+
+An overnight unattended run has since happened and audio was still playing in
+the morning, so this has not bitten in practice — but that is one run and the
+guard is still blind to the case it was written for, so it stays open.
 
 **(historical) Media clock is UNDISCIPLINED under PTPv1 — drifts ~15 ms/hour.**
 Was the most serious issue; fixed above. Left running the stream dies silently: every counter
@@ -340,17 +343,51 @@ The filter is disabled at reset and armed explicitly (`tools/rx_gate.py on`, or
 software allow-list in `dispatch_rx()` could never have fixed this on its own: it
 runs after the frame has already taken a slot, and the slot is what is exhausted.
 
+**sys Fmax is not reproducible — the artifact is a BITSTREAM, not a seed.**
+`avb_soc.py` re-execs with `PYTHONHASHSEED=0` to stop the same seed scattering
+52-65 MHz run to run. That reduced the scatter; it did not remove it. Measured
+2026-08-07 on one netlist: seed 8 gave **54.97 MHz** in a serial build and
+**63.26 MHz** in a sweep, same source, same loader, same parsing. So
+`--seed 8` does not name a result, and rebuilding a validated seed may not
+reproduce the bitstream that was validated. Keep `build_seed8/`.
+
+Two consequences. A sweep table is a snapshot, not a spec — re-sweep after any
+gateware or loader change. And Fmax must never pick the seed on its own: seed 1
+had the highest clean sys Fmax (63.54) and the LOWEST USB margin (79.62), and
+flashed, the MacBook enumerated the audio device and showed **no outputs at
+all**. Prefer the higher `USB_MHz` when seeds tie, then confirm on hardware --
+see the header of `tools/seed_sweep.sh`.
+
+**A latency selection can silently kill a receiver that cannot meet it.**
+Dante Controller offers 0.25/0.5/1/2/5 ms from one device-wide capability, but
+the real floor is PER-FLOW: a packet cannot exist until `fpp` samples after its
+own timestamp, so each subscription is bounded by `fpp/48000`. Measured with all
+three receivers subscribed at once: A16R `fpp=8` (0.167 ms), AM2 `fpp=16`
+(0.333 ms), DVS `fpp=60` (**1.25 ms**).
+
+Select 0.25 ms while DVS is subscribed and DVS is told it may buffer less than
+our packets can possibly arrive in. It does not refuse — it drops, silently,
+with every transmit-side counter still green. Nothing in the firmware clamps a
+selection against the fpp its live flows negotiated, and nothing warns. The
+honest fix is to reject or clamp a latency that a bound flow cannot satisfy;
+until then, read the receivers' own reported peaks with `tools/dante_latency.py`
+after changing latency, not the transmit counters.
+
 **Clipping at full source volume** is unconfirmed as ours. The digital path is
 a bit-exact MSB-justified truncation with no gain stage, so it cannot create
 clipping that is not already in the source — but this has not been verified at
 high level, because it needs a multicast flow to make the payload visible.
 
-**USB is only partly retested** on the current gateware. The device enumerates
-as `N-Series USB 48CH` and 2 channels were verified end to end after the unicast
-gateware work. All 48 have NOT been exercised on this bitstream — the historical
-failure mode in this lineage was 48-channel-specific (channel rotation after a
-dropped sample, fixed by channel-addressed ingress), so a 2-channel pass does
-not clear it.
+**USB is only partly retested** on the current gateware. 2 channels were
+verified end to end after the unicast gateware work. All 48 have NOT been
+exercised on this bitstream — the historical failure mode in this lineage was
+48-channel-specific (channel rotation after a dropped sample, fixed by
+channel-addressed ingress), so a 2-channel pass does not clear it.
+
+USB ingress itself measures exact on the validated bitstream: `ep_out`
+9,216,205/s against a 9,216,000 nominal (**+0.002%**), leak +0.00%, 0
+underruns/s. That is the transport, not the channel mapping, and it is the
+mapping the 48-channel failure mode lived in.
 
 ---
 
