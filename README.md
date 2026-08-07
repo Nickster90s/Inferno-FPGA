@@ -1,8 +1,9 @@
-# Inferno-FPGA — 48-channel USB → Dante interface
+# Inferno-FPGA — 48-channel USB → AoIP interface
 
 A standalone hardware audio interface: a host streams 48 channels over USB, and
-an FPGA puts them on the network as a native Dante transmitter. No PC-side
-driver stack, no Dante Virtual Soundcard, no licensed Audinate module.
+an FPGA puts them on the network as a native AoIP transmitter, interoperating
+with Audinate's Dante protocol. No PC-side driver stack, no Dante Virtual
+Soundcard, no licensed Audinate module.
 
 **Board:** Colorlight i9plus v6.1 (Xilinx Artix-7 XC7A50T-fgg484-1)
 **Toolchain:** openXC7 (yosys + nextpnr-xilinx) — fully FOSS, no Vivado
@@ -115,7 +116,7 @@ flows = 48 channels, to `239.255.x.y:4321`. 435-byte frames, 3000 pps per flow.
   └──────────┘  feedback   │              ▼                │
                            │   packetizer: 6 × 8 ch rings  │
                            │   paced by the media clock    │
-                           │              │                │   6 × Dante
+                           │              │                │   6 × AoIP 
                            │              ▼                │   multicast
                            │   TXFrameArbiter ──► LiteEth ─┼──► flows
                            │                        ▲      │   (UDP 4321)
@@ -671,10 +672,10 @@ firmware/
                         Phase 4 factors the servo out for reuse by ptpv1.c
   ptpv1.c               PTPv1 slave -- the clock Dante actually speaks
   mcr.c                 media-clock NCO servo
-  mcr_dante.c           the Dante media clock: sole NCO owner, rate-only,
+  mcr_dante.c           the AoIP media clock: sole NCO owner, rate-only,
                         slew-limited.  Replaces mcr.c's ownership
 
-  --- Dante control plane ---
+  --- AoIP control plane ---
   mdns.c                _netaudio-{arc,cmc,chan,bund} discovery records
   dante_dev.c           device identity + g_latency_ns, the ONE advertised
                         latency all three publishers read
