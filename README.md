@@ -159,7 +159,7 @@ Two properties are load-bearing and must survive every future change:
 | 3 | Dante discovery (mDNS + ARC + CMC + info) | **device appears in Dante Controller** | **done** |
 | 4 | `ptpv1.c` — PTPv1 slave | locks to a PTPv1 master | **done** — locks in ~30 s, offset sub-µs |
 | 5 | `dante_packetizer.py` + `dante_tx.c` | audio received by real hardware | **done** — clean audio on the bench |
-| 6 | Hardening / long-run | 24 h, no dropouts | not started |
+| 6 | Hardening / long-run | 24 h, no dropouts | **partial** — see below |
 | 8 | Persistent settings + RX patch | survives a power cycle | **not started** |
 | 7 | Unicast flows + subscriptions | subscribe from Dante Controller | **done** — per-flow map, slots and fpp |
 
@@ -381,6 +381,17 @@ region or a larger config record.
 Worth doing together with a **write policy**: a setting that is saved on every
 Controller poll would write flash constantly, so saves must be debounced and
 only on actual change.
+
+**Long-run (phase 6) is unproven, but three days of uptime did not break it.**
+Observed 2026-08-11: the board had been powered for **3 days**. Starting the host
+gave **instantly clean audio** — no re-lock wait, no startup artefacts. That is
+real evidence that PTPv1 lock and the media-clock discipline survive long
+uptime, which is what the drift work was for.
+
+It is NOT the 24 h test. Audio was not streaming for those three days — the host
+was off — so it says the clock is healthy after long idle, not that a stream
+survives 24 h. The soak that phase 6 asks for is continuous audio, watching
+`underrun` / `overrun` / receiver-reported peaks, and it has not been run.
 
 **Our advertised `latency_ns` is a FLOOR, not a setting — keep it LOW.**
 A receiver plays out at `max(our advertised latency_ns, its own setting)`, so
