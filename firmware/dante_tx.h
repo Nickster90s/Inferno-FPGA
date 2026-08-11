@@ -127,7 +127,26 @@
 // Do not widen this to silence re-anchors. If it fires often, the phase is
 // genuinely moving and the cause is upstream -- most likely mcr_dante's rate
 // discipline having tripped, which lets the clock free-run at ~4.4 ppm.
-#define DANTE_TX_REANCHOR_SAMPLES  (24)
+// 8. The old 24 was sized as "half a 1 ms budget" and does not survive a
+// receiver running at 0.25 ms: 24 samples is 0.5 ms, DOUBLE that receiver's
+// entire budget of 12 samples. Same shape as the 240-sample threshold that
+// guarded a 48-sample budget before it.
+//
+// Measured 2026-08-11: with a RedNet A16R at 0.25 ms, `anchors` rose 5 -> 7 in
+// about thirty minutes, so the media clock's residual drift walks the emitted
+// timestamp until this fires. Between fires the error sweeps the whole window,
+// and a 24-sample sweep cannot fit inside a 12-sample budget -- the A16R's
+// reported latency sat clamped at 0 (grey Latency Status: no health indicator)
+// and would go red if the drift ever ran the other way.
+//
+// 8 keeps the sweep at 0.167 ms, inside a 0.25 ms budget, and is still ~3.5x
+// the 2.3-sample on-wire noise floor measured by tools/ts_lag.py. The cost is
+// more frequent re-anchors, but each step is 8 samples instead of 24 -- a
+// smaller discontinuity, which is the thing that can click.
+//
+// If this fires often, the phase is genuinely moving and the cause is upstream
+// -- most likely mcr_dante's rate discipline having tripped.
+#define DANTE_TX_REANCHOR_SAMPLES  (8)
 
 typedef struct {
     uint32_t enables;
