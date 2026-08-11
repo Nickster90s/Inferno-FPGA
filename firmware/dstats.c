@@ -344,6 +344,19 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
 
     // 'X' + u8 -> largest fpp we accept in a flow request (60 = anything).
     // 'Y' + u8 -> fpp maximum advertised in the channel record.
+    // 'Z' + 0|1 -> auto-raise the advertised latency to cover bound flows.
+    if (len >= 2 && req[0] == 'Z') {
+        g_latency_autoraise = req[1] ? 1 : 0;
+        mdns_announce();
+        printf("[lat] auto-raise = %u\n", g_latency_autoraise);
+        uint8_t *pz = net_udp_payload_buf();
+        uint32_t nz = 0;
+        put32(pz, nz, 0x4c415a31u); nz += 4;               // 'LAZ1'
+        pz[nz++] = g_latency_autoraise;
+        net_udp_commit(src_ip, src_port, STATS_PORT, nz, NET_TOS_BEST_EFFORT);
+        return;
+    }
+
     if (len >= 2 && req[0] == 'Y') {
         g_fpp_adv_max = req[1] ? req[1] : 8;
         mdns_announce();

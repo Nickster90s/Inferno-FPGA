@@ -25,7 +25,8 @@ dante_dev_t g_dante;
 // (ARC 0x1101), or tools/stats.py opcode 'L' can, with no rebuild.
 uint32_t g_latency_ns = 1000000;
 uint8_t  g_fpp_max_accept = 60;
-uint8_t  g_fpp_adv_max    = 8;   // 60 = accept anything; see dante_dev.h
+uint8_t  g_fpp_adv_max    = 4;   // what a RedNet A16R advertises
+uint8_t  g_latency_autoraise = 0;  // off: it papered over an fpp problem   // 60 = accept anything; see dante_dev.h
 
 static int append_str(char *dst, int pos, int maxlen, const char *s)
 {

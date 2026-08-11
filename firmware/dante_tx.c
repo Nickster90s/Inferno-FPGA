@@ -1125,6 +1125,13 @@ int dante_tx_flow_desc(unsigned f, uint8_t ip[4], uint16_t *port,
 // were tried on the bench and a receiver treats them as it treats 0.25.
 uint32_t dante_tx_latency_effective(void)
 {
+    // OFF BY DEFAULT once measured: with the advertised fpp maximum capped, a
+    // receiver takes max(our floor, its own setting) and sorts itself out --
+    // A16R 0.25 ms and AM2 1.0 ms concurrently against a 0.25 ms floor. The
+    // auto-raise then does nothing but drag every fast receiver up to whatever
+    // the slowest one needs, which is the opposite of what it was added for.
+    if (!g_latency_autoraise) return g_latency_ns;
+
     static const uint32_t std_lat[5] = {250000u, 500000u, 1000000u,
                                         2000000u, 5000000u};
     uint32_t worst = 0;
