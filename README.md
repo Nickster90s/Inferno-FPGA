@@ -393,48 +393,66 @@ was off — so it says the clock is healthy after long idle, not that a stream
 survives 24 h. The soak that phase 6 asks for is continuous audio, watching
 `underrun` / `overrun` / receiver-reported peaks, and it has not been run.
 
-**Per-receiver latency works — the fix was the fpp advertisement, not latency.**
-Verified 2026-08-11 with three receivers subscribed simultaneously, each at its
-OWN latency setting, audio confirmed clean by ear on the AM2 and DVS:
+**Per-receiver latency works.** Verified 2026-08-11 with three receivers
+subscribed at once, each at its OWN latency setting, all green in Dante
+Controller and audio clean by ear on the AM2 and DVS:
 
-| receiver | negotiated `fpp` | its setting | measured |
-|---|---|---|---|
-| RedNet A16R | **4** | 0.25 ms | **81 µs, green** |
-| RedNet AM2 | 16 | 1.0 ms | 0.46 ms |
-| Dante Virtual Soundcard | 60 | 4.0 ms | 1.77 ms |
+| receiver | `fpp` | its setting | measured | notes |
+|---|---|---|---|---|
+| RedNet A16R | 4 (its own choice) | 0.25 ms | **20 µs** | peak 7 samples |
+| RedNet AM2 | 16 (its own choice) | 1.0 ms | 280 µs | |
+| Dante Virtual Soundcard | **16, clamped from 60** | 4.0 ms | **<700 µs** | was 1.77 ms |
 
-15,800 pps, 0 underrun/s, 0 overrun/s.
+18,000 pps, 0 underrun/s, 0 overrun/s, ring 64.
 
-**What was wrong for a long time was the PACKET SIZE, not the latency number.**
-We advertised `fpp=8,2` and accepted up to 60, so receivers negotiated packets
-we could not deliver quickly — an AM2 on `fpp=16` needs 333 µs of packetization
-and simply cannot be served inside a 250 µs budget, so it went red and looked
-like a latency bug. A real RedNet A16R advertises **`fpp=4,2`**: an 83 µs
-window, so every flow it serves fits any latency a receiver picks, and the
-receiver's own setting is just buffer on top. That is the whole mechanism —
-there is no clever per-flow latency negotiation. Advertising 4 made the A16R
-renegotiate to `fpp=4` and its measured latency fell from 66 µs to 20 µs.
+Three things had to be right, and each was wrong in a different way.
 
-Receivers then take `max(our advertised value, their own setting)` and sort
-themselves out, which is what the Dante documentation says all along.
+**1. Advertise a small `fpp`, not a large one.** We advertised `fpp=8,2` and
+accepted up to 60, so receivers negotiated packets we could not deliver quickly
+— an AM2 on `fpp=16` needs 333 µs of packetization and cannot be served inside
+a 250 µs budget, so it went red and looked like a latency fault. A real A16R
+advertises **`fpp=4,2`**. Receivers then take `max(our value, their own setting)`
+and sort themselves out, which is what the Dante documentation says all along.
+Note a receiver picks `fpp` from its OWN latency, roughly latency ÷ 3: the A16R
+went 8 → 4 by itself when its setting went 0.5 → 0.25 ms.
 
-Not everything honours the advertised maximum: the A16R took `fpp=4`, the AM2
-still asks 16 and DVS still asks 60. It costs nothing because each is served at
-its own latency, but it is why DVS measures 1.77 ms from us against 800 µs from
-an A16R — the A16R REFUSES `fpp` above 4 and we accept it. Rejecting it is not
-free: capping ACCEPTANCE at 8 made the AM2 and DVS stop subscribing entirely
-rather than renegotiate downward, so `g_fpp_max_accept` stays at 60.
+**2. Serve an oversized `fpp`, do not refuse it** (`g_fpp_clamp`, cap
+`g_fpp_max_accept = 16`). DVS cannot be talked down — its own minimum latency is
+4 ms so it always asks for `fpp=60`. Rejecting is useless: capped at 4, DVS
+retried the IDENTICAL request 16 times and never renegotiated, and so did the
+AM2; both just stop subscribing. Serving a SMALLER packet than was asked for
+works, because a receiver reassembles by TIMESTAMP rather than by the `fpp` it
+requested. That is how the A16R gets away with capping at 4.
+
+The cap is 16 and not 4, and the difference was measured with audio playing:
+
+| cap | DVS | AM2 |
+|---|---|---|
+| 60 (accept anything) | `fpp=60`, 1.77 ms | 0.46 ms, green |
+| 4 (copy the A16R) | `fpp=4`, 0.42 ms | **1.10 ms, RED** |
+| **16** | `fpp=16`, 0.70 ms | **0.28 ms, green** |
+
+A receiver's requested `fpp` encodes its own CAPABILITY, not just its latency.
+The AM2 asks for 16 because it cannot process 12,000 packets/s; at `fpp=4` its
+rate tripled and it went red while OUR side stayed clean at 48,001 pps with zero
+overruns. DVS, a PC, handled 12,000 pps fine. Copying the A16R's cap of 4 is
+wrong for a mixed bench.
+
+**3. `DANTE_TX_TS_OFFSET = 0`**, so `lag = fpp-1`. The old value of 6 was
+calibrated at a large `fpp` and does not survive a small one: when the A16R
+renegotiated to `fpp=4` the lag became 3-6 = **-3 samples** — our timestamps
+AHEAD of arrival — the measurement clamped to zero and Controller showed a GREY
+Latency Status. 0 is correct by construction, not by tuning: the timestamp marks
+the packet's first sample and the packet leaves when its last sample arrives.
+
+> A low measured latency is margin, not risk. 20 µs of a 250 µs budget means we
+> deliver early and the receiver keeps its slack. Playout alignment depends on
+> timestamp CORRECTNESS, not delivery time. The cost is that the average sits
+> near the measurement floor — watch the PEAK for early warning.
 
 `dante_tx_latency_effective()` (raise the advertised latency to cover the
-largest bound `fpp` window) was built when this was misdiagnosed and is now OFF
-by default — with the `fpp` cap it only dragged fast receivers up to the slowest.
-Kept behind `g_latency_autoraise` in case a receiver is ever found that needs it.
-
-**A grey Latency Status is not a fault.** At a 0.5 ms floor the A16R reports
-peak 0 — our packets arrive at or before their own timestamp, `now - timestamp`
-clamps to zero, and Controller has nothing to colour. It does mean the health
-indicator is lost, which is a real cost of running the floor close to our own
-egress timing.
+largest bound `fpp` window) was built when this was misdiagnosed and is OFF by
+default; with the `fpp` cap it only dragged fast receivers up to the slowest.
 
 **Clipping at full source volume** is unconfirmed as ours. The digital path is
 a bit-exact MSB-justified truncation with no gain stage, so it cannot create
