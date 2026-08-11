@@ -819,9 +819,19 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         // so over 0x1101 and mDNS, receivers used 0.25 ms -- and Controller's
         // config page still read 0.5 ms, because that is what this table had
         // been frozen at when it was copied from an A16R.
-        uint32_t eff = dante_tx_latency_effective();
-        arc_1100_patch_u32(0x8205, eff);
-        arc_1100_patch_u32(0x8301, eff);
+        // THE CONFIGURED VALUE, not the effective one. Controller's config
+        // page reads these, so reporting the auto-raised figure here made a
+        // 0.25 ms selection read back as 2.0 ms -- indistinguishable from the
+        // setting being ignored, which is the bug this whole area started with.
+        //
+        // The two are deliberately different: g_latency_ns is what the operator
+        // CHOSE, and dante_tx_latency_effective() is what the bound flows can
+        // actually be served at. Audinate describes the same split -- the
+        // configured setting stays yours and Dante "increases it to the lowest
+        // supported value" for the FLOW. The raised value goes out in the mDNS
+        // record and the flow descriptor, which is what receivers act on.
+        arc_1100_patch_u32(0x8205, g_latency_ns);
+        arc_1100_patch_u32(0x8301, g_latency_ns);
         dante_msg_bytes(&m, arc_1100_body, sizeof(arc_1100_body));
         break;
 
