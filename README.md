@@ -222,6 +222,37 @@ same `max=128` truncation, so the bug class had been found once and these two
 were missed.
 
 
+**The ring can lose prime and never recover, with data still arriving at the
+correct rate.** Seen 2026-08-11 after a stretch of runtime experiments: audio
+stopped on every receiver and a RedNet AM2 became unstable, while the counters
+read:
+
+    rx_beats = ep_out = 9,312,144/s   leak +0.00%   overrun 0/s
+    fifo_level 0                      underrun 48,001/s
+
+Data WAS entering the ring at the right rate -- writes were not being dropped
+and nothing was leaking. But the write and read pointers were chasing each other
+with NO CUSHION: the ring had lost its 64-sample buffer, never re-primed, and
+every packet was built from silence. 48,001 underruns/s is one per sample tick,
+which is the signature.
+
+The media clock was healthy throughout -- ARMED, -4367 ppb, 0 trips -- so this
+is not a clock fault. `ep_out` running ~1% above nominal was the USB feedback
+servo pulling hard trying to refill a ring that would not accumulate: a symptom,
+not the cause.
+
+**Only `fifo_level` showed it.** Packet rate, PTP lock, leak, overrun, talker
+state and flow bindings all looked normal, and the receivers were being fed a
+continuous stream of underrun-silence. A firmware reload re-primes and recovers
+it within seconds.
+
+WHAT TRIGGERED IT IS NOT ESTABLISHED. The likely candidates are the runtime
+experiments running at the time -- three `DANTE_TX_TS_OFFSET` changes, each of
+which calls `ts_anchor()` and is documented as a timestamp discontinuity that
+should not be done while anyone is listening, plus repeated `dante_tx_drop_all()`
+cycles. It has not been reproduced deliberately, and until it is, the honest
+statement is that the ring has a state it can enter and not leave on its own.
+
 **The residual drift is +0.35 ppm, and it is what makes a receiver's Latency
 Status walk.** Measured 2026-08-11 with `tools/mclk.py watch 120`, discipline
 ARMED and healthy (target and applied both -4354 ppb, 0 trips, ring 63-67, 0
