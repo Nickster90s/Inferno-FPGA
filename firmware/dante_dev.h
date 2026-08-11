@@ -71,8 +71,21 @@ extern uint32_t g_latency_ns;
 // it -- and fpp=16 is a 333 us packetization window, which cannot fit inside a
 // 250 us advertised latency. Capping this is what lets a slow receiver be
 // pushed onto small packets so a low latency is reachable for everyone.
-// 16, with g_fpp_clamp on: anything asking for MORE is served at 16 rather than
-// refused. Measured with three receivers and audio playing:
+// OFF BY DEFAULT. Clamping DVS from fpp=60 to 16 improves DVS and COSTS the AM2
+// more than it gains, because it triples DVS's packet rate and the total load is
+// what the AM2 cannot take. Measured A/B, same bench, audio playing:
+//
+//     clamp ON,  18,000 pps   A16R 0    AM2 50 (1.04 ms) RED   DVS 11 (0.42 ms)
+//     clamp OFF,  9,800 pps   A16R 6    AM2 22 (0.46 ms) green DVS 91 (2.73 ms)
+//
+// The AM2's OWN fpp was 16 in both cases -- the clamp never touched its flow.
+// What changed was everything else on the wire. Our transmit jitter grows with
+// TOTAL packet rate, and the AM2 has the least margin, so it fails first.
+//
+// This was committed ON on the strength of a 15-second measurement and reverted
+// after ten minutes of running. Short samples do not show it.
+//
+// The earlier per-cap figures, taken before that was understood:
 //
 //     cap 60 (accept anything)  DVS fpp=60  1.77 ms   AM2 0.46 ms   all green
 //     cap  4 (like an A16R)     DVS fpp=4   0.42 ms   AM2 1.10 ms   AM2 RED
