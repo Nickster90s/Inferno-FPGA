@@ -222,6 +222,38 @@ same `max=128` truncation, so the bug class had been found once and these two
 were missed.
 
 
+**The residual drift is +0.35 ppm, and it is what makes a receiver's Latency
+Status walk.** Measured 2026-08-11 with `tools/mclk.py watch 120`, discipline
+ARMED and healthy (target and applied both -4354 ppb, 0 trips, ring 63-67, 0
+underruns):
+
+    drift slip  +2 samples / 120 s  =  +0.35 ppm  =  +1.2 ms/hour
+
+`drift` is `emitted timestamp - PTP`, so a positive slip means our timestamps
+run AHEAD and a receiver's measured latency falls by **1 sample per minute**. A
+RedNet A16R at 0.25 ms was watched doing exactly that: 134 µs, decaying, then
+clamped at 0 and its Latency Status went grey. At that rate the re-anchor
+backstop (now 8 samples) fires about every 8 minutes, and every fire is a
+timestamp discontinuity.
+
+This is why neither a timestamp bias nor a tighter re-anchor threshold fixes it.
+The error does not settle anywhere — it walks — so any bias only chooses where
+in the walk you start:
+
+| `DANTE_TX_TS_OFFSET` | A16R reads (budget 12 samples) | verdict |
+|---|---|---|
+| 0 | 0/12 | grey, but full margin — we always arrive early |
+| -2 | 8-10/12 | green, ~25% margin |
+| -4 | 9-11/12 | green, one excursion from red |
+
+THE FIX IS TO NULL THE RESIDUAL, not to bias around it: a slow outer trim that
+closes the loop on the MEASURED drift (the quantity `mclk.py watch` already
+computes) rather than trusting the PTP servo integral alone. It needs to be slow
+and low-authority — pointing `mcr` at `g_ptpv1` has broken audio twice before,
+see below — but +-0.5 ppm of authority updated once a minute would hold the
+error still, and a still error is what lets a 0.25 ms receiver keep both its
+margin and its indicator.
+
 **Media clock: rate discipline now works (2026-08-03), audio interaction still
 untested.** `mcr_dante.c` replaces `mcr`'s ownership of the NCO — one writer,
 rate only (`g_ptpv1.rate_ppb`, the servo integral, never the phase term),
