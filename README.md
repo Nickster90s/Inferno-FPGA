@@ -493,6 +493,21 @@ global Fmax does not predict USB quality:
 JOBS=3 tools/seed_sweep.sh 1 9      # builds each seed, tabulates Fmax per clock
 ```
 
+### The short way
+
+```sh
+./flash.sh                 # volatile: pld load + firmware over Ethernet
+./flash.sh --permanent     # SPI: bitstream at 0x0 AND firmware image at 3 MB
+./flash.sh --unlock        # once per board, before the first --permanent
+./flash.sh --fw-only       # firmware only, no bitstream
+```
+
+It rebuilds the firmware first, refuses to run while picocom holds
+`/dev/ttyACM0`, and checks the board answers afterwards. It defaults to
+`build_seed8/` — the bitstream VALIDATED on hardware — and says so, warning if
+`build/colorlight_i9plus/` is newer rather than silently picking either. Pass
+`--bit PATH` to override. The manual steps below are what it runs.
+
 ### Persistent flashing (SPI — survives power cycle)
 
 `pld load` alone is **not** persistent. Writing SPI needs the bscan proxy:
@@ -638,6 +653,8 @@ rx_gate.py              RX destination-MAC allow-list: drops the flooded audio
                         before it takes an RX slot.  Off at reset -- RX_GATE.md
 floorplan_usb.py        --pre-place region constraint for the USB block
 build.sh                deterministic build wrapper (PYTHONHASHSEED + setarch -R)
+flash.sh                flash the board.  Volatile by default (a power cycle
+                        reverts); --permanent writes SPI, --unlock once per board
 
 tools/
   netload.py            push firmware into coderam over raw Ethernet (dev loop)
