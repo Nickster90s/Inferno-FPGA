@@ -393,33 +393,42 @@ was off — so it says the clock is healthy after long idle, not that a stream
 survives 24 h. The soak that phase 6 asks for is continuous audio, watching
 `underrun` / `overrun` / receiver-reported peaks, and it has not been run.
 
-**The advertised `latency_ns` must be >= every subscribed receiver's `fpp`
-window.** A packet cannot exist until `fpp` samples after its own timestamp, and
-receivers FOLLOW our advertised value rather than taking `max()` with their own
-minimum. Measured on a RedNet AM2, 2026-08-11, reproducible both ways:
+**Per-receiver latency works — the fix was the fpp advertisement, not latency.**
+Verified 2026-08-11 with three receivers subscribed simultaneously, each at its
+OWN latency setting, audio confirmed clean by ear on the AM2 and DVS:
 
-| our floor | A16R (`fpp=8`, 167 µs) | AM2 (`fpp=16`, 333 µs) |
-|---|---|---|
-| 0.25 ms | 66–72 µs, green | **1.21 ms, RED** |
-| 0.5 ms | 0 (grey — see below) | 0.21–0.27 ms, green |
-| 1 ms | forced up to 1 ms | 0.29 ms, green |
+| receiver | negotiated `fpp` | its setting | measured |
+|---|---|---|---|
+| RedNet A16R | **4** | 0.25 ms | **81 µs, green** |
+| RedNet AM2 | 16 | 1.0 ms | 0.46 ms |
+| Dante Virtual Soundcard | 60 | 4.0 ms | 1.77 ms |
 
-Tell the network to expect packets within 250 µs and a receiver needing 333 µs
-to assemble one cannot comply: it reports the latency it actually requires and
-goes red. So **the lowest usable floor is the largest `fpp` window among
-subscribed receivers** — 0.5 ms for an A16R + AM2 bench. The same rule predicted
-the `fpp=60` device reporting 1.29 ms against a 250 µs floor, just over its own
-1.25 ms window.
+15,800 pps, 0 underrun/s, 0 overrun/s.
 
-One device-wide value therefore cannot give a fast receiver 0.25 ms while a
-slower one runs at its own rate. `latency_ns` lives in the CHANNEL record and
-receivers subscribe to overlapping channels, so per-channel does not separate
-them either. Genuinely open.
+**What was wrong for a long time was the PACKET SIZE, not the latency number.**
+We advertised `fpp=8,2` and accepted up to 60, so receivers negotiated packets
+we could not deliver quickly — an AM2 on `fpp=16` needs 333 µs of packetization
+and simply cannot be served inside a 250 µs budget, so it went red and looked
+like a latency bug. A real RedNet A16R advertises **`fpp=4,2`**: an 83 µs
+window, so every flow it serves fits any latency a receiver picks, and the
+receiver's own setting is just buffer on top. That is the whole mechanism —
+there is no clever per-flow latency negotiation. Advertising 4 made the A16R
+renegotiate to `fpp=4` and its measured latency fell from 66 µs to 20 µs.
 
-> Two earlier revisions of this file got this wrong in opposite directions: one
-> claimed a low floor would silently kill DVS, the other claimed `max()` made a
-> low floor harmless. Both were reasoned from the protocol rather than measured.
-> The table above is measurement.
+Receivers then take `max(our advertised value, their own setting)` and sort
+themselves out, which is what the Dante documentation says all along.
+
+Not everything honours the advertised maximum: the A16R took `fpp=4`, the AM2
+still asks 16 and DVS still asks 60. It costs nothing because each is served at
+its own latency, but it is why DVS measures 1.77 ms from us against 800 µs from
+an A16R — the A16R REFUSES `fpp` above 4 and we accept it. Rejecting it is not
+free: capping ACCEPTANCE at 8 made the AM2 and DVS stop subscribing entirely
+rather than renegotiate downward, so `g_fpp_max_accept` stays at 60.
+
+`dante_tx_latency_effective()` (raise the advertised latency to cover the
+largest bound `fpp` window) was built when this was misdiagnosed and is now OFF
+by default — with the `fpp` cap it only dragged fast receivers up to the slowest.
+Kept behind `g_latency_autoraise` in case a receiver is ever found that needs it.
 
 **A grey Latency Status is not a fault.** At a 0.5 ms floor the A16R reports
 peak 0 — our packets arrive at or before their own timestamp, `now - timestamp`
