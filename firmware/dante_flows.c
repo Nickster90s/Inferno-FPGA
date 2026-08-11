@@ -123,7 +123,9 @@ static void flows_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
                    (unsigned long)g_dante.sample_rate, g_dante.bits_per_sample);
             code = 0x0301;
             g_flows_stats.rejected++;
-        } else if (!dante_tx_fpp_supported(fpp) ||
+        } else if ((g_fpp_clamp && fpp > g_fpp_max_accept
+                    && (fpp = g_fpp_max_accept, 0)) ||
+                   !dante_tx_fpp_supported(fpp) ||
                    (fpp == 2 && (nch & 1))) {
             // fpp must be in FPP_TABLE (every entry divides 48000, which is
             // what keeps the pacing phase aligned across the subsec wrap), and

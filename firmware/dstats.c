@@ -345,6 +345,19 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     // 'X' + u8 -> largest fpp we accept in a flow request (60 = anything).
     // 'Y' + u8 -> fpp maximum advertised in the channel record.
     // 'Z' + 0|1 -> auto-raise the advertised latency to cover bound flows.
+    // 'C' + 0|1 -> clamp an oversized fpp request instead of rejecting it.
+    if (len >= 2 && req[0] == 'C') {
+        g_fpp_clamp = req[1] ? 1 : 0;
+        printf("[flow] oversized fpp: %s\n", g_fpp_clamp ? "CLAMP" : "reject");
+        dante_tx_drop_all();
+        uint8_t *pc = net_udp_payload_buf();
+        uint32_t nc = 0;
+        put32(pc, nc, 0x434c4d31u); nc += 4;               // 'CLM1'
+        pc[nc++] = g_fpp_clamp;
+        net_udp_commit(src_ip, src_port, STATS_PORT, nc, NET_TOS_BEST_EFFORT);
+        return;
+    }
+
     if (len >= 2 && req[0] == 'Z') {
         g_latency_autoraise = req[1] ? 1 : 0;
         mdns_announce();

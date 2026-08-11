@@ -71,6 +71,20 @@ extern uint32_t g_latency_ns;
 // it -- and fpp=16 is a 333 us packetization window, which cannot fit inside a
 // 250 us advertised latency. Capping this is what lets a slow receiver be
 // pushed onto small packets so a low latency is reachable for everyone.
+// 16, with g_fpp_clamp on: anything asking for MORE is served at 16 rather than
+// refused. Measured with three receivers and audio playing:
+//
+//     cap 60 (accept anything)  DVS fpp=60  1.77 ms   AM2 0.46 ms   all green
+//     cap  4 (like an A16R)     DVS fpp=4   0.42 ms   AM2 1.10 ms   AM2 RED
+//     cap 16                    DVS fpp=16  0.70 ms   AM2 0.28 ms   all green
+//
+// A receiver's requested fpp encodes its own CAPABILITY, not just its latency.
+// The AM2 asks for 16 because it cannot process 12,000 packets/s -- clamping it
+// to 4 tripled its packet rate and pushed it to 1.1 ms and red, while our side
+// stayed clean at 48,001 pps with zero overruns. DVS, a PC, handles 12,000 pps
+// happily. So "cap everything at 4 like the A16R does" is wrong for a mixed
+// bench; 16 only bites the outlier and leaves every other receiver alone.
+//
 // 60 = accept anything (the old behaviour).
 extern uint8_t g_fpp_max_accept;
 
@@ -79,6 +93,14 @@ extern uint8_t g_fpp_adv_max;
 
 // Raise the advertised latency to cover the largest bound fpp window.
 extern uint8_t g_latency_autoraise;
+
+// On an oversized fpp request: 0 = reject it, 1 = SERVE IT at g_fpp_max_accept.
+// DVS cannot be talked down -- its own minimum latency is 4 ms so it always asks
+// for fpp=60, and rejecting it made it retry the identical request 16 times
+// rather than renegotiate. But it accepts fpp=4 from a RedNet A16R, which caps
+// there, so it can evidently consume a smaller packet than it asked for. A
+// receiver reassembles by TIMESTAMP, not by the fpp it requested.
+extern uint8_t g_fpp_clamp;
 
 // Collector for the ARC request mirror; all-zero disables it.
 extern uint8_t g_arc_mirror_ip[4];
