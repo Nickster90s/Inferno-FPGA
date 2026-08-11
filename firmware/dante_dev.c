@@ -24,6 +24,7 @@ dante_dev_t g_dante;
 // if DVS matters more on a given system -- Dante Controller can set it live
 // (ARC 0x1101), or tools/stats.py opcode 'L' can, with no rebuild.
 uint32_t g_latency_ns = 1000000;
+uint8_t  g_fpp_max_accept = 60;   // 60 = accept anything; see dante_dev.h
 
 static int append_str(char *dst, int pos, int maxlen, const char *s)
 {

@@ -66,6 +66,14 @@ extern dante_dev_t g_dante;
 // (fpp/48000) fits inside it. fpp=60, which DVS demands, is 1.25 ms on its own.
 extern uint32_t g_latency_ns;
 
+// Largest fpp we will ACCEPT in a flow request. We advertise "fpp=8,2" in mDNS
+// but historically accepted anything in FPP_TABLE, so an AM2 asking for 16 got
+// it -- and fpp=16 is a 333 us packetization window, which cannot fit inside a
+// 250 us advertised latency. Capping this is what lets a slow receiver be
+// pushed onto small packets so a low latency is reachable for everyone.
+// 60 = accept anything (the old behaviour).
+extern uint8_t g_fpp_max_accept;
+
 // Collector for the ARC request mirror; all-zero disables it.
 extern uint8_t g_arc_mirror_ip[4];
 

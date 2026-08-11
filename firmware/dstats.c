@@ -342,6 +342,19 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         return;
     }
 
+    // 'X' + u8 -> largest fpp we accept in a flow request (60 = anything).
+    if (len >= 2 && req[0] == 'X') {
+        g_fpp_max_accept = req[1] ? req[1] : 60;
+        printf("[flow] max accepted fpp = %u\n", g_fpp_max_accept);
+        dante_tx_drop_all();          // force receivers to renegotiate now
+        uint8_t *px = net_udp_payload_buf();
+        uint32_t nx = 0;
+        put32(px, nx, 0x46505831u); nx += 4;               // 'FPX1'
+        px[nx++] = g_fpp_max_accept;
+        net_udp_commit(src_ip, src_port, STATS_PORT, nx, NET_TOS_BEST_EFFORT);
+        return;
+    }
+
     if (len >= 1 && req[0] == 'L') {
         if (len >= 5) {
             uint32_t v = ((uint32_t)req[1] << 24) | ((uint32_t)req[2] << 16) |

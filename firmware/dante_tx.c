@@ -134,6 +134,10 @@ static const uint16_t k_fpp_table[8] = { 8, 16, 24, 32, 60, 4, 2, 48 };
 
 int dante_tx_fpp_supported(uint16_t fpp)
 {
+    // Enforce the advertised maximum. mDNS says "fpp=8,2"; accepting 16 anyway
+    // was a promise we did not keep, and it is why an AM2 sits on a 333 us
+    // window that no 250 us latency can accommodate.
+    if (fpp > g_fpp_max_accept) return 0;
     for (unsigned i = 0; i < 8; i++)
         if (k_fpp_table[i] == fpp) {
             // pay_len = nslots*3*fpp must stay a multiple of 4 (f_last_idx is
