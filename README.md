@@ -254,7 +254,7 @@ cycles. It has not been reproduced deliberately, and until it is, the honest
 statement is that the ring has a state it can enter and not leave on its own.
 
 **The residual drift is +0.35 ppm, and it is what makes a receiver's Latency
-Status walk.** Measured 2026-08-11 with `tools/mclk.py watch 120`, discipline
+Status walk.** Full handoff for fixing it: [`DRIFT_HANDOFF.md`](DRIFT_HANDOFF.md). Measured 2026-08-11 with `tools/mclk.py watch 120`, discipline
 ARMED and healthy (target and applied both -4354 ppb, 0 trips, ring 63-67, 0
 underruns):
 
