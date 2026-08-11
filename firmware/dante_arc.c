@@ -684,7 +684,7 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
             dante_msg_u16(&m, local_flow_name_off);
             // For a multicast flow the first 4 bytes of this trailing field are
             // the latency in ns; the bundle record advertises 1 ms, so match it.
-            dante_msg_u32(&m, g_latency_ns);
+            dante_msg_u32(&m, dante_tx_latency_effective());
             dante_msg_u32(&m, 0);
 
             uint16_t descr_off = (uint16_t)m.len;
@@ -819,8 +819,9 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         // so over 0x1101 and mDNS, receivers used 0.25 ms -- and Controller's
         // config page still read 0.5 ms, because that is what this table had
         // been frozen at when it was copied from an A16R.
-        arc_1100_patch_u32(0x8205, g_latency_ns);
-        arc_1100_patch_u32(0x8301, g_latency_ns);
+        uint32_t eff = dante_tx_latency_effective();
+        arc_1100_patch_u32(0x8205, eff);
+        arc_1100_patch_u32(0x8301, eff);
         dante_msg_bytes(&m, arc_1100_body, sizeof(arc_1100_body));
         break;
 

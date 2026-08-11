@@ -179,6 +179,9 @@ int  dante_tx_mcast_enum(unsigned n, uint16_t *id);
 int  dante_tx_unbind(unsigned f);
 void dante_tx_expire(void);
 void dante_tx_drop_all(void);   // force receivers to renegotiate now
+
+// max(configured latency, what the bound flows can meet). See dante_tx.c.
+uint32_t dante_tx_latency_effective(void);
 void dante_tx_flow_info(unsigned f, uint8_t *in_use, uint32_t *age_ms,
                         uint32_t *rebinds);      // drop flows whose keepalives stopped
 

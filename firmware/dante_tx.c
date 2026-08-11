@@ -20,6 +20,7 @@
 // the IPv4 checksum be computed here once instead of in gateware.
 
 #include "dante_tx.h"
+#include "mdns.h"
 #include "dante_dev.h"
 #include "ptpv1.h"
 #include "gptp.h"
@@ -331,6 +332,21 @@ static void dante_tx_fpp_range(uint16_t *lo, uint16_t *hi);
 
 void dante_tx_poll(void)
 {
+    // A bind or unbind can change what the bound flows need, so the advertised
+    // value has to follow. Without this the auto-raise would only take effect
+    // at the next unrelated announcement, i.e. a receiver could subscribe at
+    // fpp=16 and sit red until something else happened to republish.
+    {
+        static uint32_t last_eff;
+        uint32_t eff = dante_tx_latency_effective();
+        if (eff != last_eff) {
+            if (last_eff)                       // not the first call at boot
+                printf("[dtx] advertised latency %lu -> %lu ns\n",
+                       (unsigned long)last_eff, (unsigned long)eff);
+            last_eff = eff;
+            mdns_announce();
+        }
+    }
     // TRANSMIT ONLY WHEN SOMETHING HAS ASKED FOR A FLOW.
     //
     // We used to source all six multicast bundles the moment PTP locked,
@@ -1084,6 +1100,47 @@ int dante_tx_flow_desc(unsigned f, uint8_t ip[4], uint16_t *port,
 // Controller re-sends the same latency on every view refresh, and dropping
 // flows for a no-op change would be an unexplained dropout every time an
 // operator opened a tab.
+// EFFECTIVE ADVERTISED LATENCY = max(what was selected, what the bound flows
+// can actually meet).
+//
+// Receivers use our advertised latency_ns AS the flow's playout latency -- not
+// max() with their own setting. Proven on the bench: a RedNet AM2's flow
+// request is BYTE-IDENTICAL at a 0.25 ms and a 0.5 ms advertisement (same fpp,
+// same channels, only the sequence number differs), yet it reports 0.27 ms of
+// latency at 0.5 and 1.9 ms at 0.25. It is buffering exactly what we tell it.
+//
+// A packet cannot exist until fpp samples after its own timestamp, so a flow at
+// fpp=16 needs 333 us and CANNOT be served inside a 250 us budget however good
+// the transmit side is. Advertising 0.25 with that flow bound guarantees late
+// packets and a red Latency Status.
+//
+// So do what Audinate documents a transmitter doing: "if a transmitter cannot
+// support the configured latency, Dante increases it to the lowest supported
+// value." Select 0.25 and an AM2 subscribes -> we publish 0.5 and nothing goes
+// red. The AM2 leaves -> we drop back to 0.25 on its own.
+//
+// STRICTLY greater than the window, not >=: fpp=48 is exactly 1.000 ms, and a
+// 1 ms budget for a packet that takes 1 ms to assemble leaves nothing for
+// transit. Only the five standard Dante values are used -- 0.34 ms and 0.40 ms
+// were tried on the bench and a receiver treats them as it treats 0.25.
+uint32_t dante_tx_latency_effective(void)
+{
+    static const uint32_t std_lat[5] = {250000u, 500000u, 1000000u,
+                                        2000000u, 5000000u};
+    uint32_t worst = 0;
+    for (unsigned i = 0; i < N_FLOWS; i++) {
+        if (!flows[i].in_use || !flows[i].fpp) continue;
+        // fpp samples at 48 kHz, in nanoseconds. 1e9/48000 = 20833.33; use the
+        // 64-bit form so fpp=60 does not round down into a too-small window.
+        uint32_t win = (uint32_t)(((uint64_t)flows[i].fpp * 1000000000ull) / 48000ull);
+        if (win > worst) worst = win;
+    }
+    uint32_t need = 5000000u;
+    for (unsigned i = 0; i < 5; i++)
+        if (std_lat[i] > worst) { need = std_lat[i]; break; }
+    return (need > g_latency_ns) ? need : g_latency_ns;
+}
+
 void dante_tx_drop_all(void)
 {
     unsigned n = 0;
