@@ -84,7 +84,24 @@
 // It read -39 while the true on-wire figure was -151.
 // Compile-time SEED for the runtime value; sweep it with tools/ts_offset.py
 // and only fold a verified number back into this constant.
-#define DANTE_TX_TS_OFFSET   (6)        // samples; applied in ts_anchor(), NOT the CSR
+// 0, so that lag = (fpp-1) - OFFSET = fpp-1. That is the CORRECT relationship,
+// not a tuned one: the timestamp marks the packet's FIRST sample and the packet
+// is emitted when its last sample arrives, so PTP_now - timestamp is fpp-1 by
+// construction, whatever fpp a receiver negotiates.
+//
+// The old value of 6 was calibrated against a large fpp and does not survive a
+// small one. When a RedNet A16R renegotiated to fpp=4 the lag went to 3-6 = -3
+// samples -- our timestamps AHEAD of arrival -- and its measured latency
+// collapsed to zero, which Dante Controller shows as a GREY Latency Status: not
+// a fault, but the health indicator gone. Measured on the bench at fpp=4:
+//
+//     offset  6   lag -3   A16R reports 0 samples      grey
+//     offset  0   lag  3   A16R reports 7  (0.146 ms)  green, 40% margin
+//     offset -6   lag  9   A16R reports 12 (0.25 ms)   AT its budget, would go red
+//
+// Changing this RE-ANCHORS, which is a timestamp discontinuity and can click.
+// It is not something to do while anyone is listening for pleasure.
+#define DANTE_TX_TS_OFFSET   (0)        // samples; applied in ts_anchor(), NOT the CSR
 
 // Re-anchor threshold, in samples of phase error against PTP.
 //
