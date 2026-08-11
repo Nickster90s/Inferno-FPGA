@@ -58,6 +58,23 @@ static void flows_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     const uint8_t *c = req + DANTE_HDR_LEN;
     uint32_t clen = len - DANTE_HDR_LEN;
 
+    // Stash for the mirror BEFORE building into the shared TX buffer. The
+    // question this exists to answer: does a receiver ask for something
+    // DIFFERENT when we advertise 0.25 ms versus 0.5 ms? A RedNet AM2 reports
+    // 0.27 ms of latency at a 0.5 ms floor and 1.9 ms at 0.25 ms, while its fpp
+    // stays 16 and our transmit timing does not change at all -- measured 13
+    // samples EARLY at the moment it claimed to be 1.9 ms late. Either the
+    // request differs, or the difference is inside the receiver where we cannot
+    // reach it. A byte-level diff of the two requests decides which.
+    //
+    // The console cannot do this job: it drops output under load, and the
+    // [flow] lines are the first thing lost when 48 channel TXTs are sweeping.
+    uint8_t  fmir[160];
+    uint32_t fmirn = len > sizeof(fmir) ? sizeof(fmir) : len;
+    int      do_fmirror = (g_arc_mirror_ip[0] | g_arc_mirror_ip[1] |
+                           g_arc_mirror_ip[2] | g_arc_mirror_ip[3]) != 0;
+    if (do_fmirror) memcpy(fmir, req, fmirn);
+
     uint8_t *buf = net_udp_payload_buf();
     dante_msg_t m;
     dante_msg_begin(&m, buf, req);
@@ -162,6 +179,20 @@ static void flows_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     if (net_udp_commit(src_ip, src_port, DANTE_PORT_FLOWS, total,
                        NET_TOS_BEST_EFFORT) == 0)
         g_flows_stats.tx++;
+
+    // Mirror AFTER the reply: both share net_udp_payload_buf(), and answering
+    // the receiver matters more than the diagnostic.
+    if (do_fmirror) {
+        uint8_t *mp = net_udp_payload_buf();
+        uint32_t n2 = 0;
+        mp[n2++] = 'F'; mp[n2++] = 'L'; mp[n2++] = 'C'; mp[n2++] = '1';
+        mp[n2++] = (uint8_t)(code >> 8); mp[n2++] = (uint8_t)code;
+        mp[n2++] = src_ip[0]; mp[n2++] = src_ip[1];
+        mp[n2++] = src_ip[2]; mp[n2++] = src_ip[3];
+        for (uint32_t i = 0; i < fmirn; i++) mp[n2++] = fmir[i];
+        net_udp_commit(g_arc_mirror_ip, 7780, DANTE_PORT_FLOWS, n2,
+                       NET_TOS_BEST_EFFORT);
+    }
 }
 
 void dante_flows_init(void)
