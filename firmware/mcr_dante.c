@@ -164,13 +164,28 @@
 // acquire, which is academic when the thing being corrected moves in minutes.
 // At 40 the same 48-sample error is nulled in ~10 minutes, still two orders of
 // magnitude slower than the USB feedback loop it must not disturb.
-#define PHASE_KI                 40
+// 10, with PHASE_KP_NUM/DEN raised to 30/1 -- see sims/sim_mclk_phase_trim.py,
+// which models this loop against the residual actually measured (+0.35 ppm).
+//
+// THE SHIPPED GAINS CANNOT HOLD PHASE. Kp was 2/5 = 0.4 ppb per sample. The
+// plant is an INTEGRATOR (1 ppb -> 4.8e-5 samples/s), so Kp=0.4 is a 14.5 HOUR
+// time constant: the proportional term does nothing on any useful timescale,
+// the integral runs the loop alone, and it limit-cycles over 20 samples. A
+// receiver at 0.25 ms has a budget of 12. Enabling the phase term as shipped
+// would have been worse than the drift it removes, which is presumably why it
+// defaults off -- but the reason was never written down.
+//
+// Kp=30 is tau ~= 12 min, settles within 1 sample, 1-sample steady-state swing,
+// peaks at 734 ppb against the 2000 clamp, and never exceeds the 100 ppb/s slew
+// limiter -- the constraint whose ABSENCE broke the audio twice before. 0.73 ppm
+// against the USB feedback servo's 20800 ppm of authority.
+#define PHASE_KI                 10
 #define PHASE_I_SCALE            1024
 
 // Proportional gain (ppb per sample), as a fraction. Damping only -- kept small
 // so a transient cannot jerk the rate. 48 samples -> ~19 ppb.
-#define PHASE_KP_NUM             2
-#define PHASE_KP_DEN             5
+#define PHASE_KP_NUM             30
+#define PHASE_KP_DEN             1
 
 // How long after an anchor to wait before latching the setpoint, so the drift
 // measurement has settled.
@@ -423,6 +438,33 @@ void mcr_dante_poll(void)
         // err > 0 means we are AHEAD of where we should be, so slow down.
         int32_t err = drift_samples - phase_setpoint;
 
+        // REJECT THE SECOND-BOUNDARY OUTLIER. drift_samples is computed from
+        // TWO reads taken at different instants -- gptp_read_time() and
+        // dante_tx_read_emitted() -- so when they straddle a one-second
+        // boundary the difference jumps by a whole second, 48000 samples.
+        //
+        // Harmless for the dry-run cross-check, which differentiates over a
+        // long window. FATAL in a 1 Hz control loop: measured 2026-08-11,
+        // enabling the phase term drove the integral to the +2000 ppb rail
+        // within a minute and drift read -47959 (= -48000 + 41) and then
+        // -335977. Ten re-anchors and an audio interruption before it was
+        // turned back off.
+        //
+        // sims/sim_mclk_phase_trim.py did NOT catch this: it models drift as a
+        // clean float. The gains it chose may well be right -- they were never
+        // what failed -- but the signal has to be trustworthy before the loop
+        // can use it.
+        //
+        // 2400 samples is 50 ms, far beyond anything the re-anchor backstop
+        // (8 samples) would ever allow to accumulate, so a reading past it is
+        // a sampling artefact and not a real phase error. Skip the update
+        // entirely rather than clamping: a clamped outlier still winds the
+        // integral in the wrong direction.
+        if (err > 2400 || err < -2400) {
+            phase_ppb = 0;
+            goto phase_done;
+        }
+
         phase_integ += -(int64_t)err * PHASE_KI;
         int64_t ilim = (int64_t)PHASE_MAX_PPB * PHASE_I_SCALE;
         if (phase_integ >  ilim) phase_integ =  ilim;
@@ -434,6 +476,7 @@ void mcr_dante_poll(void)
         if (phase_ppb >  PHASE_MAX_PPB) phase_ppb =  PHASE_MAX_PPB;
         if (phase_ppb < -PHASE_MAX_PPB) phase_ppb = -PHASE_MAX_PPB;
     }
+phase_done:
 
     target_ppb = g_ptpv1.rate_ppb + phase_ppb;
     if (target_ppb >  MAX_PPB) target_ppb =  MAX_PPB;
