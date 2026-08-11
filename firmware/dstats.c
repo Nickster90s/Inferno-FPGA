@@ -343,6 +343,19 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     }
 
     // 'X' + u8 -> largest fpp we accept in a flow request (60 = anything).
+    // 'Y' + u8 -> fpp maximum advertised in the channel record.
+    if (len >= 2 && req[0] == 'Y') {
+        g_fpp_adv_max = req[1] ? req[1] : 8;
+        mdns_announce();
+        printf("[flow] advertised fpp max = %u\n", g_fpp_adv_max);
+        uint8_t *py = net_udp_payload_buf();
+        uint32_t ny = 0;
+        put32(py, ny, 0x46505941u); ny += 4;               // 'FPYA'
+        py[ny++] = g_fpp_adv_max;
+        net_udp_commit(src_ip, src_port, STATS_PORT, ny, NET_TOS_BEST_EFFORT);
+        return;
+    }
+
     if (len >= 2 && req[0] == 'X') {
         g_fpp_max_accept = req[1] ? req[1] : 60;
         printf("[flow] max accepted fpp = %u\n", g_fpp_max_accept);

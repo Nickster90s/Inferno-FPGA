@@ -534,7 +534,23 @@ static uint32_t build_txt_chan(uint8_t *p, unsigned ch1)
     // fall due on tick_hi together -- six packets in one burst every 333 us
     // instead of spread across every tick, which is worth ruling out before
     // blaming the receivers.
-    n = txt_put(p, n, "fpp=8,2");
+    // ADVERTISED fpp MAXIMUM. A RedNet A16R -- a real transmitter that serves an
+    // AM2 at 1 ms and DVS at 4 ms SIMULTANEOUSLY while itself set to 0.25 ms --
+    // advertises "fpp=4,2". Four samples is an 83 us packetization window, so
+    // every flow it serves fits inside 0.25 ms no matter what the receiver's own
+    // latency is. That, not any latency negotiation, is how it does it.
+    //
+    // We advertised 8 and ACCEPTED up to 60, so DVS asked for 60 -- a 1.25 ms
+    // window -- and one such flow drags the whole device up to 2 ms.
+    {
+        char fb[16];
+        unsigned v = g_fpp_adv_max, i = 0;
+        fb[i++] = 'f'; fb[i++] = 'p'; fb[i++] = 'p'; fb[i++] = '=';
+        if (v >= 10) fb[i++] = (char)('0' + v / 10);
+        fb[i++] = (char)('0' + v % 10);
+        fb[i++] = ','; fb[i++] = '2'; fb[i] = 0;
+        n = txt_put(p, n, fb);
+    }
     // nchan is the channels in a FLOW, not the device's channel count.
     // inferno: MAX_CHANNELS_IN_FLOW.min(tx_channels.len()) -> 8. We were
     // advertising 48, which would have a receiver negotiate a 48-channel flow

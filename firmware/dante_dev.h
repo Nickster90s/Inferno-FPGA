@@ -74,6 +74,9 @@ extern uint32_t g_latency_ns;
 // 60 = accept anything (the old behaviour).
 extern uint8_t g_fpp_max_accept;
 
+// fpp maximum we ADVERTISE in the channel record. An A16R advertises 4.
+extern uint8_t g_fpp_adv_max;
+
 // Collector for the ARC request mirror; all-zero disables it.
 extern uint8_t g_arc_mirror_ip[4];
 
