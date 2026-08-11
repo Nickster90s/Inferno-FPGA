@@ -700,6 +700,7 @@ static int match_bund_inst(const char *q, unsigned *idx)
 #define W_CHAN_ONE  (1u << 10)
 #define W_BUND_ONE  (1u << 11)
 static unsigned want_idx;          // 1-based channel or bundle for W_*_ONE
+static unsigned chan_resweep;      // channel TXTs still to re-publish
 
 // The question to echo back, captured from the query. Real devices DO echo it:
 // a working A16R channel reply carries qdcount=1, while ours carried 0. mDNS
@@ -893,13 +894,36 @@ void mdns_announce(void)
 {
     announce_left    = 3;
     announce_next_ms = 0;                          // fire on the next poll
+    // Also re-publish every channel TXT -- that is where latency_ns lives.
+    chan_resweep = DANTE_TX_CHANNELS;
 }
 
 void mdns_poll(void)
 {
-    if (!announce_left) return;
-
     uint32_t now = gptp_uptime_ms();
+
+    // CHANNEL TXT RE-SWEEP.
+    //
+    // The announcement below carries ARC and CMC records only. It does NOT
+    // carry the channel TXT -- and latency_ns lives in the channel TXT. So
+    // changing the latency updated the device and told nobody: receivers and
+    // Dante Controller kept serving the cached value until its 120 s TTL ran
+    // out. Symptom: set a latency, refresh, and the old figure is back; an A16R
+    // reporting our latency as 1 ms while the device is on 0.5.
+    //
+    // The records already carry the cache-flush bit, so a resolver REPLACES on
+    // receipt. The bug was never the flag; it was that we never sent them.
+    //
+    // One channel per poll, not 48 in one message: 48 TXT records would far
+    // exceed a sane mDNS datagram, and the poll runs often enough that the
+    // sweep completes in well under a second.
+    if (chan_resweep) {
+        want_idx = DANTE_TX_CHANNELS - chan_resweep + 1;   // 1-based
+        send_response(W_CHAN_ONE);
+        chan_resweep--;
+    }
+
+    if (!announce_left) return;
     if (announce_next_ms && (int32_t)(now - announce_next_ms) < 0) return;
 
     // Unsolicited announcement: everything we have, so a controller that is

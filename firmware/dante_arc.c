@@ -310,6 +310,29 @@ static int arc_1100_patch(uint16_t key, uint16_t val)
 //
 // Offsets in this protocol are ABSOLUTE from the start of the packet and our
 // header is 10 bytes, so the blob index is (offset - DANTE_HDR_LEN).
+// Quiet variant: same write, no console line. The 0x1100 handler calls this on
+// every request, and logging it would flood the UART.
+static int arc_1100_patch_u32(uint16_t key, uint32_t val)
+{
+    uint32_t count = arc_1100_body[1];
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t o = 2 + i * 4;
+        if (o + 4 > sizeof(arc_1100_body)) break;
+        uint16_t k = (uint16_t)((arc_1100_body[o] << 8) | arc_1100_body[o + 1]);
+        if (k != key) continue;
+        uint32_t off = (uint32_t)((arc_1100_body[o + 2] << 8) | arc_1100_body[o + 3]);
+        if (off < DANTE_HDR_LEN) return -1;
+        uint32_t bi = off - DANTE_HDR_LEN;
+        if (bi + 4 > sizeof(arc_1100_body)) return -1;
+        arc_1100_body[bi + 0] = (uint8_t)(val >> 24);
+        arc_1100_body[bi + 1] = (uint8_t)(val >> 16);
+        arc_1100_body[bi + 2] = (uint8_t)(val >> 8);
+        arc_1100_body[bi + 3] = (uint8_t)val;
+        return 0;
+    }
+    return -1;
+}
+
 int dante_arc_patch_1100_u32(uint16_t key, uint32_t val)
 {
     uint32_t count = arc_1100_body[1];
@@ -787,6 +810,17 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         break;
 
     case OP_UNKNOWN_1100:
+        // THE CURRENT LATENCY MUST TRACK g_latency_ns, not sit at whatever the
+        // table was built with. 0x8205 and 0x8301 are the CURRENT value;
+        // 0x8306 is the MINIMUM SUPPORTED and must stay put, or lowering the
+        // latency would also remove the lower options from Controller's list.
+        //
+        // Symptom when these were static: the device applied 0.25 ms and said
+        // so over 0x1101 and mDNS, receivers used 0.25 ms -- and Controller's
+        // config page still read 0.5 ms, because that is what this table had
+        // been frozen at when it was copied from an A16R.
+        arc_1100_patch_u32(0x8205, g_latency_ns);
+        arc_1100_patch_u32(0x8301, g_latency_ns);
         dante_msg_bytes(&m, arc_1100_body, sizeof(arc_1100_body));
         break;
 
