@@ -393,31 +393,39 @@ was off — so it says the clock is healthy after long idle, not that a stream
 survives 24 h. The soak that phase 6 asks for is continuous audio, watching
 `underrun` / `overrun` / receiver-reported peaks, and it has not been run.
 
-**Our advertised `latency_ns` is a FLOOR, not a setting — keep it LOW.**
-A receiver plays out at `max(our advertised latency_ns, its own setting)`, so
-the value here can only ever RAISE a receiver's latency. Mixed latencies coexist
-without interfering: a console set to 1 ms and a DVS set to 4 ms run side by
-side, each at its own figure.
+**The advertised `latency_ns` must be >= every subscribed receiver's `fpp`
+window.** A packet cannot exist until `fpp` samples after its own timestamp, and
+receivers FOLLOW our advertised value rather than taking `max()` with their own
+minimum. Measured on a RedNet AM2, 2026-08-11, reproducible both ways:
 
-The hazard is a floor that is too HIGH, and it cost hours before it was
-understood: advertising 2 ms pinned a RedNet A16R to >=2 ms no matter what its
-own Latency tab said, and no amount of work on Dante Controller's UI could
-change that. A low floor costs nothing — a receiver that wants more simply asks
-for more.
+| our floor | A16R (`fpp=8`, 167 µs) | AM2 (`fpp=16`, 333 µs) |
+|---|---|---|
+| 0.25 ms | 66–72 µs, green | **1.21 ms, RED** |
+| 0.5 ms | 0 (grey — see below) | 0.21–0.27 ms, green |
+| 1 ms | forced up to 1 ms | 0.29 ms, green |
 
-Per-flow `fpp` is a separate, real bound: a packet cannot exist until `fpp`
-samples after its own timestamp, so each subscription needs at least
-`fpp/48000` — A16R `fpp=8` 0.167 ms, AM2 `fpp=16` 0.333 ms, DVS `fpp=60`
-1.25 ms. A receiver picks `fpp` to suit the latency IT is configured for, so
-this is normally the receiver's own business; our floor cannot push it below its
-own choice. Verified on the bench: with the device advertising 250 us, DVS still
-bound at `fpp=60` and ran clean at 4 ms.
+Tell the network to expect packets within 250 µs and a receiver needing 333 µs
+to assemble one cannot comply: it reports the latency it actually requires and
+goes red. So **the lowest usable floor is the largest `fpp` window among
+subscribed receivers** — 0.5 ms for an A16R + AM2 bench. The same rule predicted
+the `fpp=60` device reporting 1.29 ms against a 250 µs floor, just over its own
+1.25 ms window.
 
-> An earlier revision of this file claimed that selecting 0.25 ms while DVS was
-> subscribed would make DVS drop silently. That was wrong — `max()` means our
-> floor cannot lower a receiver below its own setting — and the bench had
-> already disproved it. Corrected rather than deleted, because the reasoning
-> error (reading a floor as if it were an assignment) is the easy one to repeat.
+One device-wide value therefore cannot give a fast receiver 0.25 ms while a
+slower one runs at its own rate. `latency_ns` lives in the CHANNEL record and
+receivers subscribe to overlapping channels, so per-channel does not separate
+them either. Genuinely open.
+
+> Two earlier revisions of this file got this wrong in opposite directions: one
+> claimed a low floor would silently kill DVS, the other claimed `max()` made a
+> low floor harmless. Both were reasoned from the protocol rather than measured.
+> The table above is measurement.
+
+**A grey Latency Status is not a fault.** At a 0.5 ms floor the A16R reports
+peak 0 — our packets arrive at or before their own timestamp, `now - timestamp`
+clamps to zero, and Controller has nothing to colour. It does mean the health
+indicator is lost, which is a real cost of running the floor close to our own
+egress timing.
 
 **Clipping at full source volume** is unconfirmed as ours. The digital path is
 a bit-exact MSB-justified truncation with no gain stage, so it cannot create
