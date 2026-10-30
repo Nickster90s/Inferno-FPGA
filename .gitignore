@@ -37,6 +37,17 @@ firmware/loader/loader.elf.map
 firmware/loader/loader.bin
 firmware/*.img
 build_seed*/
+# Elke build-output: 229 MB per directory (routed json + fasm + frames). De
+# build_seed*-regel hierboven dekte de dual-USB bring-up niet, die zijn dirs
+# anders noemde -- vandaar het patroon op prefix in plaats van op een naam.
+build_dante_*/
+build_dual_*/
+build_sweep/
+build_sweep.log
+build_usb2_*/
+# Verilog-backups van tools/gen_usb_subsystem.py: de originelen zitten in de
+# geschiedenis, dus een kopie op schijf hoort niet in de repo.
+*.pre-dante-bak
 tools/seed_sweep_logs/
 tools/seed_sweep_results.txt
 firmware/loader/.build.lock

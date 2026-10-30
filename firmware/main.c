@@ -450,7 +450,9 @@ static void check_uart_cmd(void)
             // (1209:eab1 at HIGH speed) is the eye. Note the working tap
             // and pin it as the CSR reset in avb_soc.py for a one-build
             // deterministic result. CSRs are main_-prefixed (top-level).
-            static uint8_t utap = 8;
+            // Begin bij de GEPINDE CSR-reset (30 voor Main, zie avb_soc.py),
+            // niet bij 8 -- anders springt de eerste 'u' het oog uit.
+            static uint8_t utap = 30;
             utap = (utap + 1) & 0x1F;
             main_ulpi_idelay_tap_write(utap);
             main_ulpi_idelay_load_write(1);

@@ -222,36 +222,79 @@ same `max=128` truncation, so the bug class had been found once and these two
 were missed.
 
 
-**The ring can lose prime and never recover, with data still arriving at the
-correct rate.** Seen 2026-08-11 after a stretch of runtime experiments: audio
-stopped on every receiver and a RedNet AM2 became unstable, while the counters
-read:
+**ROOT CAUSE FOUND 2026-08-14: the ring pointers wrap after 3.107 hours, and
+the occupancy calculation could not survive it.** Audio died four times --
+2026-08-12, twice on 08-13, again on 08-14 -- every time needing a JTAG
+bitstream reload. The period was the clue that named it:
 
-    rx_beats = ep_out = 9,312,144/s   leak +0.00%   overrun 0/s
-    fifo_level 0                      underrun 48,001/s
+    rd advances by `channels` (8) per media strobe at 48 kHz = 384,000/s
+    rd is Signal(32)  ->  2^32 / 384,000 = 11,185 s = 3.107 HOURS
 
-Data WAS entering the ring at the right rate -- writes were not being dropped
-and nothing was leaking. But the write and read pointers were chasing each other
-with NO CUSHION: the ring had lost its 64-sample buffer, never re-primed, and
-every packet was built from silence. 48,001 underruns/s is one per sample tick,
-which is the signature.
+`dante_packetizer.py` computed `level = wr - rd` as a PLAIN difference into a
+34-bit signed signal, which is only correct while neither pointer has wrapped:
 
-The media clock was healthy throughout -- ARMED, -4367 ppb, 0 trips -- so this
-is not a clock fault. `ep_out` running ~1% above nominal was the USB feedback
-servo pulling hard trying to refill a ring that would not accumulate: a symptom,
-not the cause.
+1. `wr` leads `rd` by the ring level (~64), so **`wr` wraps first**.
+2. For the ~167 us until `rd` wraps too, `wr - rd` evaluates to
+   **-4,294,967,232** instead of +64.
+3. `level < FRAME_SAMPLES` un-primes the ring, and `rd` only advances under
+   `strobe & primed` -- so **`rd` freezes exactly when it was about to wrap**,
+   and can never wrap. `level` stays ~-2^32 permanently.
 
-**Only `fifo_level` showed it.** Packet rate, PTP lock, leak, overrun, talker
-state and flow bindings all looked normal, and the receivers were being fed a
-continuous stream of underrun-silence. A firmware reload re-primes and recovers
-it within seconds.
+IT HID BEHIND ITS OWN SAFETY CLAMP. `block_level` clamps a negative level to 0
+(`.Elif(level < 0, self.block_level.eq(0))`), so `fifo_level` read 0 rather than
+-4.29 billion: the single number that would have named this on the first
+occurrence was the one deliberately thrown away. Meanwhile `wr`'s update is
+gated on neither `primed` nor `en`, so every ingress counter stayed perfect --
+`rx_beats = ep_out`, `sample_overflow` 0, no leak, no drops. Three separate
+investigations concluded "the decoder is producing nothing" from exactly that
+evidence, and all three were wrong.
 
-WHAT TRIGGERED IT IS NOT ESTABLISHED. The likely candidates are the runtime
-experiments running at the time -- three `DANTE_TX_TS_OFFSET` changes, each of
-which calls `ts_anchor()` and is documented as a timestamp discontinuity that
-should not be done while anyone is listening, plus repeated `dante_tx_drop_all()`
-cycles. It has not been reproduced deliberately, and until it is, the honest
-statement is that the ring has a state it can enter and not leave on its own.
+CORRECTION (2026-08-15): the first version of this entry said avb-aes3 never
+saw it because its `rd` advanced by +64 per block traversal. **That was wrong on
+both the number and the inference.** avb-aes3 advances `rd` by FRAME_SAMPLES=48
+per block at 8000 blocks/s = 384,000 Sa/s -- identical to ours, since
+consumption must match production. The +64 was dante-usb's own earlier fpp=8
+behaviour.
+
+**avb-aes3 has the identical bug**: `aaf_packetizer.py:287-291` has the same
+`Signal(32)` pointers and the same `level = Signal((34, True)); level.eq(wr-rd)`,
+the same un-prime latch, the same `level < 0` clamp hiding it, and the same
+3.107-hour period. It survives by accident -- its firmware drops
+`aaf_pkt_enable` on every gPTP/CRF unlock (`main.c:1512-1544`), and each toggle
+reloads `rd` from `rd_anchor`, so routine unlocks act as an unintended watchdog.
+Our talker never drops once locked, and `ts_anchor()` reloads only
+`ts_sec`/`ts_sub`, never `rd`. **The fix should be ported back to avb-aes3.**
+
+Also corrected: the ring is 2048 samples (`fifo_depth=256`), not 512, so the
+window where `wr` has wrapped and `rd` has not is ~2.7 ms, not 167 us. And the
+state is not strictly permanent -- `frame_base` free-runs, so `level` climbs
+back through zero after ANOTHER 3.107 h. Nobody ever waited that out.
+
+THE FIX: compute the difference MODULO instead of widening it. 2^32 is divisible
+by any power of two, so the low bits of `wr - rd` are exact across a wrap.
+Modulus 4 x SRING_DEPTH keeps real occupancy in the lower half and preserves
+"consumer overtook producer" as a negative in the upper half.
+`sims/sim_ring_wrap.py` drives the pointers straight at the boundary and fails
+without the fix (level +64 read as -4,294,967,232), passes with it.
+
+NO SIMULATION IN THIS TREE EVER CROSSED THE WRAP -- `sim_ring_accounting` and
+`sim_ring_sample_rd` both model occupancy over seconds, and this needs 2^32
+increments. That is why it shipped.
+
+A TALKER CYCLE ALSO CLEARS IT, without JTAG: dropping the flows takes `en` low,
+and `If(~aligned_once, NextValue(rd, rd_anchor))` reloads `rd` from a pointer
+that tracks `wr`. Verified on the wedged board 2026-08-14 -- the ring re-primed
+and held at centre after the flows rebound. Worth keeping as an auto-recovery
+even with the arithmetic fixed.
+
+A FAILED INSTRUMENT AND A FIX FOR THE WRONG FAULT, both recorded so nobody
+repeats them: `usb_sample_data` bit 7 (`valid`) reads 0 on a HEALTHY board (it
+is a firmware drain path; the hardware drains the FIFO at 48 kHz), so it
+discriminates nothing -- a verdict built on it fired on a healthy board. And the
+frame-marker flywheel in `dante_packetizer.py` was built on the inference that
+`first` had stopped; `frame_holdover` read **0** through the fourth wedge, so it
+never had. The flywheel is harmless and stays (it is inert when healthy, proven
+in `sims/sim_frame_flywheel.py`), but it guards a fault that has never occurred.
 
 **The residual drift is +0.35 ppm, and it is what makes a receiver's Latency
 Status walk.** Full handoff for fixing it: [`DRIFT_HANDOFF.md`](DRIFT_HANDOFF.md). Measured 2026-08-11 with `tools/mclk.py watch 120`, discipline
@@ -276,6 +319,46 @@ in the walk you start:
 | 0 | 0/12 | grey, but full margin — we always arrive early |
 | -2 | 8-10/12 | green, ~25% margin |
 | -4 | 9-11/12 | green, one excursion from red |
+
+**FIXED 2026-08-12: the drift was NCO integer rounding, not a servo error.**
+The increment is a 32-bit integer of ~4.12e6, so one LSB is 242 ppb, and two
+roundings sat inside it -- `(fs << 32) / sys_clk` = 4123168.604 rounded UP to
+4123169 (+96 ppb, permanently) and `inc_for_ppb()` truncating (+37 ppb). Total
++133 ppb; measured drift +0.13 ppm. The PTP servo is structurally blind to it:
+`rate_ppb` measures the crystal against the Leader, not how coarsely we render
+that estimate into an integer, so the rate loop reported itself converged with
+0 trips and a healthy ring while the clock ran fast. The error is positive
+across the whole operating range, which is why every drift observation in this
+project has had the same sign.
+
+Found by asking why `mcr` from the AVB project never drifts: its pure-gPTP path
+takes the ratio from the 52-bit gPTP addend and rewrites the increment at ~4 kHz,
+so the value dithers across the grid point and the quantisation averages out.
+`mcr_dante` lost that when it went to one slew-limited write per second.
+
+The fix carries the increment in 16.16 fixed point and sigma-deltas the fraction
+(`nco_render()`), so the MEAN increment is exact. Measured after: **534
+consecutive drift samples all reading -3, least-squares slope +0.00 ppm**,
+against +22.5 samples/hour an hour earlier on the same board. Ring 63, zero
+underruns, `anchors` 1. A16R 8/12 at 0.25 ms, AM2 21/48 at 1 ms, DVS 88/192 at
+4 ms, all parked. The phase term is now **ON** as well, but for its real job — holding absolute
+position, which the dither cannot do. After the dither the drift still crept
+~1.5 samples/hour with nothing pulling it back. Enabled 2026-08-12 with
+`PHASE_TARGET_SAMPLES = -1`: it contributes **65 ppb against a 2000 ppb clamp**,
+holds the A16R at 6/12 dead centre, and ran with ring 63..67, zero underruns and
+zero rejects. Before the dither the same loop needed ~400 ppb just to fight the
+rounding error, and its target had to be skewed to -4 to cancel the actuator
+quantisation the dither has since removed.
+
+Two other real bugs were found on the way and are fixed: the drift measurement
+could go whole seconds wrong when the talker dropped (`dante_tx_media_phase()`),
+and the re-anchor band was `8 + (fmax - fmin)` = **64 samples** with fpp 4 and 60
+both bound -- 5.3x an A16R's entire budget, so subscribing DVS silently disabled
+the backstop for every low-latency receiver. Full account:
+[`DRIFT_HANDOFF.md`](DRIFT_HANDOFF.md).
+
+The original analysis, kept because the reasoning about bias-vs-walk is still
+correct:
 
 THE FIX IS TO NULL THE RESIDUAL, not to bias around it: a slow outer trim that
 closes the loop on the MEASURED drift (the quantity `mclk.py watch` already
@@ -699,18 +782,95 @@ it does not need the CH347 (which JTAG and the UART share).
 `A`/`K`/`B`/`G`/`V` are protocol-archaeology probes. They are RAM-only and a
 reboot reverts them.
 
-### USB3300 ULPI breakout (P2 / SODIMM header)
+### Dual USB: the build that works
 
-| Signal | FPGA pin | SODIMM | Notes |
-|---|---|---|---|
-| CLK | T4 | 51 | must be MRCC/SRCC — clock-capable |
-| DIR | T3 | 49 | |
-| NXT | U2 | 57 | |
-| STP | U3 | 59 | |
-| RST | R2 | 41 | **active HIGH** — use `Pins`, not `PinsN` |
-| D0–D7 | V2 V3 W1 W2 Y1 AA1 AB1 Y2 | 61–75 | bidirectional |
+```
+BOARD=breakout USB2=1 NEXTPNR_USB_FP_LIGHT=1 ./build.sh --output-dir build_dante_s5 --seed 5
+```
 
-The 60 MHz ULPI clock is **PHY-sourced**; a PLLE2 re-emits it.
+Measured 2026-10-30, both PHYs enumerating at **480 Mbit/s, 6/6 power cycles**,
+taps from the gateware reset (no runtime command), two distinct ALSA cards:
+
+```
+ 2 [Main   ]: USB-Audio - N-Series Dante Main     at usb-...-8,  high speed
+ 3 [Backup ]: USB-Audio - N-Series Dante Backup   at usb-...-10, high speed
+```
+
+Fmax: sys 62.2, **usb 70.1**, usb2 63.8, eth_rx 169.9 MHz.
+
+**Three things each had to be right, and each was a separate dead end first.**
+
+1. **`NEXTPNR_USB_FP_LIGHT=1`, not the full floorplan.** The default box pulls
+   ~3000 cells, because the net-connectivity pass grabs every net carrying the
+   subsystem prefix and so drags in the whole LUNA core, which has no
+   pad-timing relationship at all. HeAP never completes an iteration on that:
+   **11 seeds, all stalled, none with a placement error**. SA on the same box
+   does print the reason -- `failed to place chain ... PACKED_CARRY4`: a carry
+   chain needs contiguous vertical SLICEs in one column and cannot be split
+   across a region boundary, so the regions were impossible, not merely tight.
+   The light mode constrains only the ~690 cells on nets that touch the ULPI
+   **pads** -- which is what the floorplan was added for in the first place --
+   and places in 25-35 s.
+2. **Seed 5.** The 60 MHz ULPI domain is systematically tight here. Over 12
+   seeds on one netlist, only seed 5 cleared 60 MHz on `usb`; the rest landed
+   49.8-59.5, i.e. **failing**, and earlier builds will have been running with
+   negative slack on that domain. If USB behaves intermittently, check this
+   number before anything else.
+3. **The pinout** (below), including the physically swapped DIR/NXT.
+
+**An IDELAY tap is a property of a placement, not of the hardware.** On this
+build both PHYs enumerate at *every* tap 0..31. On a seed-8 build with usb at
+60.14 MHz the eyes narrowed to 28..31 (Main) and 9..31 (Backup) -- and when a
+later change moved placement across Backup's edge, Backup vanished from the bus
+entirely, because its pinned reset was 8 and its eye started at 9. Never pin an
+edge value, and re-measure with `tools/tapsweep.py` after any gateware change.
+A narrow eye is a symptom of too little Fmax margin in `cd_usb`, so look there
+before reaching for a sampling-phase change.
+
+`tools/tapsweep.py` power-cycles the hub port through
+`/sys/bus/usb/devices/usb1/1-0:1.0/usb1-port<N>/disable`, so a 32-tap sweep runs
+unattended; it needs the `T` opcode in `firmware/dstats.c` because the serial
+console went silent on this bitstream while UDP kept answering.
+
+### USB3300 ULPI pinouts (`BOARD=`)
+
+Two physical carriers exist and **their pinouts differ**. `avb_soc.py` selects
+with `BOARD=` (default `breakout`, the board currently fitted); the single
+source of truth is `_ULPI_PINS` there — read it, don't copy it:
+
+```
+BOARD=breakout python3 -c 'import avb_soc; print(avb_soc._ULPI_PINS)'
+```
+
+| | `ext` (old carrier) | `breakout` (current) |
+|---|---|---|
+| Main CLK/DIR/NXT/STP/RST | T4 / T3 / U2 / U3 / R2 | *same* |
+| Main D0–D7 | V2 V3 W1 **W2 Y1 AA1 AB1** Y2 | V2 V3 W1 **Y1 AA1 AB1 W2** Y2 |
+| Backup | bank 14 — **known bad** | bank 34, all-odd SODIMM |
+
+RST is **active HIGH** — `Pins`, not `PinsN`. The 60 MHz ULPI clock is
+**PHY-sourced**; a PLLE2 re-emits it. `USB_BACKUP=1` puts the single (proven)
+USB subsystem on the Backup pins — ~14k cells, places in ~3 min — to validate
+Backup hardware without the dual-USB netlist.
+
+**Three traps, each of which has cost a session:**
+
+1. **The wrong data order is silent.** The bus toggles, the PHY clocks, you get
+   garbage. `breakout` wires D[7:0] in ascending SODIMM order, which rotates
+   four bits relative to `ext`. Read the ULPI vendor ID (regs 0x00/0x01,
+   `0x0424` on SMSC) before suspecting anything else.
+2. **DIR and NXT are physically transposed at position B.** J5's pin order
+   differs from J4's, so the hand-soldered leads crossed; the gateware swaps
+   them back (`dir=AB7`, `nxt=AB6`). This — not timing — is why the 2026-07-09
+   dual-USB bring-up saw `error -71` at *every* clock phase: `oe = ~dir_i` was
+   driven from the NXT pin, so the bus was never released during the PHY's
+   turnaround and we read back our own TXCMD bytes. **A phase-invariant failure
+   is a wiring permutation, never a timing problem** — turning the IDELAY tap
+   cannot fix one.
+3. **SODIMM 88 (V4) / 90 (R4) / 89 (Y4) must stay NC.** They are the
+   differential partners of the two ULPI clocks; a switching signal on any of
+   them couples straight into a 60 MHz clock. Until 2026-10-30 this repo's
+   `ulpi2_io()` used V4 *as* the clock and Y4 as RST.
 
 **Wiring is not optional detail.** Twist CLK with **its own ground**, never
 paired with another active signal. Twenty gateware variations failed identically

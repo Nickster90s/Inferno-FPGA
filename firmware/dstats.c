@@ -12,6 +12,12 @@
 #include "dante_arc.h"
 #include "mdns.h"
 extern uint32_t usb_fb_manual;
+// RX TIMESTAMP RING HEALTH. main.c keeps these as globals marked TEMPORARY and
+// nothing ever read them. They are the direct measure of the fault the +-3.5 us
+// PTP offset noise points at: if the ts ring falls out of lock-step with slot
+// consumption, frames are paired with the PREVIOUS frame's timestamp, which
+// injects microseconds into every offset without losing a single packet.
+extern uint32_t rx_ts_resyncs, rx_pops, g_lvl_pre, g_lvl_post;
 extern uint16_t g_mcast_fpp;
 extern uint32_t g_phase_adj;
 extern uint8_t  usb_fb_sweep_hold;
@@ -134,6 +140,14 @@ static void mclk_rx(const uint8_t src_ip[4], uint16_t src_port,
     put32(p, n, aaf_pkt_overrun_count_read());   n += 4;
     put32(p, n, m.phase_enabled);                n += 4;
     put32(p, n, (uint32_t)m.phase_ppb);          n += 4;
+    // Appended, not inserted: tools/mclk.py zips FIELDS against however many
+    // words arrive, so a tool older than the firmware simply drops the tail.
+    // drift_valid says whether drift_samples is this second's measurement or
+    // the last good one held over -- differentiating a held value is what
+    // makes `watch` report a drift rate that never happened.
+    put32(p, n, m.drift_valid);                  n += 4;
+    put32(p, n, m.drift_rejects);                n += 4;
+    put32(p, n, m.phase_rejects);                n += 4;
 
     net_udp_commit(src_ip, src_port, STATS_PORT, n, NET_TOS_BEST_EFFORT);
 }
@@ -418,6 +432,107 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         return;
     }
 
+    // 'U' -- DUAL USB A/B source: select and report.
+    //
+    //   'U'        -> status only
+    //   'U' '0'    -> request Main (USB1)
+    //   'U' '1'    -> request Backup (USB2)
+    //
+    // THE SWITCH IS FRAME-ALIGNED IN GATEWARE, so a write is a REQUEST, not an
+    // immediate change: usb_source_live follows usb_source_select only once the
+    // candidate presents a channel-0-of-frame marker. A blind mid-frame switch
+    // would hand the ring a partial 48-channel frame and rotate every channel
+    // permanently -- see the handover comment in avb_soc.py. So `select` and
+    // `live` differing is NORMAL for a few microseconds, and differing
+    // PERSISTENTLY means the candidate is not delivering frames at all.
+    //
+    // The Backup's own ingress counters are reported alongside, because a hot
+    // standby you cannot measure is a standby on trust: switching to a dead
+    // Backup trades working audio for silence. Check rx_beats/ep_out are live
+    // BEFORE requesting the switch.
+    //
+    // Separate opcode with its own bounded reply, per the rule at the top of
+    // this file: growing the main reply 200 -> 208 bytes killed that port once.
+    if (len >= 1 && req[0] == 'U') {
+#ifdef CSR_MAIN_USB_SOURCE_LIVE_ADDR
+        if (len >= 2) {
+            if (req[1] == '0' || req[1] == '1') {
+                main_usb_source_select_write(req[1] - '0');
+                printf("[usb] source REQUEST -> %s (frame-aligned handover)\n",
+                       req[1] == '1' ? "Backup(USB2)" : "Main(USB1)");
+            }
+        }
+        uint8_t *pu = net_udp_payload_buf();
+        uint32_t nu = 0;
+        put32(pu, nu, 0x55534232u);                        nu += 4;  // 'USB2'
+        put32(pu, nu, main_usb_source_select_read());      nu += 4;
+        put32(pu, nu, main_usb_source_live_read());        nu += 4;
+        put32(pu, nu, main_usb_switch_count_read());       nu += 4;
+        put32(pu, nu, main_usb_dbg_rx_beats_read());       nu += 4;  // Main
+        put32(pu, nu, main_usb_dbg_ep_out_read());         nu += 4;
+        put32(pu, nu, main_usb_sample_overflow_read());    nu += 4;
+        put32(pu, nu, main_usb2_dbg_rx_beats_read());      nu += 4;  // Backup
+        put32(pu, nu, main_usb2_dbg_ep_out_read());        nu += 4;
+        put32(pu, nu, main_usb2_sample_overflow_read());   nu += 4;
+        net_udp_commit(src_ip, src_port, STATS_PORT, nu, NET_TOS_BEST_EFFORT);
+#else
+        // Single-USB build (USB2 not set at build time). Answer rather than
+        // time out, so the tool can say "not built with dual USB" instead of
+        // looking like a dead board.
+        uint8_t *pu = net_udp_payload_buf();
+        uint32_t nu = 0;
+        put32(pu, nu, 0x55534231u); nu += 4;               // 'USB1' = single
+        net_udp_commit(src_ip, src_port, STATS_PORT, nu, NET_TOS_BEST_EFFORT);
+#endif
+        return;
+    }
+
+    // 'T' -- ULPI input IDELAY taps over UDP.
+    //
+    //   "T"            -> report both taps
+    //   "T" <m>        -> set Main's tap to m   (0..31)
+    //   "T" <m> <b>    -> set Main's and Backup's taps
+    //
+    // The console 'u' key already steps the Main tap, but it only increments,
+    // it needs a physical re-plug to re-test, and on 2026-10-30 the serial
+    // console went completely silent (both 1 Mbaud and 115200, no unsolicited
+    // output) while UDP kept answering -- so the one documented tuning knob for
+    // the 60 MHz ULPI eye was unreachable. Over UDP it is scriptable, and the
+    // hub port can be power-cycled from sysfs (usb1-port8/disable) instead of
+    // by hand, which makes a full 32-tap sweep unattended.
+    //
+    // WHY PER-BUS TAPS: the eye centre is a property of each PHY's own wiring
+    // and of ITS paths' placement, not of the chip type. avb-usb-host measured
+    // tap 8 working on the Backup PHY while the SAME tap left Main decoding SOFs
+    // cleanly but never asserting its D+ pull-up -- reads tolerate ~0.6 ns of
+    // extra nxt/data delay, the write handshake (our driven data against the
+    // PHY's NXT) does not. So never assume one tap fits both.
+    if (len >= 1 && req[0] == 'T') {
+        if (len >= 2) {
+            main_ulpi_idelay_tap_write(req[1] & 0x1F);
+            main_ulpi_idelay_load_write(1);
+        }
+#ifdef CSR_MAIN_ULPI2_IDELAY_TAP_ADDR
+        if (len >= 3) {
+            main_ulpi2_idelay_tap_write(req[2] & 0x1F);
+            main_ulpi2_idelay_load_write(1);
+        }
+#endif
+        uint8_t *pt = net_udp_payload_buf();
+        uint32_t nt = 0;
+        put32(pt, nt, 0x54415031u); nt += 4;               // 'TAP1'
+        pt[nt++] = (uint8_t)main_ulpi_idelay_tap_read();
+#ifdef CSR_MAIN_ULPI2_IDELAY_TAP_ADDR
+        pt[nt++] = (uint8_t)main_ulpi2_idelay_tap_read();
+        pt[nt++] = 1;                                      // dual USB built
+#else
+        pt[nt++] = 0;
+        pt[nt++] = 0;
+#endif
+        net_udp_commit(src_ip, src_port, STATS_PORT, nt, NET_TOS_BEST_EFFORT);
+        return;
+    }
+
     if (len >= 1 && req[0] == 'u') {
         uint8_t *p5 = net_udp_payload_buf();
         uint32_t n5 = 0;
@@ -426,6 +541,76 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         put32(p5, n5, main_usb_dbg_ep_out_read());   n5 += 4;
         put32(p5, n5, aaf_pkt_overrun_count_read()); n5 += 4;
         put32(p5, n5, aaf_pkt_underrun_count_read());n5 += 4;
+        // APPENDED so the ring-loses-prime bug is diagnosable WITHOUT a console.
+        //
+        // It has now been caught live twice (2026-08-12, 2026-08-13) and both
+        // times the decisive counters were only on the UART, which cannot be
+        // read while openocd holds the CH347. So both occurrences ended in
+        // "signature recorded, cause not established" for want of three
+        // registers that were already in the CSR map.
+        //
+        //   sample_overflow  the FIFO between the USB endpoint and the ring.
+        //                    Climbing = data reaching the endpoint but NOT the
+        //                    ring, which is exactly the 2026-08-12 signature
+        //                    (rx_beats = ep_out = 9.3 M/s, fifo_level 0).
+        //   fb_ovr           the async feedback value handed to the host. If
+        //                    this is out of the host's accept window the host
+        //                    can stop streaming, which is a candidate for the
+        //                    2026-08-13 signature (rx_beats 0).
+        //   block_level      the feedback servo's INPUT, un-decimated. fifo_level
+        //                    is the ring; this is what the servo actually sees.
+        put32(p5, n5, main_usb_sample_overflow_read()); n5 += 4;
+        put32(p5, n5, main_usb_fb_ovr_read());          n5 += 4;
+        put32(p5, n5, aaf_pkt_fifo_level_read());       n5 += 4;
+
+        // IS THE DECODER PRODUCING SAMPLES AT ALL?
+        //
+        // This is the one measurement that separates the two remaining
+        // explanations for the ring-loses-prime wedge, and it needs no gateware
+        // change -- usb_sample_data already exposes the USB->AAF FIFO head, with
+        // bit 7 = valid ("FIFO non-empty, head is real", avb_soc.py:823).
+        //
+        //   valid never set, while rx_beats/ep_out stream at 9.3 MB/s
+        //       -> the decoder is eating bytes and emitting no samples, so the
+        //          ring write pointer never advances. Frame-alignment loss.
+        //   valid set, with fifo_level stuck at 0
+        //       -> the decoder IS producing and the packetizer is not draining
+        //          it into the ring. A different fault, in the other module.
+        //
+        // Sampled 256 times rather than once: in normal operation the head is
+        // drained continuously so `valid` flickers, and a single snapshot would
+        // be a coin toss. The COUNT is the signal -- near 0 or near 256 both
+        // mean something, 128 means it is running.
+        //
+        // READ-ONLY, DELIBERATELY. usb_sample_pop is a CSRStorage that advances
+        // the FIFO read pointer; writing it here would steal samples from the
+        // packetizer and corrupt audio to take a measurement. Never pop.
+        {
+            uint32_t vcount = 0, head = 0;
+            for (unsigned i = 0; i < 256u; i++) {
+                head = main_usb_sample_data_read();
+                if (head & 0x80u) vcount++;
+            }
+            put32(p5, n5, vcount); n5 += 4;   // 0..256 with bit7 (valid) set
+            put32(p5, n5, head);   n5 += 4;   // last raw head word
+        }
+        // THE ONE THAT ACTUALLY NAMES THE FAULT. Frames whose channel-0 marker
+        // the packetizer had to synthesise because the USB wrapper stopped
+        // sending one. Nonzero = the condition that killed the ring three times
+        // (2026-08-12, twice 2026-08-13) has occurred; the flywheel in
+        // dante_packetizer.py now rides through it instead of wedging, so this
+        // climbing WITH audio still flowing is the expected new behaviour.
+        // Climbing fast = the marker is gone, not glitching.
+        // GUARDED so one firmware source builds against BOTH CSR maps. Adding
+        // this CSR shifted 48 addresses, so a firmware built for the flywheel
+        // bitstream pokes moved registers on build_seed8 and vice versa. The
+        // guard lets a revert to seed8 be a rebuild rather than a source edit.
+#ifdef CSR_AAF_PKT_HOLDOVER_COUNT_ADDR
+        put32(p5, n5, aaf_pkt_holdover_count_read()); n5 += 4;
+        put32(p5, n5, rx_ts_resyncs);  n5 += 4;   // stale ts entries discarded
+        put32(p5, n5, rx_pops);        n5 += 4;   // pops issued, for the ratio
+        put32(p5, n5, g_lvl_pre);      n5 += 4;   // ring level seen at drain
+#endif
         net_udp_commit(src_ip, src_port, STATS_PORT, n5, NET_TOS_BEST_EFFORT);
         return;
     }

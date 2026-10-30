@@ -23,6 +23,16 @@ export PYTHONHASHSEED=0
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
+# Welke build-directory deze run gebruikt. Stond eerst BINNEN het loader-blok,
+# maar de stall-watchdog heeft het ook nodig om zijn kill te scopen.
+OUT_DIR="$HERE/build/colorlight_i9plus"
+_prev=""
+for a in "$@"; do
+    [[ "$_prev" == "--output-dir" ]] && OUT_DIR="$a"
+    _prev="$a"
+done
+[[ "$OUT_DIR" != /* ]] && OUT_DIR="$HERE/$OUT_DIR"
+
 # Default ROM image = the loader, unless the caller overrides --firmware.
 ROM_IMAGE_ARGS=()
 if [[ ! " $* " =~ " --firmware " ]]; then
@@ -48,12 +58,6 @@ if [[ ! " $* " =~ " --firmware " ]]; then
     # directory, so a hardcoded path here would compare a csr.h that the sweep
     # build never writes -- the guard would sit silently inert on exactly the
     # builds that run unattended.
-    OUT_DIR="$HERE/build/colorlight_i9plus"
-    prev=""
-    for a in "$@"; do
-        [[ "$prev" == "--output-dir" ]] && OUT_DIR="$a"
-        prev="$a"
-    done
     CSR_H="$OUT_DIR/software/include/generated/csr.h"
 
     # Serialise the loader rebuild. The sweep runs JOBS builds concurrently and
@@ -118,7 +122,22 @@ BPID=$!
           echo "*** HeAP STALL: no build output for ${idle}s and HeAP never finished."
           echo "*** This seed does not place on this netlist. Killing."
           echo "*** Try another seed, or run: tools/seed_sweep.sh"
-          pkill -9 -f nextpnr-xilinx 2>/dev/null
+          # SCOPE DE KILL. Dit was `pkill -9 -f nextpnr-xilinx`, wat ELKE
+          # nextpnr op de machine omlegt -- op 2026-10-30 schoot een seed-sweep
+          # daarmee een parallelle SA-run van 20 minuten dood, en de log zei
+          # alleen "Killed", wat niet van een plaatsingsfout te onderscheiden
+          # is. Twee builds naast elkaar is normaal op een 4-core machine, dus
+          # de watchdog mag alleen zijn EIGEN nextpnr raken.
+          #
+          # Scopen op de command line kan niet: elke build geeft nextpnr
+          # dezelfde argumenten (zelfde json-naam, zelfde chipdb, zelfde
+          # --pre-place). Maar elke build draait zijn nextpnr met cwd =
+          # <output-dir>/gateware, en dat is wel uniek.
+          _mine="$(readlink -f "$OUT_DIR/gateware" 2>/dev/null)"
+          for _p in $(pgrep -f nextpnr-xilinx 2>/dev/null); do
+              [[ -n "$_mine" && "$(readlink -f /proc/$_p/cwd 2>/dev/null)" == "$_mine" ]] \
+                  && kill -9 "$_p" 2>/dev/null
+          done
           kill -9 "$BPID" 2>/dev/null
           exit 1
       fi

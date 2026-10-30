@@ -322,62 +322,115 @@ class MCRNco(LiteXModule):
         ]
 
 
-def ulpi_io():
-    # USB3300 ULPI breakout on the P2 header. CLK=T4 (MRCC, clock-capable);
-    # RST active-HIGH (USB3300 pin 9) so handled as plain Pins, driven low
-    # by the gateware to release. Data is a bidirectional bus (TSTriple in
-    # the SoC). Verified free vs eth/eth_clocks/sdram on this platform.
-    # See avb-usb-host docs/phase3-bridge.md + memory ulpi-twisted-pair-wiring.
+# ---- ULPI PIN MAPS PER BOARD ------------------------------------------------
+#
+# OVERGENOMEN UIT avb-aes3, 2026-10-30. dante-usb had GEEN board-begrip: beide
+# ULPI-pinouts stonden hardgecodeerd op de ext-variant van 8 juli, terwijl de
+# bank op dit bord inmiddels de breakout-layout is. Daarom werkte niet alleen de
+# Backup niet, maar de ENKELE USB ook niet meer -- en de `error -71` die ik aan
+# het verwijderen van de floorplan toeschreef, was in werkelijkheid deze
+# pinout-mismatch. Negen placement-builds aan de verkeerde oorzaak.
+#
+# Op het custom bord liggen BEIDE ULPI-bussen in BANK 34, volledig op ONEVEN
+# SODIMM-pinnen (de even rij draagt alleen trage I/O), en SODIMM 88 (V4) / 90
+# (R4) blijven NC als differentiele partners van de twee klokken: een
+# schakelend signaal op een van beide koppelt rechtstreeks in een 60 MHz
+# ULPI-klok. De oude dante-usb ulpi2-map gebruikte precies die twee als klok en
+# dir -- dus de ene pin die NC moet blijven dreef de klok.
+#
+# Default is "breakout", want dat is de hardware die er nu op zit. "ext" blijft
+# selecteerbaar om oude builds te reproduceren -- niet om tegen te debuggen.
+BOARD = os.environ.get("BOARD", "breakout").strip().lower()
+
+_ULPI_PINS = {
+    # ---- Main ("USB1") ------------------------------------------------------
+    # Zelfde FPGA-pins op beide borden, maar het custom bord draadt D[7:0] in
+    # oplopende SODIMM-orde, wat VIER BITS ROTEERT:
+    #   ext       SODIMM 61..75 -> D0 D1 D2 D4 D5 D6 D3 D7   (D3 zit op 73)
+    #   breakout  SODIMM 61..75 -> D0 D1 D2 D3 D4 D5 D6 D7
+    # De verkeerde kiezen is STIL: de bus toggelt, de PHY klokt, je krijgt
+    # alleen rommel. Lees de ULPI vendor-ID (reg 0x00/0x01, 0x0424 op SMSC)
+    # voordat je iets anders verdenkt.
+    ("ext", "main"): dict(
+        clk="T4", dir="T3", nxt="U2", stp="U3", rst="R2",
+        data="V2 V3 W1 W2 Y1 AA1 AB1 Y2"),
+    ("breakout", "main"): dict(
+        clk="T4", dir="T3", nxt="U2", stp="U3", rst="R2",
+        data="V2 V3 W1 Y1 AA1 AB1 W2 Y2"),
+
+    # ---- Backup ("USB2") ----------------------------------------------------
+    # ext: de bank-14 P3 map. KNOWN BAD, alleen bewaard zodat oude ext-builds
+    # reproduceren -- NIET tegen debuggen. D6=AA19 (DQS_RDWR_B) en D7=AB20
+    # (DQS_DOUT_CSO_B) zijn config-CONTROL pins die nooit vrijgeven aan GPIO
+    # (lezen constant 0xC0), en NXT=Y19 leest stuck high op deze module.
+    ("ext", "backup"): dict(
+        clk="W19", dir="Y18", nxt="Y19", stp="V18", rst="V19",
+        data="AA20 AA21 W17 AB18 P14 R14 AA19 AB20"),
+    # breakout: bank 34, all-odd SODIMM.
+    # 2026-10-28: klok verplaatst SODIMM 85 (W4/MRCC) -> 87 (AA4,
+    # L11N_T1_SRCC_34). Zijn differentiele partner Y4 (SODIMM 89) moet nu
+    # ONGEBRUIKT blijven -- de oude dante-usb map gebruikte V4 als klok EN Y4
+    # als rst, dus precies de pin die vrij moet zijn.
     #
-    # USB_BACKUP=1: put the SINGLE (proven) USB subsystem on the BACKUP ULPI
-    # pin locations (V4/R4/... — the 2nd physical connector) instead of Main.
-    # This builds the small ~14k-cell netlist HeAP places in ~3 min, so it's the
-    # fast way to validate the just-soldered Backup ULPI hardware WITHOUT the
-    # dual-USB A/B netlist that jams the placer. Same resource names ("ulpi"/
-    # "ulpi_clock"), so nothing downstream changes -- only the pin map.
-    if os.environ.get("USB_BACKUP", "") == "1":
-        return [
-            ("ulpi_clock", 0, Pins("V4"), IOStandard("LVCMOS33")),   # MRCC (Backup)
-            ("ulpi", 0,
-                Subsignal("dir",  Pins("R4"), IOStandard("LVCMOS33")),
-                Subsignal("nxt",  Pins("W4"), IOStandard("LVCMOS33")),
-                Subsignal("stp",  Pins("T5"), IOStandard("LVCMOS33")),
-                Subsignal("rst",  Pins("Y4"), IOStandard("LVCMOS33")),
-                Subsignal("data", Pins("Y9 V8 W9 V9 W6 V7 Y3 Y6"),
-                          IOStandard("LVCMOS33")),
-            ),
-        ]
+    # *** DIR EN NXT ZITTEN FYSIEK VERWISSELD OP POSITIE B ***
+    # J5's pin-orde wijkt af van J4's, dus de twee handgesoldeerde draden zijn
+    # getransponeerd: J5.2=USB2_DIR, J5.5=USB2_NXT. De gateware draait het
+    # terug, dus dir=AB7(103) en nxt=AB6(97) -- het OMGEKEERDE van de
+    # SODIMM-nummering, die de connector beschrijft en niet de bedrading.
+    #
+    # DIT IS DE OORZAAK van de error-71 bij de dual-USB bring-up van
+    # 2026-07-09: `oe = ~dir_i` werd gedreven vanaf de NXT-pin, dus de bus werd
+    # nooit vrijgegeven tijdens de turnaround van de PHY en we lazen onze eigen
+    # TXCMD-bytes terug. Een FASE-INVARIANTE storing is een draadpermutatie,
+    # nooit een timingprobleem -- en dat is waarom aan de IDELAY-tap draaien
+    # hier niets oplost. Bewezen in avb-usb-host (USB_SWAP_DIRNXT=1): beide
+    # PHYs enumereren dan op High Speed.
+    # Zet pas terug naar dir=AB6/nxt=AB7 NA het fysiek omwisselen bij J5.
+    ("breakout", "backup"): dict(
+        clk="AA4", dir="AB7", nxt="AB6", stp="Y7", rst="AA6",
+        data="AA8 AB8 Y8 W7 Y9 V8 W9 V9"),
+}
+
+
+def _ulpi_resources(which, prefix):
+    """Bouw het ("<prefix>_clock", "<prefix>") resource-paar voor deze BOARD.
+
+    RST is active-HIGH (USB3300 pin 9), dus plain Pins; de gateware trekt hem
+    laag om vrij te geven. Data is bidirectioneel (TSTriple in de SoC).
+    """
+    try:
+        pp = _ULPI_PINS[(BOARD, which)]
+    except KeyError:
+        raise ValueError(
+            "BOARD=%r heeft geen %s ULPI pin map; verwacht een van %s"
+            % (BOARD, which, sorted({b for b, _ in _ULPI_PINS})))
     return [
-        ("ulpi_clock", 0, Pins("T4"), IOStandard("LVCMOS33")),
-        ("ulpi", 0,
-            Subsignal("dir",  Pins("T3"),  IOStandard("LVCMOS33")),
-            Subsignal("nxt",  Pins("U2"),  IOStandard("LVCMOS33")),
-            Subsignal("stp",  Pins("U3"),  IOStandard("LVCMOS33")),
-            Subsignal("rst",  Pins("R2"),  IOStandard("LVCMOS33")),
-            Subsignal("data", Pins("V2 V3 W1 W2 Y1 AA1 AB1 Y2"),
-                      IOStandard("LVCMOS33")),
+        (prefix + "_clock", 0, Pins(pp["clk"]), IOStandard("LVCMOS33")),
+        (prefix, 0,
+            Subsignal("dir",  Pins(pp["dir"]), IOStandard("LVCMOS33")),
+            Subsignal("nxt",  Pins(pp["nxt"]), IOStandard("LVCMOS33")),
+            Subsignal("stp",  Pins(pp["stp"]), IOStandard("LVCMOS33")),
+            Subsignal("rst",  Pins(pp["rst"]), IOStandard("LVCMOS33")),
+            Subsignal("data", Pins(pp["data"]), IOStandard("LVCMOS33")),
         ),
     ]
+
+
+def ulpi_io():
+    # USB_BACKUP=1 zet het ENKELE (bewezen) USB-subsysteem op de BACKUP-pins in
+    # plaats van Main. Dat bouwt de kleine ~14k-cell netlist die HeAP in ~3 min
+    # plaatst, dus de snelle manier om net-gesoldeerde Backup-hardware te testen
+    # ZONDER de dual-USB netlist die de placer vastzet. Zelfde resource-namen,
+    # dus niets downstream verandert -- alleen de pinmap.
+    which = "backup" if os.environ.get("USB_BACKUP", "") == "1" else "main"
+    return _ulpi_resources(which, "ulpi")
 
 
 def ulpi2_io():
-    # PHASE-2: 2nd USB3300 ULPI breakout (the "Backup" A/B source). ALL bank 34
-    # (single-bank like Main, for 60 MHz HS timing), HDMI-safe (avoids bank-34
-    # T3-group pins used by the Ext-Board HDMI). CLK=V4 (MRCC). Pinout resolved
-    # 2026-07-08 vs the fgg484 package + build XDC; see project_second_usb_timing.
-    return [
-        ("ulpi2_clock", 0, Pins("V4"), IOStandard("LVCMOS33")),   # MRCC
-        ("ulpi2", 0,
-            Subsignal("dir",  Pins("R4"), IOStandard("LVCMOS33")),
-            Subsignal("nxt",  Pins("W4"), IOStandard("LVCMOS33")),
-            Subsignal("stp",  Pins("T5"), IOStandard("LVCMOS33")),
-            Subsignal("rst",  Pins("Y4"), IOStandard("LVCMOS33")),
-            Subsignal("data", Pins("Y9 V8 W9 V9 W6 V7 Y3 Y6"),
-                      IOStandard("LVCMOS33")),
-        ),
-    ]
+    # PHASE-2: de 2e USB3300 (de "Backup" A/B-bron), als eigen resource zodat de
+    # CRG cd_usb2 naast cd_usb kan bouwen.
+    return _ulpi_resources("backup", "ulpi2")
 
-# AVB SoC ----------------------------------------------------------------------------------------------
 
 class AVBSoC(SoCCore):
     def add_csr_bridge(self, name="csr", origin=None, register=False):
@@ -724,7 +777,32 @@ class AVBSoC(SoCCore):
         # NOT add a second IDELAYCTRL (errors "more than one IDELAYCTRL for
         # the default IODELAY_GROUP"). Firmware sweeps ulpi_idelay_tap
         # (0..31, ~78 ps/tap) to centre the eye; the 'u' command steps it.
-        self.ulpi_idelay_tap  = CSRStorage(5, reset=8,
+        # TAP 30. Op de opgeleverde build (--seed 5, NEXTPNR_USB_FP_LIGHT=1)
+        # enumereert Main op ELKE tap 0..31 -- er is geen oogrand binnen bereik.
+        # Backup idem. De waarde is op deze placement dus onkritisch; 30 staat
+        # er omdat hij gemeten is, niet omdat hij nodig is.
+        #
+        # DE SEED IS HIER DE ECHTE KNOP, NIET DE TAP. Gemeten over 12 seeds
+        # (P&R-only sweep op dezelfde netlist) haalde alleen seed 5 de 60 MHz
+        # die het ULPI-domein nodig heeft:
+        #     seed 5 -> usb 65,6 MHz      seed 2 -> 59,5      seed 6 -> 59,5
+        #     seed 13 -> 56,3             seed 11 -> 54,2     seed 3/4 -> 49,8
+        # De opgeleverde seed-5 build sluit op usb 70,1 / usb2 63,8 / sys 62,2.
+        #
+        # EN DAT VERKLAART DE SMALLE OGEN. Op een eerdere seed-8 build (usb
+        # 60,14 MHz, 0,2% marge) was Main's oog 28..31 en Backup's 9..31, en toen
+        # een placementwijziging Backup's rand kruiste viel hij volledig van de
+        # bus. Ik schreef toen dat een PLL-FASEVERSCHUIVING op cd_usb de
+        # structurele oplossing was om het oog te centreren. Dat was fout: het
+        # smalle oog was een SYMPTOOM van te weinig timingmarge in cd_usb, niet
+        # van een verkeerde samplefase. Met marge verdwijnt de oogrand. Zoek bij
+        # een smal oog dus eerst naar de Fmax van het usb-domein.
+        #
+        # Hermeet wel na elke gateware-wijziging (tools/tapsweep.py): de Fmax is
+        # een eigenschap van (netlist, seed), dus zelfs een andere CSR-resetwaarde
+        # verschuift hem. Pin nooit een RANDwaarde -- dat is precies hoe Backup
+        # omviel toen zijn reset nog 8 was en zijn oog bij 9 begon.
+        self.ulpi_idelay_tap  = CSRStorage(5, reset=30,
             description="ULPI input IDELAY tap 0-31 (~78 ps each).")
         self.ulpi_idelay_load = CSRStorage(1,
             description="Write 1 to load ulpi_idelay_tap into all ULPI input IDELAYs.")
@@ -856,7 +934,12 @@ class AVBSoC(SoCCore):
             ulpi2 = platform.request("ulpi2")
             ulpi2_data_ts = TSTriple(8)
             self.specials += ulpi2_data_ts.get_tristate(ulpi2.data)
-            self.ulpi2_idelay_tap  = CSRStorage(5, reset=8,
+            # TAP 20, GEMETEN 2026-10-30. Sweep: 0..8 enumereren NIET, 9..31
+            # halen alle 23 High Speed -- een breed oog, dus 20 zit er ruim
+            # midden in. De oude reset van 8 lag EEN tap onder de rand, en toen
+            # een andere wijziging de placement verschoof viel Backup daardoor
+            # volledig van de bus. Kies nooit een randwaarde.
+            self.ulpi2_idelay_tap  = CSRStorage(5, reset=20,
                 description="Backup ULPI input IDELAY tap 0-31.")
             self.ulpi2_idelay_load = CSRStorage(1,
                 description="Write 1 to load ulpi2_idelay_tap.")
@@ -898,12 +981,77 @@ class AVBSoC(SoCCore):
                 i_block_level=usb2_block_level_usb2, i_fb_ovr=self.usb2_fb_ovr.storage)
             self.usb2_sample_overflow = CSRStatus(32, description="Backup USB samples dropped.")
             self.comb += self.usb2_sample_overflow.status.eq(sample_ovf2_w)
-            _sel = self.usb_source_select.storage
-            self._usb2_pop = sample_pop2_w
-            self._usb2_rdy = sample_rdy2_w
-            self._sel = _sel
+            # EXPOSE THE BACKUP'S INGRESS. dbg_rx_beats/dbg_ep_out were wired to
+            # dangling Signals, so there was no way to tell whether the hot
+            # standby was receiving anything at all -- you would only find out by
+            # switching to it and losing audio. The Main USB's equivalents
+            # (usb_dbg_rx_beats/ep_out) are what localised every ingress fault
+            # this project has had; the Backup needs the same or it is a standby
+            # on trust rather than on evidence.
+            self.usb2_dbg_rx_beats = CSRStatus(32,
+                description="Backup USB core->EP raw byte beats.")
+            self.usb2_dbg_ep_out   = CSRStatus(32,
+                description="Backup USB EP->decoder beats.")
+            self.comb += [self.usb2_dbg_rx_beats.status.eq(dbg2_a),
+                          self.usb2_dbg_ep_out.status.eq(dbg2_b)]
+            # ---- FRAME-ALIGNED A/B HANDOVER (ported from avb-aes3) -----------
+            #
+            # SWITCHING THE MUX THE INSTANT THE CSR IS WRITTEN PERMANENTLY
+            # ROTATES ALL 48 CHANNELS. The packetizer infers nothing from
+            # position -- it addresses by the explicit channel tag -- but
+            # `frame_base` only advances on a `first` marker, so a mid-frame
+            # handover hands the ring a partial frame and the two sources'
+            # frame phases differ. dante_packetizer.py:424-431 records what that
+            # costs: "a single dropped sample shifted the write phase and
+            # ROTATED ALL CHANNELS permanently -- the 48ch 'corrupt after a
+            # while'". With 48 channels a blind switch is aligned 1 time in 48.
+            #
+            # So split REQUESTED from LIVE and only commit on a frame boundary:
+            #   sel_req  -- what firmware asked for (CSR, any time)
+            #   sel_live -- what the mux is actually using (registered)
+            # The handover commits on the first cycle where the CANDIDATE source
+            # presents both `readable` and its `first` marker, so the ring
+            # receives the new source starting at channel 0 of a frame.
+            #
+            # `_hold_drain` is the subtle half: while a switch is pending, the
+            # candidate is still the STANDBY and is being drained-and-discarded.
+            # Without freezing that drain on the cycle its `first` appears, the
+            # discard would consume the very sample the commit is waiting for,
+            # and the handover would never align.
+            _FIRST_BIT = 6                     # 48ch: sample_hi[0:6]=ch, [6]=first
+            sel_req  = self.usb_source_select.storage
+            sel_live = Signal()
+            self.usb_source_live = CSRStatus(1,
+                description="USB A/B source ACTUALLY feeding the packetizer "
+                            "(0=Main 1=Backup). Lags usb_source_select until the "
+                            "next frame boundary.")
+            self.usb_switch_count = CSRStatus(16,
+                description="Completed frame-aligned A/B handovers since reset.")
+            _sw_cnt = Signal(16)
+            self.comb += [self.usb_source_live.status.eq(sel_live),
+                          self.usb_switch_count.status.eq(_sw_cnt)]
+
+            # Candidate = the source the request wants but the mux is not using.
+            _pending    = Signal()
+            _cand_rdy   = Signal()
+            _cand_first = Signal()
             self.comb += [
-                If(_sel,
+                _pending.eq(sel_req != sel_live),
+                _cand_rdy.eq(Mux(sel_req, sample_rdy2_w, sample_rdy_w)),
+                _cand_first.eq(Mux(sel_req, sample_hi2_w[_FIRST_BIT],
+                                            sample_hi_w[_FIRST_BIT])),
+            ]
+            _commit = Signal()
+            self.comb += _commit.eq(_pending & _cand_rdy & _cand_first)
+            self.sync += If(_commit, sel_live.eq(sel_req), _sw_cnt.eq(_sw_cnt + 1))
+
+            self._usb2_pop   = sample_pop2_w
+            self._usb2_rdy   = sample_rdy2_w
+            self._sel        = sel_live        # downstream pop routing follows LIVE
+            self._hold_drain = Signal()        # freeze the candidate's discard
+            self.comb += self._hold_drain.eq(_pending & _cand_first)
+            self.comb += [
+                If(sel_live,
                    sample_lo_mux.eq(sample_lo2_w), sample_hi_mux.eq(sample_hi2_w),
                    sample_rdy_mux.eq(sample_rdy2_w),
                 ).Else(
@@ -937,7 +1085,39 @@ class AVBSoC(SoCCore):
             channels          = 8,     # Dante MAX_CHANNELS_IN_FLOW
             samples_per_packet= 16,    # fpp=16, as the bundle records advertise
             streams           = 6,     # 6 multicast bundles = 48 ch
-            fifo_depth        = 256,   # per-ring SRING_DEPTH = next_pow2(256*8) = 2048
+            # RING DIEPTE: 256 (=2048 entries =5.3 ms) single-USB, 128 (=1024
+            # =2.67 ms) zodra USB2 meedoet. DIT IS EEN BRAM-RUIL, GEEN TUNING.
+            #
+            # GEMETEN 2026-10-30: RAMB36E1 61/75 (81%) single, 65/75 (86%) dual.
+            # De dual-build stalde zes keer in HeAP, en vijf floorplan-varianten
+            # veranderden daar niets aan -- het is geen geometrie, het is BRAM.
+            # avb-aes3 zit op 38/75 (50%) EN gebruikt MEER LUTs (27% vs 23%),
+            # dus daar past een 2e USB zonder moeite. Hier niet.
+            #
+            # Zes ringen van 2048x36 bit = 12 RAMB36; halveren geeft er 6 vrij,
+            # en de dual-build heeft er 4 meer nodig dan de single.
+            #
+            # DE SERVO MERKT HIER NIETS VAN: _bl_sh = log2depth-7 schaalt elke
+            # diepte naar 0..128 met centrum 64, en _BL_CENTRE is hard 64. De
+            # wrapper-feedback blijft dus identiek.
+            #
+            # HET RISICO IS DE BUFFERDIEPTE, en het is bekend: de comment
+            # hieronder beschrijft dat 64 (=512 entries =1.33 ms) op hardware
+            # FAALDE -- te ondiep voor de ~1 ms bursty block-delivery van de
+            # host, waarbij de +-200-sample swing BEIDE rails raakte en underrun
+            # EN overrun samen opliepen. 2.67 ms is 2x die gefaalde waarde en
+            # half de bewezen. Als het te ondiep is zie je exact die signatuur:
+            # underrun_per_s EN overrun samen omhoog met lvl_min/lvl_max tegen
+            # de rails. Dan is de volgende stap de USB2 bridge-FIFO verkleinen
+            # (usb_avb_subsystem.py FIFO_DEPTH) in plaats van deze ring.
+            # TERUG NAAR 256 (=2048 entries =5.3 ms), de BEWEZEN diepte.
+            # De halvering naar 128 was een BRAM-ruil, en die blijkt onnodig:
+            # gemeten 2026-10-30 stalde de dual-USB build ook met RAMB36 op
+            # 59/75 (meer vrij dan de werkende single build op 61), dus BRAM was
+            # nooit de blocker -- de floorplan was dat. 2.67 ms was onbewezen
+            # gebied tussen de bewezen 5.3 en de op hardware GEFAALDE 1.33 ms,
+            # en dat risico hoeft niet genomen te worden voor niets.
+            fifo_depth        = 256,
                                        # samples = 5.3 ms. The old 64 (=512 samples=1.33ms)
                                        # was 8x SHALLOWER than the proven 8ch build's 10.7ms
                                        # and could not absorb the host's ~1ms bursty
@@ -958,13 +1138,17 @@ class AVBSoC(SoCCore):
             # Selected USB feeds the AAF (pop = aaf_pkt.usb_pop); the other is
             # drained-and-discarded (pop = its own readable) so its cd_usb FIFO
             # can't overflow while it is the hot standby.
+            # `~_hold_drain` on the STANDBY side: while a handover is pending and
+            # the candidate's `first` is on the wire, its discard is frozen so
+            # the commit above can consume that sample as channel 0 of the new
+            # frame. Without it the drain eats the marker and the switch stalls.
             self.comb += [
-                If(self._sel,          # Backup selected -> USB2 feeds, USB1 discards
+                If(self._sel,          # Backup LIVE -> USB2 feeds, USB1 discards
                    self._usb2_pop.eq(aaf_pkt.usb_pop),
-                   sample_pop_w.eq(sample_rdy_w),
-                ).Else(                # Main selected -> USB1 feeds, USB2 discards
+                   sample_pop_w.eq(sample_rdy_w & ~self._hold_drain),
+                ).Else(                # Main LIVE -> USB1 feeds, USB2 discards
                    sample_pop_w.eq(aaf_pkt.usb_pop),
-                   self._usb2_pop.eq(self._usb2_rdy),
+                   self._usb2_pop.eq(self._usb2_rdy & ~self._hold_drain),
                 ),
             ]
         else:
@@ -1260,7 +1444,28 @@ def main():
             # this only changes nextpnr's optimization pressure. Read the reported
             # Fmax number (the "FAIL at 125" is expected/ignored). This reproduces
             # the lean shift-fix build's 52.74 MHz, which had sys timed at 125.
-            "create_clock -name sys_clk    -period  8.000 [get_nets avbsoc_crg_s7pll0_clkout_buf0]",  # target 125 MHz (real 50)
+            # sys_clk PERIOD -- DE 8 ns TARGET WAS DE PLACER KILLER.
+            # Overgenomen uit avb-aes3 (2026-10-29), waar dit eerst is gevonden:
+            # 8.000 ns is een 125 MHz target op een ontwerp dat 46-66 MHz meet.
+            # Zodra die constraint ECHT bindt, gaat HeAP's analytic solve
+            # hopeloos-negatief en HANGT op "Running main analytical placer" met
+            # NUL iteraties. Dat is exact onze storing: acht stalls, elke keer op
+            # die regel, en we hebben de schuld eerst bij de floorplan, toen bij
+            # BRAM en toen bij de klokgroepen gelegd.
+            #
+            # De oude rechtvaardiging hier ("an aggressive target makes the placer
+            # grind sys far harder, landing ~52 MHz") is waardeloos bewijs: dat is
+            # gemeten toen de netnaam nog fout was, dus toen was de constraint een
+            # NO-OP en gebruikte nextpnr zijn eigen default. Onze naam is wel goed
+            # (avbsoc_crg_..., geverifieerd), dus hier bindt hij echt.
+            #
+            # REGEL: een timing-constraint ver buiten wat het ontwerp kan halen
+            # "duwt" niet harder, hij haalt de gradient weg die de analytic placer
+            # nodig heeft. 16.667 ns = 60 MHz is 20% boven de 50 MHz die het
+            # audiopad nodig heeft en ligt binnen het gemeten bereik, dus de placer
+            # blijft optimaliseren. SYS_PERIOD_NS overschrijft voor een sweep.
+            "create_clock -name sys_clk    -period %6.3f [get_nets avbsoc_crg_s7pll0_clkout_buf0]"
+            % float(os.environ.get("SYS_PERIOD_NS", "16.667")),
             "create_clock -name usb_clk    -period 16.667 [get_nets avbsoc_crg_s7pll1_clkout_buf]",   # 60 MHz
             "create_clock -name idelay_clk -period  5.000 [get_nets avbsoc_crg_s7pll0_clkout_buf1]",  # 200 MHz
             "set_clock_groups -asynchronous "
