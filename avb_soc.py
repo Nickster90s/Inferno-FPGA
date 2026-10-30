@@ -909,7 +909,26 @@ class AVBSoC(SoCCore):
                 description="USB clock source rate: 1 = 48 kHz, 0 = 96 kHz. "
                             "Driven by firmware from the Dante-selected rate; "
                             "the USB host follows and cannot set it.")
-            _rate_port = {"i_rate_48k_i": self.usb_rate_48k.storage}
+            # SYNCHRONISEER NAAR cd_usb. De CSR leeft in sys, de clock source in
+            # het subsysteem leest hem in cd_usb. Ongesynchroniseerd doorverbinden
+            # is exact de fout die een paar regels hierboven al voor block_level
+            # beschreven staat: nextpnr timet het als een single-cycle sys<->usb
+            # pad (toen -4,59 ns en het slechtste pad dat sys_clk's Fmax
+            # beperkte), en het is een echte metastabiliteits-hazard.
+            #
+            # En die bit voedt RECHTSTREEKS de data van het control-transfer-
+            # antwoord op GET CUR(SAM_FREQ). Ongesynchroniseerd gaf dat op
+            # 2026-10-30 "cannot get freq (v2/v3): err -71" op Main terwijl
+            # Backup schoon opkwam -- identieke code, dus geen codeverschil maar
+            # een CDC die soms wel en soms niet goed valt.
+            #
+            # Een MultiReg per DOELDOMEIN: Main leest in usb, Backup in usb2.
+            # Een enkele synchroniser delen zou de bit in het verkeerde domein
+            # aanbieden aan een van de twee.
+            _r48_usb = Signal()
+            self.specials += _MultiReg(self.usb_rate_48k.storage, _r48_usb,
+                                       odomain="usb")
+            _rate_port = {"i_rate_48k_i": _r48_usb}
 
         self.specials += Instance("usb_avb_subsystem",
             i_clk       = ClockSignal("sys"),
@@ -1018,6 +1037,10 @@ class AVBSoC(SoCCore):
             self.usb2_fb_ovr = CSRStorage(32, description="Backup USB async-feedback override (0=auto).")
             usb2_block_level_usb2 = Signal(8)
             self.specials += _MultiReg(usb_block_level, usb2_block_level_usb2, odomain="usb2")
+            _r48_usb2 = Signal()
+            if getattr(platform, "_usb_dual_rate", False):
+                self.specials += _MultiReg(self.usb_rate_48k.storage,
+                                           _r48_usb2, odomain="usb2")
             self.specials += Instance("usb_avb_subsystem2",
                 i_clk=ClockSignal("sys"), i_rst=ResetSignal("sys"),
                 i_usb_clk=ClockSignal("usb2"),
@@ -1030,11 +1053,13 @@ class AVBSoC(SoCCore):
                 o_dbg_rx_beats=dbg2_a, o_dbg_ep_out=dbg2_b,
                 i_sample_strobe=self.mcr.sample_strobe,
                 i_block_level=usb2_block_level_usb2, i_fb_ovr=self.usb2_fb_ovr.storage,
-                # DEZELFDE CSR als Main: beide clock sources moeten dezelfde rate
-                # melden. Twee hosts die van elkaar verschillende rates te horen
-                # krijgen terwijl ze in dezelfde Dante-flow eindigen, geeft bij
-                # een A/B-omschakeling een halve of dubbele snelheid.
-                **({"i_rate_48k_i": self.usb_rate_48k.storage}
+                # DEZELFDE CSR als Main, maar via een EIGEN synchroniser naar
+                # cd_usb2 -- zie de toelichting bij Main. Beide clock sources
+                # moeten dezelfde rate melden: twee hosts die verschillende
+                # rates te horen krijgen terwijl ze in dezelfde Dante-flow
+                # eindigen, geeft bij een A/B-omschakeling halve of dubbele
+                # snelheid.
+                **({"i_rate_48k_i": _r48_usb2}
                    if getattr(platform, "_usb_dual_rate", False) else {}))
             self.usb2_sample_overflow = CSRStatus(32, description="Backup USB samples dropped.")
             self.comb += self.usb2_sample_overflow.status.eq(sample_ovf2_w)
