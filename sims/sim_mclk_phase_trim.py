@@ -3,10 +3,10 @@
 #
 # WHY. With rate discipline armed and healthy -- target and applied both
 # -4354 ppb, 0 trips, ring 63..67, 0 underruns -- tools/mclk.py watch 120
-# measures a RESIDUAL of +0.35 ppm (+1.2 ms/hour). drift is
-# `emitted timestamp - PTP`, so a positive slip means our timestamps run AHEAD
-# and a receiver's measured latency falls by ONE SAMPLE PER MINUTE. Watched on a
-# RedNet A16R at 0.25 ms: 134 us, decaying, clamped at 0, Latency Status grey.
+# measures a RESIDUAL of +0.35 ppm (+1.2 ms/hour). drift is the media clock
+# minus PTP, so a positive slip means our timestamps run AHEAD and a receiver's
+# measured latency falls by ONE SAMPLE PER MINUTE. Watched on a RedNet A16R at
+# 0.25 ms: 134 us, decaying, clamped at 0, Latency Status grey.
 #
 # The rate loop cannot fix this. It corrects RATE from the PTP servo integral
 # and has no term that looks at where the timestamp actually IS, so a small rate
@@ -31,6 +31,11 @@
 #     broke the audio the previous two times
 #   - the NCO's 242 ppb quantisation (one increment LSB), which is why the
 #     integral must be allowed to dither between grid points
+#   - THE MEASUREMENT ITSELF, and each way it can lie (check 6). This was added
+#     after the fact: the first version of this file modelled drift as a clean
+#     float, passed, and the loop then ran away on hardware because the SIGNAL
+#     was wrong rather than the gains. A model that assumes its input is
+#     trustworthy cannot catch an untrustworthy input.
 #
 # WHAT IS NOT MODELLED: the USB feedback servo. Its authority is +-2.08% =
 # 20800 ppm against a correction here of at most 2 ppm, four orders of magnitude
@@ -41,6 +46,7 @@
 #
 #   run:  python3 sims/sim_mclk_phase_trim.py
 
+import math
 import sys
 
 
@@ -59,7 +65,11 @@ def cdiv(a, b):
 # --- firmware constants, mcr_dante.c ---------------------------------------
 UPDATE_MS            = 1000
 SLEW_PPB             = 100        # per update
-PHASE_TARGET_SAMPLES = -24
+# -1, via -24 and -4. -24 was 2x a 0.25 ms receiver's whole budget. -4 corrected
+# for the loop parking 2..5 samples above target on a QUANTISED actuator -- and
+# then nco_render()'s dither removed that quantisation, so the offset it
+# compensated for no longer exists. -1 parks drift at 0, i.e. A16R dead centre.
+PHASE_TARGET_SAMPLES = -1
 PHASE_MAX_PPB        = 2000
 # SHIPPED gains, which this sim shows cannot hold phase -- see tune().
 SHIPPED_KI, SHIPPED_KP_NUM, SHIPPED_KP_DEN = 40, 2, 5
@@ -86,30 +96,111 @@ PHASE_KP_DEN         = 1
 NCO_LSB_PPB          = 242        # 1/4123169
 
 FS = 48000.0
-MEASURED_RESIDUAL_PPM = 0.35      # tools/mclk.py watch 120, discipline armed
+# 0.01 ppm, measured 2026-08-12 AFTER the NCO dither fix (drift -3 -> -4 over
+# ~40 min). It was 0.35, then 0.13 on a later bench; both were dominated by the
+# +0.133 ppm of NCO integer rounding that nco_render() now removes. What is left
+# is the PTP servo's own tracking error, and it is 30x smaller.
+MEASURED_RESIDUAL_PPM = 0.01
 
 
-def run(residual_ppm, seconds, quantise=True, start_drift=0.0,
-        ki=PHASE_KI, kp_num=PHASE_KP_NUM, kp_den=PHASE_KP_DEN):
+# --- the MEASUREMENT, which is what actually broke the loop -----------------
+#
+# THE ORIGINAL VERSION OF THIS FILE MODELLED drift AS A CLEAN FLOAT, and that is
+# precisely why it passed while the real loop ran away on 2026-08-11: it
+# verified the GAINS, which were never what failed, and said nothing about the
+# signal they were fed. Step 3 of DRIFT_HANDOFF.md. The measurement is now a
+# model in its own right, and the loop is run against each way it can lie.
+#
+#   "ideal"     the signal the gains were tuned against. Not reality.
+#
+#   "straddle"  the old (emitted_sec, emitted_sub) vs (ptp_sec, ptp_ns) read,
+#               where the CPU's two CSR reads land either side of a seconds
+#               boundary and the difference jumps by exactly +-48000. One poll,
+#               then gone. dante_tx_read_emitted()'s seqlock already handled
+#               this before the runaway.
+#
+#   "stale"     the register FREEZING because the talker went off. The media
+#               counter is gated on `en`, so with nothing being emitted the last
+#               emitted timestamp stands still while PTP runs on: the reported
+#               drift walks at -48000 samples per second of silence. This is the
+#               one nothing guarded, and the only mechanism that can produce the
+#               -335977 (= -7 x 48000 + 23) that was actually observed.
+#
+#   "fixed"     dante_tx_media_phase(): no seconds field on either side, so
+#               +-48000 is not expressible, and NO SAMPLE AT ALL rather than a
+#               plausible number when the media counter is not ticking.
+#
+# When the talker drops -- a flow expiring, dante_tx_drop_all(), the re-anchor
+# path -- and for how long. Seven seconds, to reproduce the observed -335977.
+TALKER_OFF_AT = 120
+TALKER_OFF_S  = 7
+
+# HOW STALE THE REGISTER ALREADY IS at the first poll after the talker drops.
+# The poll runs at 1 Hz and the talker can drop at any moment inside that
+# second, so this is a free parameter in [0, 1) -- and it is the whole reason
+# the magnitude guard is not enough. 0.04 s of staleness is 1920 samples: a
+# completely wrong number that sails through a +-2400 guard.
+FREEZE_PHASE = 0.5
+
+
+def measure(mode, t, drift, freeze_phase=FREEZE_PHASE):
+    """Return (valid, reported_drift) as the firmware would see it."""
+    off = TALKER_OFF_AT <= t < TALKER_OFF_AT + TALKER_OFF_S
+    if mode == "fixed":
+        # Refuses to report when the counter is not ticking; otherwise exact.
+        return (False, None) if off else (True, drift)
+    if mode == "stale" and off:
+        # A frozen register against a running PTP. Staleness is NOT a whole
+        # number of seconds -- the talker drops somewhere inside the poll
+        # interval -- so the first reading after the drop is a partial second.
+        stale_s = (t - TALKER_OFF_AT) + freeze_phase
+        return True, drift - 48000.0 * stale_s
+    if mode == "straddle" and t % 37 == 0:
+        return True, drift - 48000.0
+    return True, drift
+
+
+def run(residual_ppm, seconds, quantise=False, start_drift=0.0,
+        ki=PHASE_KI, kp_num=PHASE_KP_NUM, kp_den=PHASE_KP_DEN,
+        mode="ideal", guard=True, freeze_phase=FREEZE_PHASE):
     """Return per-second (drift_samples, phase_ppb, applied_ppb) history.
 
     residual_ppm is what the RATE loop leaves behind. The phase loop has to
     remove it by trimming the same actuator.
+
+    mode selects how the MEASUREMENT lies; guard is the |err| > 2400 magnitude
+    check in mcr_dante.c.
     """
-    drift   = start_drift          # samples, emitted - PTP
-    integ   = 0                    # units of 1/PHASE_I_SCALE ppb
-    applied = 0                    # ppb actually at the NCO, after slew
-    hist    = []
+    drift     = start_drift        # samples, TRUE phase (media - PTP)
+    integ     = 0                  # units of 1/PHASE_I_SCALE ppb
+    applied   = 0                  # ppb actually at the NCO, after slew
+    phase_ppb = 0                  # held across a poll with no sample
+    hist      = []
 
     for t in range(int(seconds)):
         # --- the phase PI, transcribed from mcr_dante.c --------------------
-        err = int(drift) - PHASE_TARGET_SAMPLES        # >0 = ahead -> slow down
-        integ += -err * ki
-        ilim = PHASE_MAX_PPB * PHASE_I_SCALE
-        integ = max(-ilim, min(ilim, integ))
-        p = -cdiv(err * kp_num, kp_den)
-        i = cdiv(integ, PHASE_I_SCALE)
-        phase_ppb = max(-PHASE_MAX_PPB, min(PHASE_MAX_PPB, p + i))
+        valid, meas = measure(mode, t, drift, freeze_phase)
+        if not valid:
+            # No sample: hold the whole term. Not zero -- zeroing would step the
+            # applied rate by whatever the integral had accumulated.
+            pass
+        else:
+            # floor(), NOT int(): int() truncates toward zero, which puts a
+            # two-sided dead zone across drift = 0 and biased every settle
+            # near the origin. Invisible while the target was -24, wrong the
+            # moment it became 0. The firmware subtracts two integers.
+            err = math.floor(meas) - PHASE_TARGET_SAMPLES  # >0 = ahead -> slow down
+            if guard and abs(err) > 2400:
+                # Magnitude guard: fail back toward rate-only, which is known
+                # good, rather than winding the integral on a bad number.
+                phase_ppb = 0
+            else:
+                integ += -err * ki
+                ilim = PHASE_MAX_PPB * PHASE_I_SCALE
+                integ = max(-ilim, min(ilim, integ))
+                p = -cdiv(err * kp_num, kp_den)
+                i = cdiv(integ, PHASE_I_SCALE)
+                phase_ppb = max(-PHASE_MAX_PPB, min(PHASE_MAX_PPB, p + i))
 
         # --- slew limiter: the constraint whose absence broke audio before --
         want = phase_ppb
@@ -117,7 +208,12 @@ def run(residual_ppm, seconds, quantise=True, start_drift=0.0,
         elif want < applied - SLEW_PPB: applied -= SLEW_PPB
         else:                           applied = want
 
-        # --- actuator quantisation: the NCO renders whole LSBs -------------
+        # --- actuator ------------------------------------------------------
+        # DEFAULT IS NO QUANTISATION, because mcr_dante.c's nco_render() now
+        # carries the increment in 16.16 and sigma-deltas the fraction: the mean
+        # increment is exact to under 0.1 ppb, so the 242 ppb LSB is no longer a
+        # floor the loop has to work around. quantise=True keeps the OLD
+        # undithered actuator available, which is what check 5 compares against.
         eff = round(applied / NCO_LSB_PPB) * NCO_LSB_PPB if quantise else applied
 
         # --- plant: net rate error integrates into phase -------------------
@@ -127,6 +223,29 @@ def run(residual_ppm, seconds, quantise=True, start_drift=0.0,
 
         hist.append((drift, phase_ppb, applied))
     return hist
+
+
+# What the A16R measures: (fpp-1) + path delay - drift. Bench-measured
+# 2026-08-12 across three receivers at once, all tracking drift 1:1:
+#   A16R fpp=4 -> 6 - drift   AM2 fpp=16 -> 19 - drift   DVS fpp=60 -> 83 - drift
+# The A16R has the tightest budget (12 samples at 0.25 ms) and therefore sets
+# the requirement; keep its measured latency in the middle 3..9 of that.
+A16R_CONST, A16R_BUDGET = 6, 12
+
+
+# ACCEPTANCE: at least 2 samples (42 us) of margin from BOTH ends of the
+# tightest receiver's budget -- from the zero rail, where it clamps and Dante
+# Controller greys out, and from the top, where it discards audio outright.
+# Stated as a margin rather than a "middle", because the middle is a matter of
+# taste and the margin is what actually has to hold.
+def report_receiver(name, hist, settle_from, lo_ok=2, hi_ok=A16R_BUDGET - 2):
+    tail = [d for d, _, _ in hist[settle_from:]]
+    ml, mh = A16R_CONST - max(tail), A16R_CONST - min(tail)
+    ok = ml >= lo_ok and mh <= hi_ok
+    print(f"  {'PASS' if ok else 'FAIL'}  {name}: drift settles "
+          f"{min(tail):+.1f}..{max(tail):+.1f} -> A16R reads {ml:.1f}..{mh:.1f} "
+          f"of {A16R_BUDGET} (want {lo_ok}..{hi_ok})")
+    return ok
 
 
 def report(name, hist, target, tol_samples, settle_from):
@@ -149,7 +268,7 @@ def tune():
     is a 14-HOUR time constant, which is why the integral runs the loop and it
     limit-cycles.
     """
-    print("\n6. gain search -- shipped gains cannot hold phase; what can?\n")
+    print("\n7. gain search -- shipped gains cannot hold phase; what can?\n")
     print(f"     plant: 1 ppb -> {1e-9*FS:.2e} samples/s;"
           f" Kp=0.4 gives tau={1/(1e-9*FS*0.4)/3600:.1f} h\n")
     print(f"  {'Kp':>6} {'Ki':>7} {'settle err':>11} {'swing':>7} {'peak ppb':>9}"
@@ -189,9 +308,15 @@ if __name__ == "__main__":
     # --- 1. does it converge at all, from the drift we actually measured? ---
     # Kp=30 is a ~12 min time constant, so settling takes ~5 tau = 1 hour.
     # Sampling at 30 min measures the TRANSIENT and calls it steady state.
-    print("1. convergence from the measured residual (2 h, settled after 1 h):")
+    # STATED IN RECEIVER TERMS, not as a distance from target. The loop parks
+    # 2..5 samples above its target (the (LSB/2)/Kp quantisation floor), so
+    # "settles within N of target" measures the wrong thing -- what breaks audio
+    # is where the RECEIVER's measured latency ends up. Bench-measured
+    # 2026-08-12: A16R at fpp=4 reads (6 - drift) samples against a 12-sample
+    # budget at 0.25 ms.
+    print("1. convergence, judged by where it leaves the tightest receiver:")
     h = run(MEASURED_RESIDUAL_PPM, 7200)
-    if not report("phase loop", h, PHASE_TARGET_SAMPLES, 3, 3600):
+    if not report_receiver("phase loop", h, 3600):
         fails += 1
 
     # WITHOUT the loop, for contrast: this is today's behaviour.
@@ -272,29 +397,124 @@ if __name__ == "__main__":
         fails += 1
 
     hh = run(MEASURED_RESIDUAL_PPM, 10800, start_drift=-60.0)
-    t = [d for d, _, _ in hh[7200:]]
-    err = max(abs(min(t) - PHASE_TARGET_SAMPLES), abs(max(t) - PHASE_TARGET_SAMPLES))
-    ok = err <= 4
-    print(f"  {'PASS' if ok else 'FAIL'}  starting 60 samples away -> recovers "
-          f"to within {err:.1f}")
+    if not report_receiver("starting 60 samples away", hh, 7200):
+        fails += 1
+
+    # --- 5. the dither is what removes the quantisation penalty -------------
+    # This check used to ask whether the integral could dither between NCO grid
+    # points by itself. It cannot, and that was the whole +0.133 ppm bug: with
+    # nothing moving the value across a grid point it parks 0.55 LSB off and
+    # stays there. nco_render() now does the dithering explicitly, so compare
+    # the two actuators directly.
+    print("\n5. the NCO dither removes the 242 ppb quantisation floor:")
+    q  = run(MEASURED_RESIDUAL_PPM, 3600, quantise=True)     # old, undithered
+    d  = run(MEASURED_RESIDUAL_PPM, 3600, quantise=False)    # nco_render()
+    eq = max(abs(x - PHASE_TARGET_SAMPLES) for x, _, _ in q[1800:])
+    ed = max(abs(x - PHASE_TARGET_SAMPLES) for x, _, _ in d[1800:])
+    ok = ed <= eq
+    print(f"  {'PASS' if ok else 'FAIL'}  undithered actuator settles {eq:.1f} "
+          f"samples from target, dithered {ed:.1f} (one LSB is {NCO_LSB_PPB} ppb "
+          f"= {NCO_LSB_PPB/1000*1e-6*FS*60:.2f} samples/min of rate error)")
     if not ok:
         fails += 1
 
-    # --- 5. quantisation must not pin the integral --------------------------
-    # The comment at PHASE_MAX_PPB records a real failure: clamped at 300 ppb,
-    # barely one 242 ppb LSB, the integral saturated and could not dither
-    # between adjacent increments. Show the clamp is now big enough.
-    print("\n5. the integral can dither between NCO grid points:")
-    q  = run(MEASURED_RESIDUAL_PPM, 3600, quantise=True)
-    nq = run(MEASURED_RESIDUAL_PPM, 3600, quantise=False)
-    dq  = max(abs(d - PHASE_TARGET_SAMPLES) for d, _, _ in q[1800:])
-    dnq = max(abs(d - PHASE_TARGET_SAMPLES) for d, _, _ in nq[1800:])
-    ok = dq <= dnq + 4
-    print(f"  {'PASS' if ok else 'FAIL'}  quantised error {dq:.1f} vs ideal "
-          f"{dnq:.1f} samples (one LSB is {NCO_LSB_PPB} ppb = "
-          f"{NCO_LSB_PPB/1000*1e-6*FS*60:.2f} samples/min)")
+    # --- 6. the MEASUREMENT, not the gains ----------------------------------
+    # Everything above this point tunes a loop against a signal assumed clean.
+    # That assumption is what cost ten re-anchors and an audio interruption on
+    # 2026-08-11, so it is now a check rather than an assumption.
+    print("\n6. the measurement -- what actually broke this loop:")
+
+    def peak_ppb(hh):
+        return max(abs(a) for _, _, a in hh)
+
+    def peak_term(hh):
+        return max(abs(pp) for _, pp, _ in hh)
+
+    # (a) REPRODUCE THE FAILURE. Stale register, no guard: this is what ran.
+    #     The firmware printed the TERM ("contributing +2000 ppb"), which is
+    #     pre-slew; `applied` reaches less than that because the slew limiter is
+    #     still doing its job on the way to a wrong answer.
+    hh = run(MEASURED_RESIDUAL_PPM, 600, mode="stale", guard=False)
+    ok = peak_term(hh) >= PHASE_MAX_PPB
+    print(f"  {'PASS' if ok else 'FAIL'}  stale register, no guard -> phase term "
+          f"reaches {peak_term(hh)} ppb (the {PHASE_MAX_PPB} rail), dragging the "
+          f"NCO to {peak_ppb(hh)} ppb -- reproduces 2026-08-11")
     if not ok:
         fails += 1
+
+    # (b) THE GUARD IS NOT THE FIX. It catches a stale reading only once the
+    #     register has been frozen long enough for the error to exceed 2400
+    #     samples -- 50 ms. The talker drops at an arbitrary point inside the
+    #     1 Hz poll interval, so the FIRST reading after the drop is a partial
+    #     second, and anything under 50 ms of staleness is a wholly wrong number
+    #     that the guard passes straight through to the integral.
+    leaked = []
+    for fp_ms in range(0, 1000, 10):
+        v, m = measure("stale", TALKER_OFF_AT, 0.0, fp_ms / 1000.0)
+        if v and abs(int(m) - PHASE_TARGET_SAMPLES) <= 2400:
+            leaked.append(fp_ms)
+    ok = len(leaked) > 0
+    print(f"  {'PASS' if ok else 'FAIL'}  ...but the +-2400 guard passes a stale "
+          f"reading for the first {max(leaked) + 10 if leaked else 0} ms of the "
+          f"freeze ({len(leaked)}/100 landings), worth up to "
+          f"{abs(int(measure('stale', TALKER_OFF_AT, 0.0, max(leaked)/1000.0)[1])) if leaked else 0}"
+          f" samples of pure error")
+    if not ok:
+        fails += 1
+
+    # (c) worst case for the guard: a landing it does not catch.
+    worst_fp = max(leaked) / 1000.0 if leaked else 0.0
+    hh = run(MEASURED_RESIDUAL_PPM, 600, mode="stale", guard=True,
+             freeze_phase=worst_fp)
+    base = run(MEASURED_RESIDUAL_PPM, 600, mode="ideal")
+    win = slice(TALKER_OFF_AT - 1, TALKER_OFF_AT + 20)
+    # Against the SAME run with no freeze, not an absolute ppb figure -- the
+    # latter was calibrated at target -24 and says nothing at another target.
+    kick = max(abs(hh[i][2] - base[i][2]) for i in range(*win.indices(len(hh))))
+    ok = kick > 20
+    print(f"  {'PASS' if ok else 'FAIL'}  guard ON, freeze landing at "
+          f"{worst_fp*1000:.0f} ms -> still kicks the output to {kick} ppb "
+          f"(a correction the phase error never asked for)")
+    if not ok:
+        fails += 1
+
+    # (d) THE FIX. No sample is reported at all, so there is nothing to leak.
+    #
+    #     The claim is NOT "identical to a run with no talker-off window" --
+    #     holding the term for seven seconds while the residual keeps
+    #     accumulating does cost something, and pretending otherwise would be
+    #     the same kind of wishful model that let the original bug through. The
+    #     claims are that (i) WHERE the freeze lands inside the poll interval,
+    #     the free parameter that makes the magnitude guard porous, has no
+    #     effect whatsoever, and (ii) what a talker-off window costs is bounded
+    #     and small, against the guard's hundreds of ppb of invented correction.
+    fixed = [run(MEASURED_RESIDUAL_PPM, 600, mode="fixed", freeze_phase=fp / 1000.0)
+             for fp in range(0, 1000, 10)]
+    spread = max(max(abs(r[i][2] - fixed[0][i][2]) for i in range(len(r)))
+                 for r in fixed)
+    ok = spread == 0
+    print(f"  {'PASS' if ok else 'FAIL'}  fixed measurement: all 100 freeze "
+          f"landings give byte-identical output (spread {spread} ppb) -- the "
+          f"parameter that defeats the guard does not exist for it")
+    if not ok:
+        fails += 1
+
+    ideal = run(MEASURED_RESIDUAL_PPM, 600, mode="ideal")
+    cost = max(abs(fixed[0][i][2] - ideal[i][2]) for i in range(len(ideal)))
+    ok = cost <= 100
+    print(f"  {'PASS' if ok else 'FAIL'}  and holding the term through a "
+          f"{TALKER_OFF_S} s talker-off window costs {cost} ppb against an "
+          f"uninterrupted run (vs {kick} ppb of invented correction with the "
+          f"guard alone)")
+    if not ok:
+        fails += 1
+
+    # (e) and the straddle, which the seqlock already handled, is now not even
+    #     expressible: there is no seconds field on either side to straddle.
+    hh = run(MEASURED_RESIDUAL_PPM, 600, mode="straddle", guard=False)
+    st = peak_ppb(hh)
+    print(f"        for contrast, a +-48000 straddle with no guard reaches "
+          f"{st} ppb; dante_tx_media_phase() cannot produce one at all")
 
     print("\n  The USB feedback servo is NOT modelled -- its authority is 20800 ppm")
     print("  against at most 2 ppm here. A PASS means the phase loop converges and")

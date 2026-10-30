@@ -3,14 +3,20 @@
 
     tools/mclk.py status        # dry run: what discipline WOULD do
     tools/mclk.py watch 60      # drift rate + ring level min/max over a window
+    tools/mclk.py log 3600 f    # 1 Hz drift samples; proves the signal is clean
     tools/mclk.py on            # arm the discipline
     tools/mclk.py off           # back to nominal, immediately
+
+BEFORE ENABLING THE PHASE TERM, run `log 3600`. It is step 2 of
+DRIFT_HANDOFF.md: an hour of 1 Hz samples with not one |drift| > 100. The phase
+loop ran away once on a drift signal that went whole seconds out, and a control
+loop cannot be validated on a signal nobody sampled fast enough to see.
 
 THE DRY-RUN CHECK, before arming anything:
 
 `target_ppb` is what PTPv1's servo integral says this board's crystal error is.
-`drift` is an INDEPENDENT measurement -- the emitted media timestamp minus PTP,
-in samples, differentiated over the watch window. If discipline is correct they
+`drift` is an INDEPENDENT measurement -- the media clock counter minus PTP, in
+samples, differentiated over the watch window. If discipline is correct they
 must agree in magnitude and be opposite in sign: a crystal running +4.7 ppm fast
 should show drift +4.7 ppm and target_ppb about -4700.
 
@@ -40,6 +46,7 @@ FIELDS = [
     "lvl_min", "lvl_avg", "lvl_max", "underrun_per_s",
     "drift_samples", "underrun_total", "overrun_total",
     "phase_enabled", "phase_ppb",
+    "drift_valid", "drift_rejects", "phase_rejects",
 ]
 
 
@@ -79,9 +86,18 @@ def show(st):
           f" max={st['lvl_max']}   (centre 64, prime floor near 0)")
     print(f"  underrun       {st['underrun_per_s']}/s"
           f"   {'<- ring empty, no USB source' if st['underrun_per_s'] > 40000 else ''}")
-    print(f"  drift          {st['drift_samples']:+d} samples (emitted - PTP)")
+    # "media - PTP", not "emitted - PTP": since the atomic-measurement fix this
+    # is the media clock COUNTER, which every flow's emitted timestamp sits a
+    # further (fpp-1) behind. Constant per flow, so the RATE is unchanged.
+    stale = "" if st.get("drift_valid", 1) else "   <- STALE, no sample this poll"
+    print(f"  drift          {st['drift_samples']:+d} samples (media - PTP){stale}")
     print(f"  phase term     {'ENABLED' if st.get('phase_enabled') else 'off'}"
           f"   contributing {st.get('phase_ppb', 0):+d} ppb")
+    if st.get("drift_rejects") or st.get("phase_rejects"):
+        print(f"  measurement    {st.get('drift_rejects', 0)} polls with no sample"
+              f"  (talker off or media strobe stopped)")
+        print(f"                 {st.get('phase_rejects', 0)} rejected by the"
+              f" magnitude guard  <- SHOULD BE 0; if not, the signal is wrong again")
 
 
 def watch(board, secs):
@@ -100,6 +116,13 @@ def watch(board, secs):
         worst_ur = max(worst_ur, r["underrun_per_s"])
     b = query(board)
     dt = time.time() - t0
+    # Differentiating a HELD value invents a drift rate. drift_valid says the
+    # reading is this second's measurement rather than the last good one carried
+    # over because the talker was off.
+    if not (a.get("drift_valid", 1) and b.get("drift_valid", 1)):
+        print("  drift slip     NOT MEASURABLE -- an endpoint reading was stale")
+        print("                 (talker off, or the media strobe stopped)")
+        return
     slip = b["drift_samples"] - a["drift_samples"]
     ppm = slip / dt * 1e6 / 48000
     print(f"over {dt:.0f}s ({'ARMED' if b['enabled'] else 'dry run'}):")
@@ -127,6 +150,76 @@ def watch(board, secs):
                          "DISAGREE -- do NOT arm; check sign/scaling first"))
 
 
+def log(board, secs, path=None, limit=100):
+    """Sample drift at 1 Hz and report every excursion.
+
+    This is step 2 of DRIFT_HANDOFF.md, made runnable: the phase term must not
+    be enabled until an hour of samples contains not one |drift| > 100. The
+    failure it exists to catch is a whole-second artefact (48000 samples), which
+    a single sample per minute would miss entirely -- hence 1 Hz, and hence
+    reporting the WORST sample rather than an average, which would bury it.
+    """
+    t0 = time.time()
+    n = bad = stale = 0
+    worst = 0
+    first = None
+    fh = open(path, "w") if path else None
+    if fh:
+        fh.write("# t_s drift_samples valid applied_ppb phase_ppb lvl_min underrun_per_s\n")
+    print(f"logging drift at 1 Hz for {secs}s; excursions past +-{limit} samples "
+          f"are printed as they happen")
+    try:
+        while time.time() - t0 < secs:
+            try:
+                st = query(board, timeout=2.0, tries=2)
+            except Exception:
+                time.sleep(1.0)
+                continue
+            t = time.time() - t0
+            d = st["drift_samples"]
+            ok = st.get("drift_valid", 1)
+            if fh:
+                fh.write(f"{t:.1f} {d} {int(ok)} {st['applied_ppb']} "
+                         f"{st.get('phase_ppb', 0)} {st['lvl_min']} "
+                         f"{st['underrun_per_s']}\n")
+                fh.flush()
+            if not ok:
+                stale += 1
+                print(f"  t+{t:6.0f}s  NO SAMPLE (talker off or media strobe stopped)")
+            else:
+                n += 1
+                if first is None:
+                    first = d
+                if abs(d) > abs(worst):
+                    worst = d
+                if abs(d) > limit:
+                    bad += 1
+                    print(f"  t+{t:6.0f}s  drift {d:+d} samples  <- EXCURSION"
+                          f"{'  (~1 second: the old artefact is back)' if abs(abs(d) - 48000) < 200 else ''}")
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        print("  (interrupted)")
+    finally:
+        if fh:
+            fh.close()
+
+    dt = time.time() - t0
+    print(f"\nover {dt:.0f}s: {n} samples, {stale} with no sample, "
+          f"{bad} past +-{limit}")
+    print(f"  worst |drift|  {worst:+d} samples")
+    st = query(board)
+    print(f"  guard rejects  {st.get('phase_rejects', 0)}"
+          f"   (the magnitude guard in mcr_dante.c; must be 0)")
+    if bad == 0 and st.get("phase_rejects", 0) == 0:
+        print("  => the drift signal is clean over this window."
+              " DRIFT_HANDOFF.md step 2 satisfied for this run.")
+    else:
+        print("  => NOT clean. Do NOT enable the phase term; the signal is"
+              " still wrong.")
+    if fh is None:
+        print("  (pass a filename to keep the raw samples: mclk.py log 3600 drift.log)")
+
+
 def main():
     board = "169.254.9.200"
     args = sys.argv[1:]
@@ -138,6 +231,10 @@ def main():
         show(query(board))
     elif cmd == "watch":
         watch(board, int(args[1]) if len(args) > 1 else 60)
+    elif cmd == "log":
+        log(board,
+            int(args[1]) if len(args) > 1 else 3600,
+            args[2] if len(args) > 2 else None)
     elif cmd == "on":
         print("armed:")
         show(query(board, b"1"))

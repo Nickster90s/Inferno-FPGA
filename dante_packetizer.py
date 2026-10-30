@@ -374,9 +374,74 @@ class DantePacketizer(LiteXModule):
 
         wr     = Signal(32)                         # sample write pointer
         rd     = Signal(32)                         # sample read/consumed pointer
-        # SIGNED sample occupancy (negative if consumer overtakes producer).
-        level  = Signal((34, True))
-        self.comb += level.eq(wr - rd)
+
+        # ---- OCCUPANCY, COMPUTED MODULO SO A POINTER WRAP CANNOT LATCH -------
+        #
+        # THIS IS THE 3-HOUR RING DEATH. Four times (2026-08-12, twice 08-13,
+        # 08-14), always needing a JTAG bitstream reload, and the period was the
+        # clue that finally named it:
+        #
+        #   rd advances by `channels` (8) per media strobe at 48 kHz = 384,000/s
+        #   rd is 32 bits  ->  2^32 / 384,000 = 11,185 s = 3.107 HOURS
+        #
+        # `level = wr - rd` used to be a PLAIN difference into a 34-bit signed
+        # signal, which is only correct while neither pointer has wrapped:
+        #
+        #   1. wr leads rd by the ring level (~64), so WR WRAPS FIRST.
+        #   2. For the ~167 us until rd wraps too, (wr - rd) evaluates to
+        #      -4,294,967,232 instead of +64.
+        #   3. level < FRAME_SAMPLES un-primes the ring, and rd only advances
+        #      under `strobe & primed` -- so RD FREEZES EXACTLY WHEN IT WAS
+        #      ABOUT TO WRAP, and can never wrap. level stays ~-2^32 forever.
+        #
+        # It hid perfectly because block_level CLAMPS a negative level to 0
+        # (see below), so fifo_level read 0 rather than -4.29 billion: the one
+        # number that would have named this on the first occurrence was the one
+        # deliberately thrown away. Meanwhile wr's update is gated on neither
+        # `primed` nor `en`, so every ingress counter stayed perfect --
+        # rx_beats = ep_out, sample_overflow 0, no leak, no drops.
+        #
+        # WHAT I FIRST WROTE HERE WAS WRONG, and the correction matters:
+        #
+        #   "avb-aes3 never saw it because rd advanced by +64 per block traversal"
+        #
+        # Both the number and the inference are false. avb-aes3 advances rd by
+        # FRAME_SAMPLES = 48 once per block at 8000 blocks/s = 384,000 Sa/s --
+        # IDENTICAL to ours, because consumption must match production. The +64
+        # figure was dante-usb's OWN earlier behaviour at fpp=8, not avb-aes3's.
+        # Sample-granular rd did not create this timer.
+        #
+        # avb-aes3 HAS THE IDENTICAL BUG: aaf_packetizer.py:287-291 declares the
+        # same Signal(32) pointers and the same `level = Signal((34, True));
+        # level.eq(wr - rd)`, with the same un-prime latch and the same
+        # `level < 0 -> block_level = 0` clamp hiding it. Same 3.107 hours.
+        #
+        # It survives only by accident: its firmware drops aaf_pkt_enable on
+        # every gPTP/CRF unlock (main.c:1512-1544, driven by gptp.c:753 on a
+        # 2 us offset excursion, a 3 s Sync timeout, or CRF staleness), and each
+        # toggle clears aligned_once and reloads rd from rd_anchor. Those unlocks
+        # are frequent enough to act as an unintended watchdog. OUR talker, once
+        # PTPv1 is locked and flows are subscribed, never drops -- and ts_anchor()
+        # reloads only ts_sec/ts_sub, never rd. So we get no heal path at all.
+        #
+        # PORT THIS FIX BACK TO avb-aes3. It is one uninterrupted 3.107-hour
+        # lock away from the same failure.
+        #
+        # THE FIX. 2^32 is divisible by any power of two, so the LOW BITS of
+        # (wr - rd) are exact across a wrap -- the subtraction only has to be
+        # truncated instead of widened. Modulus 4 x SRING_DEPTH leaves the lower
+        # half for real occupancy (which cannot exceed SRING_DEPTH) and the upper
+        # half to carry "consumer overtook producer" as a negative, preserving
+        # the signed semantics every comparison below relies on.
+        _LVL_BITS = log2depth + 2
+        _diff     = Signal(_LVL_BITS)
+        level     = Signal((_LVL_BITS + 1, True))
+        self.comb += _diff.eq(wr - rd)              # exact mod 2**_LVL_BITS
+        self.comb += level.eq(_diff - Mux(_diff[_LVL_BITS - 1],
+                                          1 << _LVL_BITS, 0))
+        # Exposed for sims/sim_ring_wrap.py, which parks the design and places
+        # the pointers either side of 2^32 rather than waiting 3.1 hours.
+        self.dbg_wr, self.dbg_rd, self.dbg_level = wr, rd, level
         # block_level for the wrapper PI servo — SAME scale as the old frame level
         # (samples >> 3 = frames), so the servo CENTER/KP/clamps carry over with no
         # change to the wrapper or the .v.
@@ -441,11 +506,88 @@ class DantePacketizer(LiteXModule):
                 samp_hi_r.eq(usb_sample_hi[0:first_bit + 1]),
             ),
         ]
-        first   = samp_hi_r[first_bit]              # 48ch-frame ch0 marker (channel_nr==0)
-        chan_nr = samp_hi_r[0:first_bit]            # explicit channel 0..BLOCK_CH-1
+        first_i = samp_hi_r[first_bit]              # 48ch-frame ch0 marker (channel_nr==0)
+        chan_i  = samp_hi_r[0:first_bit]            # explicit channel 0..BLOCK_CH-1
         ch_bits = max(1, log2_int(channels))        # 3 for 8ch
+        en = self.enable.storage                    # needed by the flywheel below
+
+        # ---- FLYWHEEL ON THE FRAME MARKER -----------------------------------
+        #
+        # THE RING DIES PERMANENTLY IF `first` STOPS ARRIVING. Caught on the
+        # bench three times (2026-08-12, 2026-08-13, all at ~3 hours), each time
+        # needing a JTAG bitstream reload; a firmware reload does NOT clear it.
+        #
+        # The mechanism, proven from the counters rather than guessed:
+        #   * wr = frame_base, and frame_base advances ONLY on `samp_vld & first`.
+        #   * sample_overflow read 0 with 9.3 MB/s inbound, so the bridge FIFO
+        #     WAS being drained -> usb_readable/do_pop asserting -> samp_vld
+        #     asserting. (`do_pop` is unconditional -- see self.usb_pop below.)
+        #   * level stayed 0 indefinitely, so frame_base was frozen. With
+        #     samp_vld asserting, only `first` can be missing.
+        # and there was no way back: `started` is set ONLY by `first`, and
+        # do_write is gated on (started | first). Every upstream counter reads
+        # perfect while the ring builds silence forever.
+        #
+        # WHY avb-aes3 NEVER SAW THIS. That build framed 8 channels, so `first`
+        # recurs every 8 samples; this one is 48. And the wrapper derives the
+        # channel tag FROM the same marker (usb_avb_subsystem.py: cur_ch = 0 when
+        # cs.first else seq), so `chan_nr == 0` is NOT an independent witness --
+        # it cannot be used to cross-check. Worse, `seq` is Signal(range(48)),
+        # six bits, so with `first` lost it free-runs and wraps at 64, not 48:
+        # the channel tag becomes actively wrong rather than merely stale.
+        #
+        # So hold over instead of trusting it. Count samples since the last frame
+        # start; if BLOCK_CH of them pass without a marker, synthesise one. When
+        # the marker is arriving normally the counter is reset at BLOCK_CH-1 and
+        # NEVER reaches the threshold, so this is inert in the healthy case --
+        # bit-identical behaviour, no new writes, no new timing paths on the
+        # ring datapath.
+        frame_pos = Signal(max=BLOCK_CH + 1)        # samples since the frame start
+        holdover  = Signal()                        # marker lost -> tag untrusted
+        first     = Signal()                        # the marker the ring actually uses
+        self.comb += first.eq(first_i | (frame_pos >= BLOCK_CH))
+        self.sync += [
+            If(~en,
+                frame_pos.eq(0),
+                holdover.eq(0),
+            ).Elif(samp_vld,
+                If(first, frame_pos.eq(1)).Else(frame_pos.eq(frame_pos + 1)),
+                # Latch holdover when WE had to invent the marker; clear it the
+                # moment a real one returns, so a transient costs one frame.
+                If(first_i, holdover.eq(0)
+                ).Elif(frame_pos >= BLOCK_CH, holdover.eq(1)),
+            ),
+        ]
+
+        # ADDRESS FROM OUR OWN POSITION WHILE THE TAG IS UNTRUSTED. In holdover
+        # the wrapper's tag runs 0..63 against 48 real channels, so bundle would
+        # reach 6 and 7, which no ring answers -- a quarter of every frame
+        # silently discarded. frame_pos is the true arrival position and is
+        # identical to the tag whenever the marker is present (both reset to 0 on
+        # it and increment per sample), so switching only costs something in the
+        # case that is already broken.
+        chan_nr = Signal(first_bit)
+        pos_cur = Signal(first_bit)                 # position of THIS sample
+        # A frame start is position 0. frame_pos holds BLOCK_CH on that sample
+        # (it is the count that TRIGGERED the start), so it must not be used raw.
+        self.comb += pos_cur.eq(Mux(first, 0, frame_pos[0:first_bit]))
+        self.comb += chan_nr.eq(Mux(holdover, pos_cur, chan_i))
         bundle  = chan_nr[ch_bits:]                 # which ring   (channel_nr >> 3)
         within  = chan_nr[0:ch_bits]                # ch in bundle (channel_nr & 7)
+        # Instrument it: a marker that never returns must be visible without a
+        # bitstream reload, which is what cost three bench sessions.
+        self.dbg_holdover  = holdover
+        self.dbg_frame_pos = frame_pos      # exposed for sims/sim_frame_flywheel.py
+        self.dbg_chan_nr   = chan_nr
+        _hold_ev = Signal(32)
+        # ~first_i is load-bearing: frame_pos reaches BLOCK_CH at exactly the
+        # sample where the next real marker is due, so without it this counts a
+        # synthesised start on every healthy frame. Count only what we invented.
+        self.sync += If(samp_vld & ~first_i & (frame_pos >= BLOCK_CH),
+                        _hold_ev.eq(_hold_ev + 1))
+        self.holdover_count = CSRStatus(32,
+            description="Frames whose ch0 marker was synthesised (USB first lost).")
+        self.comb += self.holdover_count.status.eq(_hold_ev)
         samp32  = samp_lo_r                         # true 32-bit, no truncation
         en = self.enable.storage
         started   = Signal()                        # high once the first 48ch ch0 seen
@@ -454,6 +596,7 @@ class DantePacketizer(LiteXModule):
         # ring). within addresses the channel inside that frame -> a dropped sample is
         # one stale slot in one ring, never a rotation.
         frame_base = Signal(32)
+        self.dbg_frame_base = frame_base   # sims/sim_ring_wrap.py drives wr via this
         new_base   = Signal(32)
         self.comb += new_base.eq(frame_base + channels)
         base_now   = Signal(32)

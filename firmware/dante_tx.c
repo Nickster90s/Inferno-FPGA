@@ -328,8 +328,6 @@ static void ts_anchor(void)
 // fpp among bound flows, or 16/16 if none are bound.
 static void dante_tx_reseed_phases(uint32_t sub);
 
-static void dante_tx_fpp_range(uint16_t *lo, uint16_t *hi);
-
 void dante_tx_poll(void)
 {
     // A bind or unbind can change what the bound flows need, so the advertised
@@ -504,45 +502,110 @@ void dante_tx_poll(void)
     // a PTP step, or for phase accumulated while the talker was idle. Steady
     // state is held by the slow phase term in mcr_dante.c, which corrects
     // without stepping.
-    if (talker_on && want) {
-        ptp_timestamp_t t = gptp_read_time();
-        uint32_t esec, esub;
-        dante_tx_read_emitted(&esec, &esub);      // atomic: see the header
-        int64_t ptp_smp = (int64_t)t.seconds * 48000
-                        + (int64_t)((t.nanoseconds * 3u) / 62500u);
-        int64_t emit    = (int64_t)esec * 48000 + (int64_t)esub;
-        // THE EMITTED VALUE IS fpp-DEPENDENT. `emit` is the counter minus
-        // (fpp-1), because a packet is labelled with the START of the window it
-        // covers. Comparing it against a constant only worked while fpp was
-        // always 16: at fpp=60 the same healthy clock reads 44 samples further
-        // back, which tripped this guard continuously (anchors climbing, one
-        // re-anchor every couple of seconds) the moment DVS subscribed.
+    // RATE-LIMIT THIS BLOCK. It used to run at main-loop rate (~4 kHz) doing
+    // about ten CSR reads, which was free. It is not free any more:
+    // dante_tx_media_phase() BUSY-WAITS up to one sample period (20.8 us) for
+    // the media counter to tick, so running it every iteration stalls a 250 us
+    // main loop by ~10 us on average -- and this loop is what drains the two
+    // MAC RX slots.
+    //
+    // MEASURED CONSEQUENCE, 2026-08-14: PTP offset noise went from a -26 ns
+    // steady state to +-3.5 us rms 1340 ns, with 2% of Syncs losing their
+    // FollowUp, and the talker cycling on every unlock. None of that existed
+    // before this block started blocking. It was a self-inflicted regression
+    // introduced with the atomic-drift-sample work, and it took the per-Sync
+    // telemetry to see it.
+    //
+    // 10 Hz is ample for a coarse backstop: with bad_streak >= 2 a genuine
+    // phase error is caught in 200 ms, against a re-anchor threshold that takes
+    // minutes to reach. Cost falls from ~8% of the main loop to 0.02%.
+    static uint32_t last_reanchor_ms;
+    uint32_t now_ms = gptp_uptime_ms();
+    if (talker_on && want && (uint32_t)(now_ms - last_reanchor_ms) >= 100u) {
+        last_reanchor_ms = now_ms;
+        // MEASURE THE COUNTER, NOT THE LAST EMITTED TIMESTAMP.
         //
-        // Add the bias back so the comparison is against the media-clock
-        // COUNTER, which is what DANTE_TX_TS_OFFSET was calibrated against.
-        // Flows may differ in fpp and firmware cannot tell which one emitted
-        // last, so use the spread: correct by the smallest bound fpp and widen
-        // the band by the range. With every flow on the same fpp -- the normal
-        // case -- the band is unchanged.
-        uint16_t fmin, fmax;
-        dante_tx_fpp_range(&fmin, &fmax);
-        int64_t err = emit - ptp_smp - DANTE_TX_TS_OFFSET + (int64_t)(fmin - 1);
-        int32_t band = DANTE_TX_REANCHOR_SAMPLES + (int32_t)(fmax - fmin);
-        // CONFIRM BEFORE STEPPING. A re-anchor is audible, so one bad reading
-        // must never cause one. Require the error to persist across two polls;
-        // real phase error is monotonic and easily survives that, while a
-        // measurement artefact does not.
-        static uint8_t bad_streak;
-        if (err > band || err < -band)
-            bad_streak++;
-        else
-            bad_streak = 0;
-        if (bad_streak >= 2) {
-            bad_streak = 0;
-            printf("[dtx] media clock phase %ld samples (%ld ms) off "
-                   "-- re-anchoring\n",
-                   (long)err, (long)(err / 48));
-            ts_anchor();
+        // This guard used to read the emitted pair, which is the media counter
+        // minus (fpp-1) for whichever flow happened to emit last. Firmware
+        // cannot tell which flow that was, so the reading carried (fmax-fmin)
+        // of genuine ambiguity, and the band was widened by exactly that to
+        // stop it firing continuously when DVS (fpp=60) subscribed alongside an
+        // A16R (fpp=4).
+        //
+        // THAT WIDENING SILENTLY DISABLED THE BACKSTOP FOR EVERY LOW-LATENCY
+        // RECEIVER. Measured 2026-08-12 with an A16R (fpp=4), an AM2 (fpp=16)
+        // and DVS (fpp=60) all bound:
+        //
+        //     band = 8 + (60 - 4) = 64 samples = 1.33 ms
+        //
+        // which is 5.3x the A16R's ENTIRE 12-sample budget at 0.25 ms and 1.3x
+        // the AM2's at 1 ms. The drift walked to +17 samples over 55 minutes
+        // with nothing firing; both receivers' reported latency reached zero
+        // and stayed there, while the guard sat waiting for 64. Subscribing a
+        // DVS turned off the backstop for the other two, and nothing said so.
+        //
+        // dante_tx_media_phase() reads the LIVE counter, which has no fpp term
+        // in it at all, so the ambiguity that forced the widening is gone and
+        // the band can be a flat DANTE_TX_REANCHOR_SAMPLES again -- the value
+        // that was deliberately chosen (24 -> 8) to fit inside a 0.25 ms
+        // budget. What the band must be sized against is the TIGHTEST
+        // receiver's tolerance, never the spread of fpps that happen to be
+        // subscribed.
+        int32_t phase;
+        if (dante_tx_media_phase(&phase)) {
+            // The anchor puts the counter at PTP + ts_offset_samples, so that
+            // is where it should sit.
+            int32_t err  = phase - ts_offset_samples;
+            int32_t band = DANTE_TX_REANCHOR_SAMPLES;
+            // CONFIRM BEFORE STEPPING. A re-anchor is audible, so one bad
+            // reading must never cause one. Require the error to persist across
+            // two polls; real phase error is monotonic and easily survives
+            // that, while a measurement artefact does not.
+            static uint8_t bad_streak;
+            if (err > band || err < -band)
+                bad_streak++;
+            else
+                bad_streak = 0;
+            if (bad_streak >= 2) {
+                bad_streak = 0;
+                printf("[dtx] media clock phase %ld samples (%ld us) off "
+                       "-- re-anchoring\n",
+                       (long)err, (long)(err * 125 / 6));
+                ts_anchor();
+            }
+        }
+
+        // COARSE BACKSTOP, kept separately. dante_tx_media_phase() folds into
+        // +-24000 samples, so it cannot see an epoch-scale error -- and that is
+        // the error this guard was originally written for: 2026-08-04, emitted
+        // 402927.04519 against PTP 402926.41611, +10908 samples = +227 ms into
+        // the future, every packet discarded as far-future while the control
+        // plane stayed green and every counter read healthy. Keep a full-range
+        // check so a PTP step or a stranded anchor is still caught.
+        {
+            ptp_timestamp_t t = gptp_read_time();
+            uint32_t esec, esub;
+            dante_tx_read_emitted(&esec, &esub);      // atomic: see the header
+            int64_t ptp_smp = (int64_t)t.seconds * 48000
+                            + (int64_t)((t.nanoseconds * 3u) / 62500u);
+            int64_t emit    = (int64_t)esec * 48000 + (int64_t)esub;
+            int64_t err     = emit - ptp_smp;
+            // Half a second. Far beyond any fpp bias (59 samples at most) and
+            // any staleness the emitted register can carry while the talker is
+            // ON, so this cannot fire on the artefacts that plague the fine
+            // measurement -- it only sees errors the fine one cannot represent.
+            static uint8_t coarse_streak;
+            if (err > 24000 || err < -24000)
+                coarse_streak++;
+            else
+                coarse_streak = 0;
+            if (coarse_streak >= 2) {
+                coarse_streak = 0;
+                printf("[dtx] media clock %ld samples (%ld ms) off "
+                       "-- COARSE re-anchor\n",
+                       (long)err, (long)(err / 48));
+                ts_anchor();
+            }
         }
     }
 
@@ -753,17 +816,6 @@ static void dante_tx_reseed_phases(uint32_t sub)
     }
 }
 
-static void dante_tx_fpp_range(uint16_t *lo, uint16_t *hi)
-{
-    uint16_t fmin = 0, fmax = 0;
-    for (unsigned i = 0; i < N_FLOWS; i++) {
-        if (!flows[i].in_use || !flows[i].fpp) continue;
-        if (!fmin || flows[i].fpp < fmin) fmin = flows[i].fpp;
-        if (flows[i].fpp > fmax) fmax = flows[i].fpp;
-    }
-    if (!fmin) { fmin = 16; fmax = 16; }
-    *lo = fmin; *hi = fmax;
-}
 
 // 4-byte IP compare. Not memcmp(): this picolibc build does not link one, which
 // is why the surrounding code compares bytes by hand.
@@ -1236,6 +1288,105 @@ void dante_tx_read_emitted(uint32_t *sec, uint32_t *sub)
     }
     *sec = aaf_pkt_dbg_last_sec_read();
     *sub = aaf_pkt_dbg_last_ts_read();
+}
+
+// ---- The media clock's phase against PTP, measured so it cannot lie ---------
+//
+// This is the signal the phase trim in mcr_dante.c closes on, and getting the
+// MEASUREMENT wrong is what broke that loop on 2026-08-11: it was fed values
+// whole seconds out (-47959 = -48000 + 41, then -335977 = -7 x 48000 + 23),
+// drove its integral to the +2000 ppb rail inside a minute, and cost ten
+// re-anchors and an audio interruption. See DRIFT_HANDOFF.md.
+//
+// The measurement it replaces was
+//
+//     emit_sec*48000 + emit_sub  -  (ptp_sec*48000 + ptp_ns_in_samples)
+//
+// and DRIFT_HANDOFF.md blamed a one-second read straddle. That was only half
+// right, and the half it named was already fixed:
+//
+//   * The STRADDLE is real but handled. dbg_last_sec and dbg_last_ts are two
+//     CPU reads and the gateware re-latches the pair between them at the packet
+//     rate, so a read across the seconds boundary returns sec_old with sub_new.
+//     dante_tx_read_emitted() above seqlocks exactly that away, and
+//     gptp_read_time() is latched in gateware (avb_soc.py: reading seconds_hi
+//     snapshots seconds AND nanoseconds together). Both pairs were already
+//     atomic when the loop ran away.
+//
+//   * STALENESS is what actually broke it, and nothing guarded it.
+//     dbg_last_{sec,ts} hold the LAST EMITTED packet's timestamp, and the media
+//     counter behind them is gated on `en` (dante_packetizer.py:
+//     strobe = mcr.sample_strobe & en). Drop the talker -- a flow expiring,
+//     dante_tx_drop_all(), the re-anchor path -- and the register FREEZES while
+//     PTP keeps running, so the difference walks at exactly -48000 samples per
+//     second of silence. -335977 is seven seconds of that. A straddle can only
+//     ever be +-1 second, so the -7 s reading is proof on its own that
+//     staleness, not straddle, was the mechanism.
+//
+// This version removes both, by construction rather than by retry:
+//
+//   * NO SECONDS FIELD ON EITHER SIDE. The media side reads the LIVE subsecond
+//     counter (ts_now_sub, 0..47999); the PTP side uses only nanoseconds. A
+//     quantity with no seconds field cannot be a second out, whatever the two
+//     reads do relative to each other. The true phase is held far inside +-0.5 s
+//     by the re-anchor backstop (8 samples), and even a wholly undisciplined
+//     crystal at 5 ppm needs 28 hours to accumulate half a second, so folding
+//     into +-24000 discards nothing that was ever real.
+//
+//   * LIVENESS IS PROVEN, NOT ASSUMED. A frozen counter does not read as a slow
+//     ramp: against a running PTP it sweeps the whole +-24000 range once per
+//     second, so a magnitude guard alone still passes roughly a tenth of the
+//     samples -- with a random sign. Wait for the counter to actually tick and
+//     report NO sample rather than a plausible-looking one if it never does.
+//
+//   * The counter is read either side of the PTP read and a disagreement
+//     retries, so the residual error is under one sample.
+//
+// The cost is a spin of up to one sample period (20.8 us at 48 kHz, ~1040 sys
+// clocks at 50 MHz) once per caller. mcr_dante_poll() calls this at 1 Hz.
+#define MEDIA_SUBSEC        48000
+// Bound the liveness spin. Each CSR read is a handful of cycles through the
+// registered bridge, so one sample period is on the order of a hundred reads;
+// 2000 is ~20x that and still well under a millisecond, which is what a main
+// loop running at ~4 kHz can absorb once a second. Exceeding it means the media
+// strobe has stopped, which is a fault to report, not to block on.
+#define MEDIA_TICK_SPIN_MAX 2000u
+
+int dante_tx_media_phase(int32_t *out_samples)
+{
+    // The counter only advances while the packetizer is enabled. With the
+    // talker off there is no media clock phase to measure -- not a small error,
+    // no quantity at all -- and this is the case the old code silently reported
+    // a number for.
+    if (!talker_on)
+        return 0;
+
+    uint32_t s = aaf_pkt_ts_now_sub_read();
+    unsigned spin = 0;
+    while (aaf_pkt_ts_now_sub_read() == s) {
+        if (++spin > MEDIA_TICK_SPIN_MAX)
+            return 0;              // media strobe stopped: no sample
+    }
+
+    for (unsigned tries = 0; tries < 4; tries++) {
+        uint32_t a = aaf_pkt_ts_now_sub_read();
+        ptp_timestamp_t t = gptp_read_time();
+        uint32_t b = aaf_pkt_ts_now_sub_read();
+        if (a != b)
+            continue;              // a media tick landed inside the window
+        // Neither of these can happen with healthy hardware. Report no sample
+        // rather than fold an out-of-range value into a plausible one.
+        if (a >= MEDIA_SUBSEC || t.nanoseconds >= 1000000000u)
+            return 0;
+
+        int32_t ptp_sub = (int32_t)((t.nanoseconds * 3u) / 62500u);
+        int32_t d = (int32_t)a - ptp_sub;
+        if (d >= MEDIA_SUBSEC / 2)       d -= MEDIA_SUBSEC;
+        else if (d < -(MEDIA_SUBSEC / 2)) d += MEDIA_SUBSEC;
+        *out_samples = d;
+        return 1;
+    }
+    return 0;
 }
 
 int dante_tx_flow_detail(unsigned f, dante_tx_flow_detail_t *out)

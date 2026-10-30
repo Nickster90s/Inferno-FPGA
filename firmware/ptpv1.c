@@ -736,6 +736,18 @@ static void ptpv1_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         t2 = gptp_read_rx_timestamp();
         have_t2 = 1;
 
+        // A NEW SYNC WHILE THE PREVIOUS ONE IS STILL UNANSWERED means that
+        // FollowUp never arrived. This used to overwrite the pending state in
+        // silence, discarding the single event that explains the offset
+        // excursion that follows it. Record it BEFORE clobbering pending_sync_seq.
+        if (awaiting_followup) {
+            g_ptpv1.lost_followup++;
+            telem_push(TELEM_T_PTP,
+                       TELEM_F_NO_FOLLOWUP | (g_ptpv1.locked ? TELEM_F_LOCKED : 0),
+                       pending_sync_seq, (int32_t)seq,
+                       (int32_t)g_ptpv1.lost_followup, 0, 0);
+        }
+
         if (flags & FLAG_PTP_ASSIST) {
             // Two-step: the precise origin time comes in a FollowUp.
             pending_sync_seq  = seq;
@@ -754,10 +766,28 @@ static void ptpv1_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     case CTRL_FOLLOWUP: {
         if (blen < FOLLOWUP_BODY_LEN) return;
         g_ptpv1.rx_followup++;
-        if (!awaiting_followup) return;
+        if (!awaiting_followup) {
+            // A FollowUp with no Sync held: the SYNC was lost, not the FollowUp.
+            // Distinguishable from the mispair below by v0 = -1.
+            g_ptpv1.orphan_followup++;
+            telem_push(TELEM_T_PTP,
+                       TELEM_F_MISPAIRED | (g_ptpv1.locked ? TELEM_F_LOCKED : 0),
+                       rd16(body + 2), -1,
+                       (int32_t)g_ptpv1.orphan_followup, 0, 0);
+            return;
+        }
         // associated_sequence_id at body[2..4] must match the Sync we are
         // holding a t2 for; otherwise we would pair mismatched timestamps.
-        if (rd16(body + 2) != pending_sync_seq) return;
+        // REJECTING THIS IS CORRECT AND ALWAYS WAS -- but doing it silently is
+        // why the +-3.5 us excursions had no visible cause for a whole day.
+        if (rd16(body + 2) != pending_sync_seq) {
+            g_ptpv1.mispair++;
+            telem_push(TELEM_T_PTP,
+                       TELEM_F_MISPAIRED | (g_ptpv1.locked ? TELEM_F_LOCKED : 0),
+                       pending_sync_seq, (int32_t)rd16(body + 2),
+                       (int32_t)g_ptpv1.mispair, 0, 0);
+            return;
+        }
         t1.seconds     = rd32(body + 4);
         t1.nanoseconds = rd32(body + 8);
         have_t1 = 1;

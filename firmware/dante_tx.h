@@ -193,6 +193,24 @@ void dante_tx_flow_mac(unsigned f, uint8_t mac[6]);
 // holds drift to ~1.9 ms/hour, so a 1000 ms jump is never real.
 void dante_tx_read_emitted(uint32_t *sec, uint32_t *sub);
 
+// The media clock's phase against PTP, in samples, measured so it cannot carry
+// a whole-second error. Returns 1 and writes *out on success, 0 if no
+// trustworthy sample exists (the media counter is gated off or has stopped).
+//
+// Positive means the media clock is AHEAD of PTP, i.e. our timestamps run early
+// and a receiver's measured latency falls.
+//
+// THIS IS THE MEASUREMENT, NOT THE EMITTED TIMESTAMP. It reports the media
+// clock COUNTER, which every flow's emitted timestamp is a fixed (fpp-1)
+// behind. That is deliberate: the counter is fpp-independent, so a receiver
+// rebinding at a different fpp does not step the number, whereas emitted-minus-
+// PTP steps by up to 59 samples when DVS (fpp=60) subscribes alongside an A16R
+// (fpp=4). A control loop closing on the latter would chase that step.
+//
+// Range is +-24000 samples (+-0.5 s) by construction; see the comment on the
+// implementation for why nothing real is lost by folding there.
+int dante_tx_media_phase(int32_t *out_samples);
+
 // Full per-flow detail for the UDP readout: what we ACTUALLY bound, so the
 // binding can be compared against what the receiver asked for without needing
 // the console. Returns 0 if the slot is unused.

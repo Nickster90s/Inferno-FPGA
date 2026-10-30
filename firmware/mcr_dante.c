@@ -133,7 +133,54 @@
 // constant says +74 while the wire measures ~-37 because of emit-path latency
 // nobody budgeted. The loop closes on the MEASURED position, so it does not
 // matter what the open-loop constant claims.
-#define PHASE_TARGET_SAMPLES     (-24)   // inferno CLOCK_OFFSET_NS = -500 us
+// -24 WAS TWICE A 0.25 ms RECEIVER'S ENTIRE BUDGET, and it was never caught
+// because the phase term has never run against a real receiver.
+//
+// What a receiver measures is (measured latency = const - drift), verified on
+// the bench 2026-08-12 across three devices at once:
+//
+//   A16R fpp=4    reads  3 samples at drift +3   -> const  6
+//   AM2  fpp=16   reads 16 samples at drift +3   -> const 19
+//   DVS  fpp=60   reads 81 at drift +3, 65 at +17 -> const ~83, tracking 1:1
+//
+// (const = (fpp-1) + path delay, which is why it differs per receiver.) Driving
+// drift to -24 therefore ADDS 24 samples to every receiver's measured latency.
+// For the A16R that is 6 + 24 = 30 samples = 0.63 ms against a 12-sample,
+// 0.25 ms budget: the loop would have taken it from "too early" straight past
+// "too late" into discarding audio.
+//
+// -24 came from inferno's flows_tx.rs CLOCK_OFFSET_NS = -500 us. That is a
+// sane figure for a device at 1 ms or more, and it is 2x the whole budget at
+// 0.25 ms. THIS IS THE SAME MISTAKE, WITH THE SAME NUMBER, that was already
+// found and fixed in DANTE_TX_REANCHOR_SAMPLES (24 -> 8, "24 samples is 0.5 ms
+// -- double a 0.25 ms receiver's entire budget"). It survived here because
+// nothing had ever exercised it.
+//
+// -4, not 0, because THE LOOP DOES NOT PARK ON ITS TARGET. The NCO renders
+// whole 242 ppb LSBs and the integral freezes whenever err reads 0, so with
+// Kp=30 the steady state sits 2..5 samples ABOVE target -- the quantisation
+// floor of (LSB/2)/Kp already described at the gain constants. At target 0 that
+// leaves the A16R at 1..4 samples of measured latency out of 12: back against
+// the zero rail this whole exercise is about getting away from.
+//
+// Offsetting the target by the loop's own bias puts the settled band at
+// -2..+1, i.e. A16R 5..8 of 12 -- dead centre, and as far from "grey at zero"
+// as from "red at the top". sims/sim_mclk_phase_trim.py check 1 asserts this in
+// RECEIVER terms rather than as a distance from target, because a distance from
+// target is not what breaks audio.
+//
+// THE TARGET MUST BE JUDGED AGAINST THE TIGHTEST SUBSCRIBED RECEIVER, never
+// against a constant borrowed from another implementation whose minimum latency
+// is four times ours. If a receiver tighter than 0.25 ms ever binds, this and
+// DANTE_TX_REANCHOR_SAMPLES both have to be revisited together.
+// UPDATED TO -1 once nco_render() started dithering the increment. The -4 above
+// compensated for the loop parking 2..5 samples above target, and that offset
+// was the 242 ppb ACTUATOR QUANTISATION -- (LSB/2)/Kp. The dither removes the
+// quantisation, so it removes the offset that -4 existed to cancel: at -4 the
+// loop now parks at exactly -4 and leaves the A16R at 10 of 12, near the top of
+// its budget. -1 parks drift at 0, i.e. A16R at 6 of 12, dead centre, with zero
+// steady-state swing. sims/sim_mclk_phase_trim.py, check 1.
+#define PHASE_TARGET_SAMPLES     (-1)
 // Hard clamp on the loop's contribution. MUST SPAN SEVERAL NCO LSBs.
 //
 // One increment LSB is 1/4123169 = 242 ppb. The first version clamped at 300 --
@@ -205,6 +252,9 @@ static uint32_t trips;
 static uint32_t last_underrun;
 static uint32_t underrun_per_s;
 static int32_t  drift_samples;
+static uint8_t  drift_valid;      // 0 = the last poll had no trustworthy sample
+static uint32_t drift_rejects;    // polls that produced no sample at all
+static uint32_t phase_rejects;    // samples the magnitude guard threw out
 static uint32_t trip_streak;
 static int32_t  phase_ppb;
 static uint8_t  warm_started;
@@ -223,12 +273,87 @@ static uint32_t lvl_sum, lvl_n;
 static uint16_t lvl_min_cur = 0xffff, lvl_max_cur;
 static uint16_t lvl_min, lvl_max, lvl_avg;
 
+// ---- The NCO increment, and why it drifted -------------------------------
+//
+// THE +0.13 ppm RESIDUAL WAS THIS ARITHMETIC, not the servo. Measured
+// 2026-08-12 at 0.13 ppm; predicted from the constants at 0.133 ppm.
+//
+// The increment is a 32-bit integer of about 4.12e6, so ONE LSB IS 242 ppb.
+// Two roundings live inside it, both in the same direction:
+//
+//   base_inc     (fs << 32) / sys_clk = 4123168.604, ROUNDED UP to 4123169
+//                                                          -> +96 ppb, forever
+//   inc_for_ppb  truncates the ppb correction toward zero   -> +37 ppb
+//                                                          --------------
+//                                                              +133 ppb
+//
+// AND THE PTP SERVO CANNOT SEE ANY OF IT. g_ptpv1.rate_ppb measures this
+// board's CRYSTAL against the Leader; it knows nothing about how coarsely we
+// then render that estimate into an integer. So the rate loop reports itself
+// converged, with 0 trips and a healthy ring, while the media clock runs
+// 0.13 ppm fast and every receiver's measured latency walks down.
+//
+// HOW THE AVB mcr AVOIDS IT (firmware/mcr.c:219, the cs=0 pure-gPTP path):
+//
+//     d    = g->current_addend_full - g->base_addend_full;
+//     corr = (base_increment * d) / g->base_addend_full;
+//
+// It takes the ratio from the 52-bit gPTP ADDEND (32-bit integer + 20-bit
+// fraction) and recomputes it in mcr_watchdog_tick() at main-loop rate, ~4 kHz,
+// behind a 2-unit deadband. The addend moves continuously, so the computed
+// increment DITHERS ACROSS THE GRID POINT and the quantisation averages to
+// zero. mcr_dante gave that up when it went to one slew-limited write per
+// second: a single integer, written once, parked 0.55 LSB off for good.
+//
+// So do the averaging deliberately instead of hoping a servo supplies it.
+// Carry the increment in 16.16 fixed point and first-order sigma-delta the
+// fractional part: emit N or N+1 at a duty cycle equal to the fraction, so the
+// MEAN increment is exact even though every written value is an integer.
+//
+// WHY THIS IS SAFE, when the gateware fractional NCO was not. Attempt 2 put the
+// fraction in hardware and dithered STROBE TIMING at 50 MHz; the USB feedback
+// servo measures strobes-per-SOF, so it saw the jitter and the ring starved
+// (level 36, ~9700 underrun/s). Dithering here is a 1 Hz alternation between
+// two adjacent rates 242 ppb apart. The phase excursion that can build inside
+// one second is 242e-9 * 48000 = 0.012 SAMPLES against a 2048-sample ring, and
+// the startup slew already moves the rate 100 ppb every second with zero
+// underruns. The block comment at PHASE_MAX_PPB reached this same conclusion
+// and called it out as the right way to do it.
+//
+// Cost: the NCO is now written about once a second instead of ~17 times total.
+// Three orders of magnitude below the thousands-per-second path this module
+// replaced, and it is the writes that make the average exact.
+#define NCO_FRAC_BITS  16
+#define NCO_FRAC_ONE   (1u << NCO_FRAC_BITS)
+
+static int64_t  base_inc_q;        // exact (fs << 32) / sys_clk, 16.16, UNROUNDED
+static uint32_t nco_dither_acc;    // sigma-delta accumulator, 0 .. NCO_FRAC_ONE-1
+
+static int64_t inc_q_for_ppb(int32_t ppb)
+{
+    return base_inc_q + (base_inc_q * ppb) / 1000000000LL;
+}
+
+// Render a 16.16 increment to the integer the CSR takes, spreading the fraction
+// over successive calls. MUST be called exactly once per applied update, or the
+// accumulator advances out of step with what the NCO is actually running.
+static uint32_t nco_render(int64_t inc_q)
+{
+    int64_t whole = inc_q >> NCO_FRAC_BITS;
+    uint32_t frac = (uint32_t)(inc_q & (NCO_FRAC_ONE - 1));
+    nco_dither_acc += frac;
+    if (nco_dither_acc >= NCO_FRAC_ONE) {
+        nco_dither_acc -= NCO_FRAC_ONE;
+        whole++;
+    }
+    if (whole < 1) whole = 1;
+    if (whole > 0xFFFFFFFFLL) whole = 0xFFFFFFFFLL;
+    return (uint32_t)whole;
+}
+
 static uint32_t inc_for_ppb(int32_t ppb)
 {
-    int64_t inc = (int64_t)base_inc + ((int64_t)base_inc * ppb) / 1000000000LL;
-    if (inc < 1) inc = 1;
-    if (inc > 0xFFFFFFFFLL) inc = 0xFFFFFFFFLL;
-    return (uint32_t)inc;
+    return nco_render(inc_q_for_ppb(ppb));
 }
 
 void mcr_dante_init(uint32_t sys_clk_freq, uint32_t fs)
@@ -237,8 +362,17 @@ void mcr_dante_init(uint32_t sys_clk_freq, uint32_t fs)
     // reaching into mcr_state_t: this module owns the NCO now, and sharing
     // state with the thing it replaces is how multi-writer bugs come back.
     uint64_t inc = ((uint64_t)fs << 32) / sys_clk_freq;
-    if ((((uint64_t)fs << 32) % sys_clk_freq) > (sys_clk_freq / 2))
+    uint64_t rem = ((uint64_t)fs << 32) % sys_clk_freq;
+    // KEEP THE REMAINDER. Rounding it away is +96 ppb of permanent rate error
+    // that nothing downstream can observe or correct -- see the block comment at
+    // inc_for_ppb(). Split rather than shifting the whole numerator by 48 bits,
+    // which would come within 1.4x of overflowing uint64 at these constants.
+    base_inc_q = ((int64_t)inc << NCO_FRAC_BITS)
+               + (int64_t)((rem << NCO_FRAC_BITS) / sys_clk_freq);
+    if (rem > (sys_clk_freq / 2))
         inc++;
+    // base_inc stays ROUNDED: it is the "return to nominal" escape hatch and the
+    // status readout, both of which want one stable integer, not a dithered one.
     base_inc        = (uint32_t)inc;
     applied_ppb     = 0;
     applied_inc     = base_inc;
@@ -345,17 +479,32 @@ void mcr_dante_poll(void)
     last_underrun = u;
     underrun_per_s = elapsed ? (uint32_t)(((uint64_t)du * 1000u) / elapsed) : 0;
 
-    // ---- Drift, for the dry-run cross-check ----
+    // ---- Drift, for the dry-run cross-check AND the phase loop ----
+    //
     // Works with no USB attached: the packetizer keeps emitting (silence) at
-    // the media rate, so the emitted timestamp still tracks the NCO.
+    // the media rate, so the media clock still tracks the NCO. It does NOT work
+    // with the talker off, and that distinction is the whole point of
+    // dante_tx_media_phase() returning a validity flag rather than a number --
+    // read its comment before touching this. The previous version computed
+    // (emitted timestamp - PTP) from a register that freezes when the talker
+    // stops, so a talker-off stretch was reported as a drift walking at
+    // -48000 samples/s, which is what railed the phase integral on 2026-08-11.
+    //
+    // NOTE THE CHANGE OF REFERENCE: this is now the media clock COUNTER against
+    // PTP, not the emitted timestamp. They differ by a constant (fpp-1) --
+    // 3 samples at the A16R's fpp=4, 59 at DVS's fpp=60 -- so absolute readings
+    // shift slightly against anything recorded before this commit. The rate
+    // (`mclk.py watch`) is unaffected, and the counter is the right control
+    // variable: it does not step when a receiver rebinds at a different fpp.
     {
-        ptp_timestamp_t t = gptp_read_time();
-        int64_t ptp_smp = (int64_t)t.seconds * 48000
-                        + (int64_t)((t.nanoseconds * 3u) / 62500u);
-        uint32_t esec, esub;
-        dante_tx_read_emitted(&esec, &esub);   // atomic pair; see dante_tx.h
-        int64_t emit    = (int64_t)esec * 48000 + (int64_t)esub;
-        drift_samples = (int32_t)(emit - ptp_smp);
+        int32_t d;
+        if (dante_tx_media_phase(&d)) {
+            drift_samples = d;
+            drift_valid   = 1;
+        } else {
+            drift_valid = 0;
+            drift_rejects++;
+        }
     }
 
     // ---- Auto-disable ----
@@ -423,7 +572,7 @@ void mcr_dante_poll(void)
         setpoint_arm_ms = now + PHASE_SETPOINT_SETTLE_MS;
         phase_integ     = 0;
     }
-    if (!setpoint_valid && dante_tx_enabled() && g_ptpv1.locked &&
+    if (!setpoint_valid && dante_tx_enabled() && g_ptpv1.locked && drift_valid &&
         (int32_t)(now - setpoint_arm_ms) >= 0) {
         phase_setpoint = PHASE_TARGET_SAMPLES;
         setpoint_valid = 1;
@@ -434,33 +583,59 @@ void mcr_dante_poll(void)
 
     if (!phase_enabled || !setpoint_valid || !g_ptpv1.locked) {
         phase_ppb = 0;
+    } else if (!drift_valid) {
+        // NO SAMPLE THIS POLL. Hold the whole term where it is -- do not wind
+        // the integral on a stale value, and do not zero the output either.
+        // Zeroing would step the applied rate by however much the integral had
+        // accumulated, and a rate step underneath the USB feedback servo is the
+        // failure mode this module exists to avoid (see mcr_dante.h).
+        //
+        // Holding is safe for as long as this lasts, because the only way to
+        // lose the sample is the talker being off or the media strobe being
+        // stopped -- in both cases nothing is being emitted, so the phase we
+        // are holding a correction for is not reaching any receiver. When the
+        // talker comes back it anchors, anchors != seen_anchors fires above,
+        // and the setpoint and integral are reset from scratch.
+        goto phase_done;
     } else {
         // err > 0 means we are AHEAD of where we should be, so slow down.
         int32_t err = drift_samples - phase_setpoint;
 
-        // REJECT THE SECOND-BOUNDARY OUTLIER. drift_samples is computed from
-        // TWO reads taken at different instants -- gptp_read_time() and
-        // dante_tx_read_emitted() -- so when they straddle a one-second
-        // boundary the difference jumps by a whole second, 48000 samples.
+        // MAGNITUDE GUARD, kept as a second net.
         //
-        // Harmless for the dry-run cross-check, which differentiates over a
-        // long window. FATAL in a 1 Hz control loop: measured 2026-08-11,
-        // enabling the phase term drove the integral to the +2000 ppb rail
-        // within a minute and drift read -47959 (= -48000 + 41) and then
-        // -335977. Ten re-anchors and an audio interruption before it was
-        // turned back off.
-        //
-        // sims/sim_mclk_phase_trim.py did NOT catch this: it models drift as a
-        // clean float. The gains it chose may well be right -- they were never
-        // what failed -- but the signal has to be trustworthy before the loop
-        // can use it.
+        // This was the emergency stop after the 2026-08-11 runaway, when
+        // drift_samples could be whole seconds out (-47959, then -335977).
+        // dante_tx_media_phase() now makes a whole-second error structurally
+        // impossible -- it never reads a seconds field on either side, and it
+        // refuses to report at all when the media counter is not ticking -- so
+        // this should no longer have anything to reject. It stays because it
+        // costs one comparison and because the thing it protects against was
+        // expensive: an integral railed at 2000 ppb, ten re-anchors, and audio
+        // interrupted. If it ever fires now, the measurement is wrong again and
+        // the phase term must NOT be trusted until that is understood.
         //
         // 2400 samples is 50 ms, far beyond anything the re-anchor backstop
         // (8 samples) would ever allow to accumulate, so a reading past it is
         // a sampling artefact and not a real phase error. Skip the update
         // entirely rather than clamping: a clamped outlier still winds the
         // integral in the wrong direction.
+        //
+        // NOTE THIS ZEROES WHERE THE no-sample PATH ABOVE HOLDS, and the
+        // difference is deliberate. "No sample" means the talker is off and
+        // nothing is being emitted, so the correction is not reaching anyone
+        // and holding it costs nothing. Getting here instead means a sample
+        // ARRIVED AND WAS NONSENSE -- the measurement is suspect, so fail back
+        // toward rate-only, which is the known-good configuration. If it keeps
+        // firing the term slews out over 20 s and the clock is left exactly as
+        // it behaves with the phase term switched off. The integral is left
+        // standing so a single bad reading costs one poll, not the acquisition.
+        //
+        // sims/sim_mclk_phase_trim.py check 6 models this: the guard alone is
+        // NOT sufficient (it passes a stale reading for the first 50 ms of a
+        // freeze, 6 landings in 100, worth 687 ppb of invented correction),
+        // which is why dante_tx_media_phase() exists rather than a bigger guard.
         if (err > 2400 || err < -2400) {
+            phase_rejects++;
             phase_ppb = 0;
             goto phase_done;
         }
@@ -577,4 +752,7 @@ void mcr_dante_get_status(mcr_dante_status_t *out)
     out->lvl_avg        = lvl_avg;
     out->underrun_per_s = underrun_per_s;
     out->drift_samples  = drift_samples;
+    out->drift_valid    = drift_valid;
+    out->drift_rejects  = drift_rejects;
+    out->phase_rejects  = phase_rejects;
 }

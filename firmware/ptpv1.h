@@ -31,6 +31,13 @@ typedef struct {
     int64_t  mean_path_delay_ns;
 
     uint32_t rx_sync, rx_followup, rx_delay_resp, rx_other;
+    // PAIRING ANOMALIES. Every one of these used to be discarded in silence,
+    // and they are the documented source of the +-us offset excursions:
+    // TELEMETRY_AND_PTP.md -- "a lost FollowUp or DelayResp mispairs with the
+    // wrong Sync and injects microseconds".
+    uint32_t lost_followup;     // Sync superseded before its FollowUp arrived
+    uint32_t orphan_followup;   // FollowUp with no Sync held -> the Sync was lost
+    uint32_t mispair;           // FollowUp whose assoc seq != the Sync we hold
     uint32_t tx_delay_req;
     uint32_t servo_updates;
 

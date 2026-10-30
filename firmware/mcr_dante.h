@@ -74,7 +74,12 @@ typedef struct {
     uint16_t lvl_max;
     uint16_t lvl_avg;
     uint32_t underrun_per_s;    // media ticks spent un-primed, per second
-    int32_t  drift_samples;     // emitted media timestamp - PTP, in samples
+    // MEDIA CLOCK COUNTER minus PTP, in samples -- not the emitted timestamp,
+    // which sits a further (fpp-1) behind. See dante_tx_media_phase().
+    int32_t  drift_samples;
+    uint8_t  drift_valid;       // 0 = drift_samples is the last GOOD value, stale
+    uint32_t drift_rejects;     // polls that could not measure at all
+    uint32_t phase_rejects;     // measurements the magnitude guard threw out
 } mcr_dante_status_t;
 
 void mcr_dante_get_status(mcr_dante_status_t *out);
