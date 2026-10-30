@@ -82,21 +82,23 @@ from usb_avb_subsystem import USBAVBSubsystem
 sub = USBAVBSubsystem(standalone=True,
                       product_name={product_name!r},
                       serial={serial!r},
-                      product_id={product_id!r})
+                      product_id={product_id!r},
+                      dual_rate={dual_rate!r})
 with open({out!r}, "w") as f:
     f.write(verilog.convert(sub, name={module!r}, ports=sub.ports()))
 print("wrote", {out!r}, "module", {module!r})
 '''
 
 
-def emit(which):
+def emit(which, dual_rate=False):
     v = VARIANTS[which]
     out = os.path.join(RTL, v["out"])
-    code = EMIT.format(gen_dir=GEN_DIR, out=out, **
+    code = EMIT.format(gen_dir=GEN_DIR, out=out, dual_rate=dual_rate, **
                        {k: v[k] for k in ("product_name", "serial",
                                           "product_id", "module")})
-    print("=== %s -> %s  (%s, PID %#06x, serial %s)"
-          % (which, v["out"], v["product_name"], v["product_id"], v["serial"]))
+    print("=== %s -> %s  (%s, PID %#06x, serial %s%s)"
+          % (which, v["out"], v["product_name"], v["product_id"], v["serial"],
+             ", DUAL-RATE 48/96k" if dual_rate else ", 48k"))
     py = VENV_PY if os.path.exists(VENV_PY) else sys.executable
     r = subprocess.run([py, "-c", code], cwd=GEN_DIR)
     return r.returncode
@@ -106,6 +108,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--main", action="store_true")
     ap.add_argument("--backup", action="store_true")
+    ap.add_argument("--dual-rate", action="store_true",
+                    help="dimensioneer het ISO-endpoint op 96 kHz en leg "
+                         "rate_48k_i naar buiten, zodat een firmware-CSR de "
+                         "door Dante gekozen rate kan melden. LET OP: dit "
+                         "reserveert 2880 B/uframe = 23 MB/s per PHY ook op "
+                         "48 kHz, dus twee PHYs op EEN host controller passen "
+                         "dan niet meer (in productie zit elke PHY aan zijn "
+                         "eigen host).")
     a = ap.parse_args()
     if not os.path.exists(GEN):
         sys.exit("generator not found: %s" % GEN)
@@ -116,7 +126,7 @@ def main():
         or ["main", "backup"]
     rc = 0
     for w in which:
-        rc |= emit(w)
+        rc |= emit(w, a.dual_rate)
     if rc == 0:
         print("\nNow rebuild, THEN re-sweep both taps -- placement changed, so")
         print("the pinned IDELAY taps in avb_soc.py are no longer measured.")

@@ -27,6 +27,8 @@
 #include "gptp.h"
 #include "ptpv1.h"
 #include "net.h"
+#include "config.h"   // g_fs, cfg_save(): de rate wordt hier gezet
+#include <generated/csr.h>   // ts_subsec_max / usb_rate_48k bij een rate-wijziging
 #include <string.h>
 #include <stdio.h>
 
@@ -290,7 +292,7 @@ static void send_heartbeat(void)
     put_u16(p, n, 0);       n += 2;
     put_u16(p, n, 0x0018);  n += 2;
     put_u16(p, n, 0);       n += 2;
-    put_u32(p, n, 48000);   n += 4;                  // sample rate
+    put_u32(p, n, g_fs);    n += 4;                  // sample rate
     // Zero because we RECEIVE nothing. This record is the per-flow measured
     // RX latency and a transmit-only device has none.
     //
@@ -352,10 +354,19 @@ static void send_device_info(const uint8_t *dst_ip, uint16_t dst_port)
     //   [0x14] 0x04 supports AES67, 0x08 lockable  -> neither
     //   [0x16] 0x10 has manufacturer name, 0x40 network configurable
     //   [0x17] identify / rate config / reboot / factory reset
+    //
+    // 0x17 = 0xdb is de waarde van een RedNet AM2, van de bench gelezen (zie
+    // Inferno-ESP32-P4 aoip_info.c, waar 0 de controller liet zeggen "This
+    // device does not support sample rate configuration"). WELKE BIT WAT DOET
+    // IS NIET GEISOLEERD, dus dit adverteert mogelijk ook identify / reboot /
+    // factory reset. Dat is bewust: een echt device nabootsen is hier de
+    // projectregel, tegenover een bit verzinnen die plausibel lijkt. Stuurt DC
+    // zo'n commando, dan komt het in de unhandled-query log van info_rx() --
+    // daar zie je het, in plaats van dat het stil verdwijnt.
     c[0x14] = 0;
     c[0x15] = 0;
     c[0x16] = 0x10;
-    c[0x17] = 0;
+    c[0x17] = 0xdb;
     c[0xbb] = 0x1f;
 
     // Board name at 12 (8 bytes) and again at 0x38 (16 bytes).
@@ -621,30 +632,66 @@ static void send_clock_stats(const uint8_t *dst_ip, uint16_t dst_port,
 //
 // 0x0080 is the supported-sample-rate table -- the tail is a list of rates
 // (0xac44 = 44100, 0xbb80 = 48000, 0x15888 = 88200, 0x17700 = 96000, and the
-// A16R adds 176400/192000). Ours declares ONE rate, 48000, because that is
-// what this design does. Copying DVS's six-rate table verbatim would have been
-// easier and would have advertised rates we cannot produce.
+// A16R adds 176400/192000). We declare 48000 and 96000: both are really
+// produced (de USB-descriptors zijn op 96k gedimensioneerd, de NCO en de
+// timestamp-rekenkunde volgen g_fs). Nog steeds NIET DVS's zes rates
+// overnemen -- adverteer niets wat dit ontwerp niet kan leveren.
+//
+// DE HEADER-LAYOUT IS GECORRIGEERD. Hij stond zo:
+//     0x0018, count, current, 0, 0, 0, rates...
+// met het commentaar "DVS has 0 here, the A16R 2". Een AM2 -- en de
+// implementatie die het rate-menu in DC daadwerkelijk krijgt -- stuurt:
+//     0x0018, count, current, CURRENT (nogmaals), 2, 0, rates...
+// Offset 8 droeg dus een 0 waar de rate hoort en offset 12 een 0 waar een 2
+// hoort. Ons eigen 0x0082 zet daar al wel een 2, dus de inconsistentie zat
+// binnen dit bestand.
 // ---------------------------------------------------------------------------
+
+// De rates die dit ontwerp echt kan. Volgorde zoals een AM2: oplopend.
+static const uint32_t RATES[] = { 48000, 96000 };
+
+// req != NULL -> antwoord op een concreet verzoek: echo zijn opcode en seqnum,
+// met byte 3 op 0x80 geforceerd (de SET komt binnen als 0x81 maar het antwoord
+// is altijd de 0x80-tabel).
+static void send_rate_table(const uint8_t *dst_ip, uint16_t dst_port,
+                            const uint8_t *req, uint32_t hz)
+{
+    static const uint8_t op_default[8] = {0x07, 0x2a, 0x00, 0x80, 0, 0, 0, 0};
+    uint8_t op[8];
+    uint16_t seq = seqnum;
+    memcpy(op, op_default, 8);
+    if (req) {
+        memcpy(op, req + 24, 8);
+        op[3] = 0x80;
+        seq = (uint16_t)((req[4] << 8) | req[5]);
+    }
+    uint8_t *p = net_udp_payload_buf();
+    uint32_t n = put_hdr_seq(p, 0xFFFF, op, seq);
+    uint8_t *c = p + n;
+    const uint16_t nr = (uint16_t)(sizeof(RATES) / sizeof(RATES[0]));
+    put_u16(c,  0, 0x0018);
+    put_u16(c,  2, nr);
+    put_u32(c,  4, hz);
+    put_u32(c,  8, hz);
+    put_u16(c, 12, 2);
+    put_u16(c, 14, 0);
+    for (uint16_t i = 0; i < nr; i++) put_u32(c, 16 + 4 * i, RATES[i]);
+    n += 16 + 4 * nr;
+    put_u16(p, 2, (uint16_t)n);
+    net_udp_commit(dst_ip, dst_port, DANTE_PORT_INFO_REQ, n, NET_TOS_BEST_EFFORT);
+    seqnum++;
+}
+
+static int rate_supported(uint32_t hz)
+{
+    for (unsigned i = 0; i < sizeof(RATES) / sizeof(RATES[0]); i++)
+        if (RATES[i] == hz) return 1;
+    return 0;
+}
 
 static void send_caps(const uint8_t *dst_ip, uint16_t dst_port)
 {
-    // 0x0080: item size, count, current rate, then one u32 per supported rate.
-    {
-        static const uint8_t op[8] = {0x07, 0x2a, 0x00, 0x80, 0, 0, 0, 0};
-        uint8_t *p = net_udp_payload_buf();
-        uint32_t n = put_hdr(p, 0xFFFF, op);
-        uint8_t *c = p + n; uint32_t o = 0;
-        put_u16(c, o, 0x0018); o += 2;
-        put_u16(c, o, 1);      o += 2;        // one supported rate
-        put_u32(c, o, 48000);  o += 4;        // current
-        put_u32(c, o, 0);      o += 4;
-        put_u16(c, o, 0);      o += 2;        // DVS has 0 here, the A16R 2
-        put_u16(c, o, 0);      o += 2;
-        put_u32(c, o, 48000);  o += 4;        // the one rate we support
-        n += o; put_u16(p, 2, (uint16_t)n);
-        net_udp_commit(dst_ip, dst_port, DANTE_PORT_INFO_REQ, n, NET_TOS_BEST_EFFORT);
-        seqnum++;
-    }
+    send_rate_table(dst_ip, dst_port, NULL, g_fs);
     // 0x0082: supported sample FORMATS (bit depths). DVS lists 0x10/0x18/0x20
     // = 16/24/32-bit; both RedNets list 0x18 only. We are 24-bit only
     // (dante_dev.c bits_per_sample, "pcm=3" on the wire), so we declare one.
@@ -740,6 +787,102 @@ static void send_network_info(const uint8_t *dst_ip, uint16_t dst_port)
 // Requests arriving on 8700
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// SAMPLE RATE SET (info opcode 0x81 met content)
+//
+// De SET is DEZELFDE opcode als de rate-query -- onderscheiden op content:
+//     u32 1          (set)
+//     u32 rate
+// Zonder content is het een query. Dit is gecaptured van de controller die een
+// rate kiest (zie Inferno-ESP32-P4 aoip_info.c handle_rate_set), en DC biedt
+// het alleen aan als board-info byte 0x17 configuratie adverteert.
+//
+// Een AM2 antwoordt met de nieuwe rate-tabel, dan 0x0100 met body
+// 01 01 00 00 00 00 00 02, dan 0x0106 leeg; daarna slaat hij op en herstart.
+//
+// WIJ HERSTARTEN NIET, EN DAT IS EEN CORRECTIE OP EEN EERDERE VERSIE HIERVAN.
+// Die deed ctrl_reset_write(1) zoals de ESP-implementatie, maar daar zit de
+// firmware in flash en hier in CODERAM: een reset landt in de loader, die op
+// een image over het netwerk wacht. Gemeten op 2026-10-30: na zo'n reset
+// antwoordde het bord niet meer en kreeg zelfs netload hem niet terug -- alleen
+// een bitstream-reload. Op de bench is dat een vastloper, in productie een
+// apparaat dat van het netwerk valt zodra iemand een menu aanraakt.
+//
+// Het hoeft ook niet. Alle vier dingen die van de rate afhangen zijn runtime
+// beschrijfbaar: g_fs, de NCO (mcr_dante_init), de subsecond-wrap in de
+// packetizer en de USB-clock-source. Dus we zetten ze live en laten de flows
+// opnieuw onderhandelen. De USB-host leest zijn rate pas bij de volgende
+// enumeratie, dus die heeft een replug of een poort-cycle nodig -- dat is de
+// enige handeling die overblijft, en hij is zichtbaar in plaats van stil.
+// ---------------------------------------------------------------------------
+// Ook aangeroepen door de 'R'-opcode in dstats.c.
+void dante_info_rate_apply(uint32_t hz)
+{
+    g_fs = hz;
+    // Volgorde: eerst de wrap, dan de NCO. De packetizer vergelijkt ts_sub
+    // tegen deze CSR, dus hem na de NCO zetten laat een paar strobes door met
+    // de oude grens en dat is precies een verkeerd gewrapte timestamp.
+#ifdef CSR_AAF_PKT_TS_SUBSEC_MAX_ADDR
+    aaf_pkt_ts_subsec_max_write(hz);
+#endif
+    mcr_dante_init(CONFIG_CLOCK_FREQUENCY, hz);
+#ifdef CSR_MAIN_USB_RATE_48K_ADDR
+    main_usb_rate_48k_write(hz == 48000 ? 1 : 0);
+#endif
+    g_dante.sample_rate = hz;
+    // Ontvangers luisteren nog op de oude rate en hun fpp hoort bij de oude
+    // sample-periode, dus laat ze opnieuw onderhandelen in plaats van ze stil
+    // verkeerd te laten draaien.
+    dante_tx_drop_all();
+}
+
+static void handle_rate_set(const uint8_t *req, uint32_t len,
+                            const uint8_t src_ip[4], uint16_t src_port)
+{
+    (void)len;
+    uint32_t hz = ((uint32_t)req[36] << 24) | ((uint32_t)req[37] << 16) |
+                  ((uint32_t)req[38] << 8)  |  (uint32_t)req[39];
+
+    if (hz == g_fs) {                       // al goed: alleen bevestigen
+        send_rate_table(src_ip, src_port, req, hz);
+        return;
+    }
+    if (!rate_supported(hz)) {
+        printf("[info] rate %lu Hz geweigerd; blijf op %lu\n",
+               (unsigned long)hz, (unsigned long)g_fs);
+        send_rate_table(src_ip, src_port, req, g_fs);   // de WARE rate melden
+        return;
+    }
+
+    g_cfg.sample_rate = hz;
+    cfg_save();
+    dante_info_rate_apply(hz);
+    printf("[info] rate -> %lu Hz door de controller (live; USB-host leest de "
+           "nieuwe rate bij zijn volgende enumeratie)\n", (unsigned long)hz);
+
+    send_rate_table(src_ip, src_port, req, hz);
+    {   // 0x0100
+        static const uint8_t op[8]   = {0x07, 0x2a, 0x01, 0x00, 0, 0, 0, 0};
+        static const uint8_t body[8] = {0x01, 0x01, 0, 0, 0, 0, 0, 0x02};
+        uint8_t *p = net_udp_payload_buf();
+        uint32_t n = put_hdr(p, 0xFFFF, op);
+        memcpy(p + n, body, sizeof(body)); n += sizeof(body);
+        put_u16(p, 2, (uint16_t)n);
+        net_udp_commit(grp_devinfo, DANTE_PORT_INFO, DANTE_PORT_INFO_REQ, n,
+                       NET_TOS_BEST_EFFORT);
+        seqnum++;
+    }
+    {   // 0x0106, leeg
+        static const uint8_t op[8] = {0x07, 0x2a, 0x01, 0x06, 0, 0, 0, 0};
+        uint8_t *p = net_udp_payload_buf();
+        uint32_t n = put_hdr(p, 0xFFFF, op);
+        put_u16(p, 2, (uint16_t)n);
+        net_udp_commit(grp_devinfo, DANTE_PORT_INFO, DANTE_PORT_INFO_REQ, n,
+                       NET_TOS_BEST_EFFORT);
+        seqnum++;
+    }
+}
+
 static void info_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
                     uint16_t src_port, const uint8_t *req, uint32_t len)
 {
@@ -766,6 +909,16 @@ static void info_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     // (LOCKED, right ppb, right master clock id), and the clock columns stayed
     // at PTPv2 Domain 0 / Priority 0/0 with v1 N/A.
     case 0x21:            send_clock_stats (grp_devinfo, DANTE_PORT_INFO, req); break;
+    case 0x81:
+        // Met content is het een SET (u32 1, u32 rate); zonder een query.
+        if (len >= MCAST_HDR_LEN + 8 && req[32] == 0 && req[33] == 0 &&
+            req[34] == 0 && req[35] == 1) {
+            handle_rate_set(req, len, src_ip, src_port);
+        } else {
+            send_caps(src_ip, src_port);
+        }
+        break;
+    case 0x83: case 0x85: send_caps(src_ip, src_port); break;
     default:
         // Log unknowns: DC's requests to us are unicast and therefore invisible
         // to host-side capture, so the console is the only place they show up.
@@ -781,6 +934,7 @@ static void info_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
 void dante_info_poll(void)
 {
     uint32_t now = gptp_uptime_ms();
+
 
     // Periodic device-info announcement, forever. Stopping makes us disappear
     // from Dante Controller on its next refresh -- see INFO_ANNOUNCE_MS.

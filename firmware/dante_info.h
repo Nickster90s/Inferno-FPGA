@@ -25,4 +25,9 @@ typedef struct {
 } dante_info_stats_t;
 extern dante_info_stats_t g_info_stats;
 
+// Zet de sample rate LIVE: g_fs, de subsecond-wrap, de NCO en de
+// USB-clock-source, en laat de flows opnieuw onderhandelen. Geen reset -- de
+// firmware staat in coderam, dus een reset landt in de loader.
+void dante_info_rate_apply(uint32_t hz);
+
 #endif // DANTE_INFO_H

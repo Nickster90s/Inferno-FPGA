@@ -554,8 +554,13 @@ static void check_uart_cmd(void)
             // increments only when the MAC ACCEPTS a frame's last beat = frames
             // on the wire. (The per-stage soft-ILA rates were removed with the
             // debug CSRs once the rate-match path was proven.)
-            printf("  *** AAF TX = %lu pkt/s (expect ~48000 = 6 streams x 8000) ***\n",
-                   (unsigned long)((uint64_t)(cpkts - pr_pkts) * 1000u / dms));
+            // 6 streams x (fs/fpp). Stond hardcoded op 48000, wat bij 96 kHz
+            // een gezonde talker als kapot zou laten lezen.
+            // AAF stuurt 6 samples per pakket (aaf_packetizer.py: 125000 ns bij
+            // 48k/6), dus per stream fs/6 pkt/s en over 6 streams precies fs.
+            printf("  *** AAF TX = %lu pkt/s (expect ~%lu = 6 streams x %lu) ***\n",
+                   (unsigned long)((uint64_t)(cpkts - pr_pkts) * 1000u / dms),
+                   (unsigned long)g_fs, (unsigned long)(g_fs / 6u));
             // localisation: rx_beats = core->EP raw bytes/s (real RX rate; 48ch @
             // 48k x 4B = ~9.216M B/s clean); ep_out = EP->decoder bytes/s.
             printf("  rx-loc(/s): rx_beats=%lu ep_out=%lu  [clean 48ch ~9216000 B/s]\n",
@@ -762,7 +767,7 @@ static void check_uart_cmd(void)
             if (ts_off < -64) ts_off = 0;
             aaf_pkt_ts_offset_write((uint32_t)ts_off);
             printf("[dtx] ts_offset = %ld samples (%ld us)\n",
-                   (long)ts_off, (long)ts_off * 1000000 / 48000);
+                   (long)ts_off, (long)ts_off * 1000000 / (long)g_fs);
             break;
         }
         case 'h':
@@ -940,14 +945,36 @@ int main(void)
     ptpv1_init(mac_addr);
     dante_tx_init();
     cap_init();
-    mcr_init(&mcr, CONFIG_CLOCK_FREQUENCY, 48000);
+    mcr_init(&mcr, CONFIG_CLOCK_FREQUENCY, g_fs);
     // Give MCR the gPTP handle so the free-running (cs=0) NCO is disciplined to
     // the network media rate (exactly 48000 gPTP-Hz) instead of the raw crystal.
     mcr_set_gptp(&mcr, &gptp);
     // The Dante media clock takes ownership of the NCO from here. Starts
     // DISABLED: it reports what it would write so the sign and magnitude can be
     // checked against measured drift before anything touches the clock.
-    mcr_dante_init(CONFIG_CLOCK_FREQUENCY, 48000);
+    mcr_dante_init(CONFIG_CLOCK_FREQUENCY, g_fs);
+
+    // VERTEL DE USB-CLOCK-SOURCE DE RATE. Hij meldt er precies een, read-only,
+    // en de host volgt; host-programmeerbaar maken brak het streamen (zie
+    // avb-usb-host requesthandlers.py). Zonder deze regel staat de CSR op zijn
+    // reset van 1 = 48 kHz en zou de host 48 kHz te horen krijgen terwijl de
+    // NCO en de timestamps op 96 kHz lopen -- dubbele snelheid, dus.
+    //
+    // Alleen aanwezig in een build met USB_DUAL_RATE=1; bij een enkel-rate
+    // build pint de gateware de waarde al op de build-rate.
+#ifdef CSR_MAIN_USB_RATE_48K_ADDR
+    main_usb_rate_48k_write(g_fs == 48000 ? 1 : 0);
+#endif
+
+    // DE SUBSECOND-WRAP IN DE PACKETIZER. Stond als constante 48000 in de
+    // gateware; nu een CSR, omdat een dual-rate bitstream beide rates moet
+    // kunnen draaien. Met de verkeerde waarde wrapt ts_sub een halve seconde
+    // te vroeg of te laat en verwerpt elke ontvanger alle pakketten als stale
+    // -- groene patch, geen audio, het symptoom dat in dante_tx.c al beschreven
+    // staat. Schrijf hem VOOR de talker aangaat.
+#ifdef CSR_AAF_PKT_TS_SUBSEC_MAX_ADDR
+    aaf_pkt_ts_subsec_max_write(g_fs);
+#endif
     telem_init();
     // Start the gateware talker from boot so the USB ring always has a
     // consumer and the async-feedback servo has a real rate to measure.

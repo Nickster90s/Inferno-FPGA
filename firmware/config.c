@@ -25,6 +25,20 @@ static void cfg_defaults(void)
     g_cfg.osc_ip[0] = 169; g_cfg.osc_ip[1] = 254;      // default OSC IP 169.254.9.200/16
     g_cfg.osc_ip[2] = 9;   g_cfg.osc_ip[3] = 200;
     g_cfg.osc_prefix = 16;
+    g_cfg.sample_rate = 48000;  // de bewezen rate; 96000 kiest de gebruiker in DC
+}
+
+// Eenmaal bij boot gezet; daarna constant voor de hele run. Zie config.h.
+uint32_t g_fs = 48000;
+
+// Een v4-blob heeft hier nullen staan en een beschadigde blob kan alles
+// bevatten, dus NOOIT ongevalideerd overnemen: een fs van 0 deelt door nul in
+// de NCO-som en een onzinwaarde zet de hele klokketen verkeerd op.
+static void cfg_fs_apply(void)
+{
+    if (g_cfg.sample_rate != 48000 && g_cfg.sample_rate != 96000)
+        g_cfg.sample_rate = 48000;
+    g_fs = g_cfg.sample_rate;
 }
 
 int cfg_load(void)
@@ -43,9 +57,11 @@ int cfg_load(void)
             g_cfg.osc_ip[2] = 9;   g_cfg.osc_ip[3] = 200;
             g_cfg.osc_prefix = 16;
         }
+        cfg_fs_apply();
         return 1;
     }
     cfg_defaults();
+    cfg_fs_apply();
     return 0;
 }
 

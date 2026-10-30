@@ -1,6 +1,7 @@
 // Dante device identity — Phase 3. See dante_dev.h.
 
 #include "dante_dev.h"
+#include "config.h"   // g_fs
 #include <string.h>
 #include <stdio.h>
 
@@ -84,7 +85,7 @@ void dante_dev_init(const uint8_t mac[6])
     memcpy(g_dante.hostname, g_dante.name, DANTE_MAX_NAME);
 
     g_dante.process_id     = 0;
-    g_dante.sample_rate    = 48000;
+    g_dante.sample_rate    = g_fs;
     g_dante.bits_per_sample = 24;       // pcm=3 on the wire
 
     printf("[dante] %s  id=%02x%02x%02x%02x%02x%02x%02x%02x  %luch tx @%lu\n",

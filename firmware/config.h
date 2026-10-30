@@ -52,7 +52,28 @@ typedef struct {
     // config field was being wiped before it was read.
     int32_t  mclk_ppb;          // last converged media-clock rate correction
     uint8_t  mclk_ppb_valid;
-    uint8_t  reserved[55];
+    // SAMPLE RATE, gekozen in Dante Controller (info 0x81 SET) en hier
+    // bewaard omdat de hele klokketen bij boot wordt opgezet: een
+    // rate-wijziging herstart het bord en leest dit veld.
+    //
+    // DE PLAATS IS DWINGEND, NIET COSMETISCH. Twee eisen tegelijk:
+    //  1. sizeof(cfg_t) moet GELIJK blijven (120), want cfg_load() eist
+    //     t.size == sizeof(cfg_t) -- anders wordt elke opgeslagen blob
+    //     verworpen en op defaults gezet. Daarom komt dit veld UIT reserved
+    //     en niet erbovenop.
+    //  2. Elk bestaand veld moet op zijn HUIDIGE offset blijven. Een eerdere
+    //     versie van dit veld stond vlak na mclk_ppb, netjes uitgelijnd en met
+    //     identieke sizeof -- maar dat schoof mclk_ppb_valid van offset 60
+    //     naar 64, dus een v4-blob las dat vlag uit oude reserved-nullen en
+    //     verloor stil zijn media-clock warm start: de 43 seconden
+    //     wrong-and-changing samplerate na boot die hierboven beschreven staat.
+    // Vandaar expliciete padding tot de volgende 4-grens: mclk_ppb 56,
+    // mclk_ppb_valid 60, _pad5 61..63, sample_rate 64, reserved 68..115,
+    // crc 116. Een v4-blob heeft nullen op 64..67, dus cfg_load() valideert
+    // en valt terug op 48000.
+    uint8_t  _pad5[3];
+    uint32_t sample_rate;       // 48000 of 96000
+    uint8_t  reserved[48];
     uint32_t crc;              // checksum over all bytes above
 } cfg_t;
 
@@ -60,6 +81,12 @@ extern cfg_t g_cfg;            // the live config (loaded at boot, saved on chan
 
 // Load NV into g_cfg. Returns 1 if a valid saved config was found, else 0 and
 // g_cfg is filled with defaults.
+// De ACTIEVE sample rate, eenmaal bij boot uit cfg gezet en daarna constant.
+// Een global in plaats van een accessor omdat dante_tx hem per pakket gebruikt
+// (timestamp = seconden * fs + subsec) en een call per gebruik daar niets
+// toevoegt. Altijd 48000 of 96000 -- cfg_load() valideert.
+extern uint32_t g_fs;
+
 int  cfg_load(void);
 
 // Persist g_cfg to NV (erase sector + program). Call after changing any field.

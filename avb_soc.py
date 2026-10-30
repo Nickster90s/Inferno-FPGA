@@ -468,6 +468,22 @@ class AVBSoC(SoCCore):
         # instantiates the 2nd usb_avb_subsystem2 + A/B mux. Default OFF keeps
         # the proven single-USB build unchanged.
         platform._has_ulpi2 = os.environ.get("USB2", "") == "1"
+
+        # ---- DUAL-RATE (48/96 kHz) OPT-IN: env USB_DUAL_RATE=1 --------------
+        # Regenereer de subsysteem-Verilog met dual_rate=True (zie
+        # tools/gen_usb_subsystem.py) VOORDAT je dit aanzet: zonder die regen
+        # bestaat de rate_48k_i-poort niet en faalt de elaboratie.
+        #
+        # WAAROM OPT-IN EN NIET DEFAULT. dual_rate dimensioneert het ISO-endpoint
+        # permanent op 96 kHz: 48ch x 4 B x 13 = 2496 B/uframe, dus base 960 x 3
+        # = 2880 B gereserveerd, OOK als je op 48 kHz draait. Dat is 23 MB/s per
+        # PHY. Op de bench hangen Main en Backup aan DEZELFDE host controller
+        # (hub-poort 1-8 en 1-10, beide bus 001), dus samen 46 MB/s -- dat past
+        # niet en de tweede configureert dan niet meer. In productie zit elke PHY
+        # aan zijn eigen Mac en is er geen probleem. Default OFF houdt daarom de
+        # gevalideerde 48k dual-USB build intact.
+        _dual_rate = os.environ.get("USB_DUAL_RATE", "") == "1"
+        platform._usb_dual_rate = _dual_rate
         if platform._has_ulpi2:
             platform.add_extension(ulpi2_io())
 
@@ -861,6 +877,23 @@ class AVBSoC(SoCCore):
         # host's response without a gateware rebuild.
         self.usb_fb_ovr = CSRStorage(32, description="USB async-feedback override (0=auto).")
 
+        # RATE-FOLLOW. De clock source in het subsysteem meldt precies EEN rate,
+        # read-only, en de host volgt -- hem host-programmeerbaar maken brak het
+        # streamen (zie de waarschuwing bij current_rate_48k in
+        # avb-usb-host/gateware/requesthandlers.py). Deze CSR is dus de enige
+        # plek waar de rate vandaan komt, en de firmware zet hem uit de door
+        # Dante Controller gekozen waarde.
+        #
+        # reset=1 -> 48 kHz, zodat een bord dat opstart zonder dat de firmware
+        # iets heeft gezet op de bewezen rate staat in plaats van op 96k.
+        _rate_port = {}
+        if getattr(platform, "_usb_dual_rate", False):
+            self.usb_rate_48k = CSRStorage(1, reset=1,
+                description="USB clock source rate: 1 = 48 kHz, 0 = 96 kHz. "
+                            "Driven by firmware from the Dante-selected rate; "
+                            "the USB host follows and cannot set it.")
+            _rate_port = {"i_rate_48k_i": self.usb_rate_48k.storage}
+
         self.specials += Instance("usb_avb_subsystem",
             i_clk       = ClockSignal("sys"),
             i_rst       = ResetSignal("sys"),
@@ -882,6 +915,7 @@ class AVBSoC(SoCCore):
             i_sample_strobe         = self.mcr.sample_strobe,
             i_block_level           = usb_block_level_usb,   # cd_usb-synchronised
             i_fb_ovr                = self.usb_fb_ovr.storage,
+            **_rate_port,
         )
 
         # Firmware-facing drain: 2 CSR ops/sample (read packed head, then
@@ -978,7 +1012,13 @@ class AVBSoC(SoCCore):
                 o_sample_overflow_count=sample_ovf2_w,
                 o_dbg_rx_beats=dbg2_a, o_dbg_ep_out=dbg2_b,
                 i_sample_strobe=self.mcr.sample_strobe,
-                i_block_level=usb2_block_level_usb2, i_fb_ovr=self.usb2_fb_ovr.storage)
+                i_block_level=usb2_block_level_usb2, i_fb_ovr=self.usb2_fb_ovr.storage,
+                # DEZELFDE CSR als Main: beide clock sources moeten dezelfde rate
+                # melden. Twee hosts die van elkaar verschillende rates te horen
+                # krijgen terwijl ze in dezelfde Dante-flow eindigen, geeft bij
+                # een A/B-omschakeling een halve of dubbele snelheid.
+                **({"i_rate_48k_i": self.usb_rate_48k.storage}
+                   if getattr(platform, "_usb_dual_rate", False) else {}))
             self.usb2_sample_overflow = CSRStatus(32, description="Backup USB samples dropped.")
             self.comb += self.usb2_sample_overflow.status.eq(sample_ovf2_w)
             # EXPOSE THE BACKUP'S INGRESS. dbg_rx_beats/dbg_ep_out were wired to

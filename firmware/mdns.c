@@ -11,6 +11,7 @@
 #include "dante_tx.h"
 extern uint16_t g_mcast_fpp;
 #include "gptp.h"
+#include "config.h"   // g_fs: de rate hier was hardcoded 48000
 #include <string.h>
 #include <stdio.h>
 
@@ -490,7 +491,7 @@ static uint32_t build_txt_chan(uint8_t *p, unsigned ch1)
     n = txt_put(p, n, "dbcp1=0x1200");
     n = txt_put_kv_u(p, n, "id=", ch1);
     n = txt_put(p, n, "dbcp=0x1004");
-    n = txt_put(p, n, "rate=48000");
+    n = txt_put_kv_u(p, n, "rate=", g_fs);
     n = txt_put(p, n, "en=24");
     n = txt_put(p, n, "pcm=3 4");
     n = txt_put(p, n, "enc=24");
@@ -623,7 +624,7 @@ static uint32_t build_txt_bund(uint8_t *p, unsigned b1)
     // (the flow resolves, the payload is in a format the receiver is not
     // expecting). Two places holding one fact is the bug; this removes one.
     n = txt_put_kv_u(p, n, "fpp=", g_mcast_fpp);
-    n = txt_put(p, n, "rate=48000");
+    n = txt_put_kv_u(p, n, "rate=", g_fs);
     n = txt_put(p, n, "enc=24");
     n = txt_put(p, n, "at2");
     {

@@ -31,6 +31,7 @@ extern uint8_t  usb_fb_sweep_hold;
 #include "mcr_dante.h"
 #include "telem.h"
 #include <generated/csr.h>
+#include "config.h"   // g_fs, g_cfg, cfg_save(): de 'R'-opcode
 #include <stdio.h>
 
 #define STATS_PORT 7779
@@ -507,6 +508,43 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     // cleanly but never asserting its D+ pull-up -- reads tolerate ~0.6 ns of
     // extra nxt/data delay, the write handshake (our driven data against the
     // PHY's NXT) does not. So never assume one tap fits both.
+    // 'R' -- sample rate lezen/zetten zonder Dante Controller.
+    //
+    //   "R"        -> rapporteer de actieve rate
+    //   "R" <code> -> zet 48 kHz (code 0) of 96 kHz (code 1), bewaar, herstart
+    //
+    // Bestaat omdat de rate normaal uit DC komt (info 0x81) en dat pad niet op
+    // de bench te scripten is. Doet exact wat handle_rate_set() doet: opslaan en
+    // herstarten, want de NCO, de USB-clock-source en de subsecond-wrap worden
+    // bij boot uit g_fs opgezet.
+    if (len >= 1 && req[0] == 'R') {
+        uint8_t *pr = net_udp_payload_buf();
+        uint32_t nr = 0;
+        put32(pr, nr, 0x52415445u); nr += 4;               // 'RATE'
+        put32(pr, nr, g_fs);        nr += 4;
+        if (len >= 2) {
+            uint32_t want = (req[1] == 1) ? 96000u : 48000u;
+            put32(pr, nr, want);    nr += 4;
+            net_udp_commit(src_ip, src_port, STATS_PORT, nr, NET_TOS_BEST_EFFORT);
+            if (want != g_fs) {
+                g_cfg.sample_rate = want;
+                cfg_save();
+                // LIVE, geen reset. Een reset landt in de loader omdat de
+                // firmware in coderam staat en niet in flash -- gemeten: het
+                // bord kwam niet terug, ook niet met netload. Zie
+                // rate_apply_live() in dante_info.c.
+                dante_info_rate_apply(want);
+                printf("[rate] -> %lu Hz via UDP (live; replug de USB om de "
+                       "host de nieuwe rate te laten lezen)\n",
+                       (unsigned long)want);
+            }
+            return;
+        }
+        put32(pr, nr, g_fs);        nr += 4;
+        net_udp_commit(src_ip, src_port, STATS_PORT, nr, NET_TOS_BEST_EFFORT);
+        return;
+    }
+
     if (len >= 1 && req[0] == 'T') {
         if (len >= 2) {
             main_ulpi_idelay_tap_write(req[1] & 0x1F);

@@ -29,6 +29,7 @@
 #include "net.h"
 #include "telem.h"
 #include "mcr_dante.h"
+#include "config.h"   // g_fs: de Dante-timestamp is seconden*fs + subsec
 #include <generated/csr.h>
 #include <string.h>
 #include <stdio.h>
@@ -249,7 +250,7 @@ void dante_tx_init(void)
 
     talker_on = 0;
     printf("[dtx] %u flows x 8 ch, fpp=%u, 24-bit, %u pps/flow (talker held off)\n",
-           N_FLOWS, FPP, 48000u / FPP);
+           N_FLOWS, FPP, g_fs / FPP);
 }
 
 // ---------------------------------------------------------------------------
@@ -263,15 +264,19 @@ void dante_tx_init(void)
 // epoch -- measured 426 against the A16R's 84625. A receiver subscribes fine
 // and then discards every packet as hours stale: green patch, no audio.
 //
-// sub = ns * 48000 / 1e9 = ns * 3 / 62500, exact and small enough for 32 bits
-// (ns < 1e9, so ns*3 < 3e9 -- unsigned, and it must stay unsigned).
+// sub = ns * fs / 1e9. Uitgevoerd als ns * 3 / (3e9/fs): 62500 bij 48 kHz,
+// 31250 bij 96 kHz, beide exact. De *3 blijft STAAN en wordt niet in de deler
+// verrekend, want die factor is precies wat de som binnen 32 bits houdt:
+// ns < 1e9 dus ns*3 < 3e9 < 2^32 -- unsigned, en het moet unsigned blijven.
+// Zou je in plaats daarvan ns * fs doen, dan is dat bij 96 kHz 9.6e13 en moet
+// alles naar 64 bits.
 // Defined below, once flows[] is in scope.
 static void dante_tx_reseed_phases(uint32_t sub);
 
 static void ts_anchor(void)
 {
     ptp_timestamp_t t = gptp_read_time();
-    int32_t  sub = (int32_t)((t.nanoseconds * 3u) / 62500u);
+    int32_t  sub = (int32_t)((t.nanoseconds * 3u) / (3000000000u / g_fs));
     uint32_t sec = (uint32_t)t.seconds;
 
     // THE OFFSET IS APPLIED HERE, NOT IN THE ts_offset CSR.
@@ -293,8 +298,11 @@ static void ts_anchor(void)
     // emitted value is always ts_sub - 15 with ts_sub congruent to 15 mod 16 --
     // in [0, 47984], a multiple of fpp, and never wrapping either way.
     sub += ts_offset_samples;
-    if (sub < 0)            { sub += 48000; sec -= 1; }
-    else if (sub >= 48000)  { sub -= 48000; sec += 1; }
+    // De subsecond-teller loopt 0..fs-1, dus de carry MOET met fs gebeuren en
+    // niet met een literal: bij 96 kHz zou 48000 hier elke timestamp een halve
+    // seconde verkeerd zetten en de ontvanger alles als te laat verwerpen.
+    if (sub < 0)                 { sub += (int32_t)g_fs; sec -= 1; }
+    else if (sub >= (int32_t)g_fs) { sub -= (int32_t)g_fs; sec += 1; }
 
     aaf_pkt_ts_load_sec_write(sec);
     aaf_pkt_ts_load_sub_write((uint32_t)sub);
@@ -452,9 +460,9 @@ void dante_tx_poll(void)
             (uint32_t)(now - last_servo_ms) <  60000u) {
             last_servo_ms = now;
             ptp_timestamp_t t = gptp_read_time();
-            int64_t ptp_smp = (int64_t)t.seconds * 48000
+            int64_t ptp_smp = (int64_t)t.seconds * (int64_t)g_fs
                             + (int64_t)((t.nanoseconds * 3u) / 62500u);
-            int64_t emit    = (int64_t)aaf_pkt_dbg_last_sec_read() * 48000
+            int64_t emit    = (int64_t)aaf_pkt_dbg_last_sec_read() * (int64_t)g_fs
                             + (int64_t)aaf_pkt_dbg_last_ts_read();
             int32_t err = (int32_t)(emit - ptp_smp);     // + = we are ahead
 
@@ -586,9 +594,9 @@ void dante_tx_poll(void)
             ptp_timestamp_t t = gptp_read_time();
             uint32_t esec, esub;
             dante_tx_read_emitted(&esec, &esub);      // atomic: see the header
-            int64_t ptp_smp = (int64_t)t.seconds * 48000
+            int64_t ptp_smp = (int64_t)t.seconds * (int64_t)g_fs
                             + (int64_t)((t.nanoseconds * 3u) / 62500u);
-            int64_t emit    = (int64_t)esec * 48000 + (int64_t)esub;
+            int64_t emit    = (int64_t)esec * (int64_t)g_fs + (int64_t)esub;
             int64_t err     = emit - ptp_smp;
             // Half a second. Far beyond any fpp bias (59 samples at most) and
             // any staleness the emitted register can carry while the talker is
@@ -1189,9 +1197,10 @@ uint32_t dante_tx_latency_effective(void)
     uint32_t worst = 0;
     for (unsigned i = 0; i < N_FLOWS; i++) {
         if (!flows[i].in_use || !flows[i].fpp) continue;
-        // fpp samples at 48 kHz, in nanoseconds. 1e9/48000 = 20833.33; use the
+        // fpp samples at the active rate, in nanoseconds. 1e9/48000 = 20833.33
+        // (10416.67 at 96k); use the
         // 64-bit form so fpp=60 does not round down into a too-small window.
-        uint32_t win = (uint32_t)(((uint64_t)flows[i].fpp * 1000000000ull) / 48000ull);
+        uint32_t win = (uint32_t)(((uint64_t)flows[i].fpp * 1000000000ull) / (uint64_t)g_fs);
         if (win > worst) worst = win;
     }
     uint32_t need = 5000000u;
@@ -1344,7 +1353,10 @@ void dante_tx_read_emitted(uint32_t *sec, uint32_t *sub)
 //
 // The cost is a spin of up to one sample period (20.8 us at 48 kHz, ~1040 sys
 // clocks at 50 MHz) once per caller. mcr_dante_poll() calls this at 1 Hz.
-#define MEDIA_SUBSEC        48000
+// Was een #define op 48000. Nu de actieve rate, want deze constante vouwt het
+// fase-verschil naar +-fs/2; met de verkeerde waarde valt elke meting buiten de
+// band en wordt de re-anchor-guard permanent getriggerd.
+#define MEDIA_SUBSEC        (g_fs)
 // Bound the liveness spin. Each CSR read is a handful of cycles through the
 // registered bridge, so one sample period is on the order of a hundred reads;
 // 2000 is ~20x that and still well under a millisecond, which is what a main

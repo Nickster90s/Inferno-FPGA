@@ -716,8 +716,20 @@ class DantePacketizer(LiteXModule):
         # construction, which is what flows_tx.rs bootstraps by hand. That also
         # replaces the free-running blk_idx the AAF packetizer used for pacing.
         ts_sec  = Signal(32)
-        ts_sub  = Signal(32)          # 0 .. 47999
-        SUBSEC_MAX = 48000
+        ts_sub  = Signal(32)          # 0 .. fs-1
+        # DE WRAP IS EEN CSR, GEEN CONSTANTE. Hij stond hardcoded op 48000.
+        # In een dual-rate build (USB_DUAL_RATE=1) is het ISO-endpoint op 96 kHz
+        # gedimensioneerd maar kan de ACTIEVE rate 48k of 96k zijn, gekozen in
+        # Dante Controller -- een build-time constante kan die twee niet samen
+        # bedienen, en met de verkeerde waarde wrapt elke timestamp een halve
+        # seconde te vroeg of te laat en verwerpt de ontvanger alles.
+        #
+        # 17 bits: 96000 past, 48000 ook. De fpp-eigenschap uit het commentaar
+        # hierboven blijft gelden, want 96000 is net als 48000 deelbaar door 16.
+        self.ts_subsec_max = CSRStorage(17, reset=48000,
+            description="Subsecond wrap = sample rate (48000 or 96000). "
+                        "Firmware writes this from the Dante-selected rate.")
+        SUBSEC_MAX = self.ts_subsec_max.storage
         # A pending load is adopted at the next strobe, so the counter only ever
         # changes in the media-clock domain. Emitted timestamps stay multiples
         # of fpp regardless of what is loaded: the pacing condition below fires
@@ -731,7 +743,7 @@ class DantePacketizer(LiteXModule):
                     ts_sec.eq(self.ts_load_sec.storage),
                     ts_sub.eq(self.ts_load_sub.storage),
                     ts_load_pending.eq(0),
-                ).Elif(ts_sub == (SUBSEC_MAX - 1),
+                ).Elif(ts_sub == (SUBSEC_MAX - 1),   # CSR-1, niet constante-1
                     ts_sub.eq(0),
                     ts_sec.eq(ts_sec + 1),
                 ).Else(
