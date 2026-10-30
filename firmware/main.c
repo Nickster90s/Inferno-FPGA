@@ -966,6 +966,53 @@ int main(void)
     main_usb_rate_48k_write(g_fs == 48000 ? 1 : 0);
 #endif
 
+    // ---- LAAD DE IDELAY-TAPS IN DE HARDWARE ----------------------------
+    //
+    // ZONDER DIT DOET DE CSR-RESETWAARDE NIETS. De IDELAYE2 staat in
+    // VAR_LOAD: de tap komt pas in de delaylijn bij een puls op
+    // ulpi_idelay_load, en tot die puls houdt hij zijn parameter
+    // IDELAY_VALUE = 0. De CSR reset wel op 30, en een read-back MELDT 30 --
+    // maar de hardware staat op 0.
+    //
+    // DIT HEEFT EEN HELE SESSIE GEKOST (2026-10-30). Main's oog begint op deze
+    // build bij tap 19, dus hij enumereerde na elke boot NIET, terwijl de
+    // telemetrie 30 meldde. Hij werkte wel tijdens en na een tapsweep, omdat
+    // die per tap tap_write+load_write doet. Dat zag uit als intermitterend
+    // gedrag, en het is drie keer verkeerd verklaard: als iso-bandbreedte, als
+    // rate-afhankelijkheid en als te dunne Fmax-marge. Backup viel er niet
+    // over op omdat zijn oog tap 0 omvat; op een build waar dat niet zo was
+    // viel juist Backup van de bus en schreef ik dat aan de placement toe.
+    //
+    // Bewijs: met de CSR onveranderd op 30 enumereerde Main 0/3; direct daarna
+    // alleen een load-puls met DEZELFDE 30 gaf 3/3.
+    //
+    // Een read-back van een VAR_LOAD IDELAY-CSR zegt dus niets over de
+    // hardware. Wil je weten wat er echt staat, dan is de enumeratie de meting.
+    // DE WAARDEN STAAN HIER, NIET IN DE GATEWARE-RESET. Een tap wijzigen is dan
+    // een firmware-netload van seconden in plaats van een build van een
+    // kwartier -- en die build rolt ook de placement opnieuw, wat je een
+    // tweede meting kost.
+    //
+    // GEMETEN 2026-10-30 op deze build (seed 2, dual-rate, 96 kHz), met de
+    // load-puls actief zodat de meting de HARDWARE weergeeft:
+    //   Main   oog 19..31  (afgekapt op 31, de hoogste tap die IDELAYE2 heeft)
+    //   Backup oog  0..31  (geen rand binnen bereik -- daarom raakte de
+    //                       load-bug hem nooit: tap 0 werkt voor hem)
+    //
+    // Main krijgt het MIDDEN van zijn gemeten venster, niet de 30 die eerder in
+    // de gateware-reset stond: die werkt (6/6 gemeten) maar ligt een tap van de
+    // bovenrand. Backup krijgt het midden van het bereik, want daar is geen
+    // rand om vandaan te blijven.
+    //
+    // Hermeet met tools/tapsweep.py na een gateware-wijziging; verschuift het
+    // oog, dan hoef je alleen deze twee getallen en een netload.
+    main_ulpi_idelay_tap_write(25);
+    main_ulpi_idelay_load_write(1);
+#ifdef CSR_MAIN_ULPI2_IDELAY_TAP_ADDR
+    main_ulpi2_idelay_tap_write(16);
+    main_ulpi2_idelay_load_write(1);
+#endif
+
     // DE SUBSECOND-WRAP IN DE PACKETIZER. Stond als constante 48000 in de
     // gateware; nu een CSR, omdat een dual-rate bitstream beide rates moet
     // kunnen draaien. Met de verkeerde waarde wrapt ts_sub een halve seconde

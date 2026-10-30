@@ -793,6 +793,20 @@ class AVBSoC(SoCCore):
         # NOT add a second IDELAYCTRL (errors "more than one IDELAYCTRL for
         # the default IODELAY_GROUP"). Firmware sweeps ulpi_idelay_tap
         # (0..31, ~78 ps/tap) to centre the eye; the 'u' command steps it.
+        # *** LET OP: DEZE RESETWAARDE DOET NIETS ZONDER EEN LOAD-PULS. ***
+        # De IDELAYE2 hieronder staat in VAR_LOAD. De tap komt pas in de
+        # delaylijn als er op ulpi_idelay_load wordt geschreven; tot die puls
+        # houdt hij zijn parameter IDELAY_VALUE = 0. Een read-back van deze CSR
+        # meldt wel de resetwaarde, de hardware heeft hem niet.
+        #
+        # firmware/main.c doet die puls bij boot (tap_write gevolgd door
+        # load_write, voor beide bussen). Haal dat weg en Main enumereert niet
+        # meer na een reset, terwijl de telemetrie 30 blijft melden -- dat heeft
+        # op 2026-10-30 het grootste deel van een sessie gekost en is drie keer
+        # verkeerd verklaard (bandbreedte, rate-afhankelijkheid, Fmax-marge).
+        # Bewijs: CSR onaangeroerd op 30 gaf Main 0/3; alleen een load-puls met
+        # DEZELFDE 30 gaf 3/3.
+        #
         # TAP 30. Op de opgeleverde build (--seed 5, NEXTPNR_USB_FP_LIGHT=1)
         # enumereert Main op ELKE tap 0..31 -- er is geen oogrand binnen bereik.
         # Backup idem. De waarde is op deze placement dus onkritisch; 30 staat
@@ -805,14 +819,17 @@ class AVBSoC(SoCCore):
         #     seed 13 -> 56,3             seed 11 -> 54,2     seed 3/4 -> 49,8
         # De opgeleverde seed-5 build sluit op usb 70,1 / usb2 63,8 / sys 62,2.
         #
-        # EN DAT VERKLAART DE SMALLE OGEN. Op een eerdere seed-8 build (usb
-        # 60,14 MHz, 0,2% marge) was Main's oog 28..31 en Backup's 9..31, en toen
-        # een placementwijziging Backup's rand kruiste viel hij volledig van de
-        # bus. Ik schreef toen dat een PLL-FASEVERSCHUIVING op cd_usb de
-        # structurele oplossing was om het oog te centreren. Dat was fout: het
-        # smalle oog was een SYMPTOOM van te weinig timingmarge in cd_usb, niet
-        # van een verkeerde samplefase. Met marge verdwijnt de oogrand. Zoek bij
-        # een smal oog dus eerst naar de Fmax van het usb-domein.
+        # OVER DE SMALLE OGEN, TWEE KEER GECORRIGEERD. Op een eerdere seed-8
+        # build (usb 60,14 MHz) was Main's oog 28..31 en Backup's 9..31. Ik
+        # schreef eerst dat een PLL-faseverschuiving op cd_usb de structurele
+        # oplossing was, en daarna dat het smalle oog een symptoom van te weinig
+        # Fmax-marge was. Dat tweede klopt mogelijk nog voor de BREEDTE van het
+        # oog, maar het bewijs dat ik aanvoerde klopte niet: dat Backup "van de
+        # bus viel toen een placementwijziging zijn oogrand kruiste" was de
+        # load-puls-bug hierboven. Zijn oog begon bij 9, de hardware stond op 0,
+        # en er was helemaal niets verschoven. Een niet-geladen tap en een
+        # verschoven oog zien er van buiten identiek uit -- sluit de eerste uit
+        # voordat je over de tweede concludeert.
         #
         # Hermeet wel na elke gateware-wijziging (tools/tapsweep.py): de Fmax is
         # een eigenschap van (netlist, seed), dus zelfs een andere CSR-resetwaarde
