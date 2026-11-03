@@ -53,26 +53,42 @@ Three switches each matter and each was a dead end first:
 
 ## What we are running into
 
-### 1. The clock-source class requests fail on Main, about half the time
+### 1. ~~The clock-source class requests fail on Main~~ — FIXED 2026-11-03
 
 ```
 usb 1-8: 1:1: cannot get freq (v2/v3): err -71
 usb 1-8: parse_audio_format_rates_v2v3(): unable to retrieve number of sample rates (clock 1)
 ```
 
-Counted over one window:
+**It was the IDELAY tap, and it was self-inflicted.** The tap had been set to
+25, the middle of an eye measured with "does the device enumerate". That
+criterion is too coarse — it only says the first few control transfers got
+through. Re-measured with the clock-source request as the criterion, 6 power
+cycles per tap:
 
-| | enumerations | failures |
+| tap | enumerates | failures |
 |---|---|---|
-| Main   (`usb`, 62.23 MHz, +3.7% over the 60 the ULPI bus needs) | 9 | 5 |
-| Backup (`usb2`, 67.59 MHz, +12.7%) | 10 | 0 |
+| 22 | 6/6 | 2 |
+| **25** (what we had set) | 6/6 | **5** |
+| 28 | 6/6 | 0 |
+| 30 | 6/6 | 0 |
+| 31 | 6/6 | 0 |
 
-**Not fatal.** Both cards still come up at 48ch/96000, because that rate comes
-from the descriptors, not from this query. But it is a real defect and it is
-the kind that lands at the wrong moment during an A/B handover.
+So the eye for **correct transfers** is 28..31 while the eye for *enumerating*
+is 22..31. Picking the middle of the wider one landed outside the narrower one.
+Tap 30 — the value that had been in the gateware reset before I "improved" it —
+is right. Now **10/10 enumerations, 0 failures**, and both PHYs 8/8 with both
+ALSA cards at 48ch @ 96000.
 
-A logic bug would fail every time. This is probabilistic and it tracks the
-tighter of the two clock domains across two different builds.
+`tools/tapsweep.py` now scores on these kernel messages by default
+(`--criterion errors`, `--trials 3`), because the old criterion would lead the
+next session to exactly the same wrong conclusion.
+
+Four explanations preceded this and each was killed by a measurement — they are
+listed under "ruled out" below. The one that finally isolated it was the
+operator's: swap the two cables. The failure followed the **device**, not the
+port (port 1-8 went from 5/9 failures with Main to 0/8 with Backup), which
+removed the host side and left only the per-PHY settings.
 
 ### 2. The USB device does not appear in a Linux desktop's sound settings
 
@@ -126,7 +142,27 @@ indices throughout — rather than patching one wrap.
 
 ---
 
-## How we think we fix the clock-source failures
+## The floorplan work that came out of chasing it
+
+Not the fix, but a real improvement that stands: the `cd_usb` critical path is
+LUNA's `get_descriptor` byte counter and its carry chain, and that net was
+running across the die — source (70,138), sink (33,100), 2.4 ns of routing on a
+0.327 ns budget. Pulling `get_descriptor` into the USB box raised `usb` from
+62.23 to 70.70 MHz.
+
+| cell set | cells | places | usb |
+|---|---|---|---|
+| ULPI pad nets only | 690 | every seed | ~62 MHz |
+| **+ `get_descriptor`** | **1335** | **seeds place** | **70.7 MHz** |
+| + whole `USBControlEndpoint` | 2276 | **only seed 7** | 80.5, but eth_rx 117 ✗ |
+
+`NEXTPNR_USB_FP_CTRL` selects the set. The wide version is both tighter and
+unnecessary — the last ~950 cells buy under a MHz and cost eth_rx its corner
+plus eleven of twelve seeds. Y-capping the box below the eth pads does not work
+(a rectangle cannot avoid a 22-row band and stay feasible); eth_rx is recovered
+through the seed, which swings it 109–173 MHz.
+
+## How we thought we would fix the clock-source failures
 
 The critical path in `cd_usb` is **measured**, not guessed. From the build log:
 
@@ -166,6 +202,10 @@ moved to a different net.
 | the unsynchronised rate CSR | real defect, fixed (`MultiReg` per target domain) — but the failures continue |
 | registering `cur_rate` off the critical path | **not** the critical path, per the log above. The attempt also broke twice on hazards the upstream file already documents: `m.d.sync` is not the usb domain there, and an `m.d` statement breaks the `If/Elif` chain |
 | relaxing the sys constraint (`SYS_PERIOD_NS=20`) | `usb` 62.23 → 62.37 MHz, i.e. nothing. It did help `usb2` (67.59 → 72.32) and `sys` stays fine, so it is kept |
+| more `usb` margin (62.23 → 70.70 MHz via the floorplan) | **the failure ratio did not move**: still 5 of 7 on Main, 0 of 8 on Backup. This is what retired the Fmax hypothesis |
+| the hub port / the cable (operator's test) | the failure followed the **device**, not the port — host side ruled out |
+
+**What it actually was:** the tap, measured with the wrong criterion. See §1.
 
 ---
 

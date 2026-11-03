@@ -999,14 +999,23 @@ int main(void)
     //   Backup oog  0..31  (geen rand binnen bereik -- daarom raakte de
     //                       load-bug hem nooit: tap 0 werkt voor hem)
     //
-    // Main krijgt het MIDDEN van zijn gemeten venster, niet de 30 die eerder in
-    // de gateware-reset stond: die werkt (6/6 gemeten) maar ligt een tap van de
-    // bovenrand. Backup krijgt het midden van het bereik, want daar is geen
-    // rand om vandaan te blijven.
+    // *** 30, EN HET CRITERIUM IS NIET ENUMERATIE. ***
+    // Ik heb hier eerst 25 gezet, het midden van het oog zoals gemeten met
+    // "enumereert het device". Dat criterium is te grof: het zegt dat de eerste
+    // control-transfers slaagden, niet dat de link goed is. Opnieuw gemeten met
+    // de clock-source class-request als criterium (6 pogingen per tap):
     //
-    // Hermeet met tools/tapsweep.py na een gateware-wijziging; verschuift het
-    // oog, dan hoef je alleen deze twee getallen en een netload.
-    main_ulpi_idelay_tap_write(25);
+    //      tap 22 -> 2 fouten / 6     tap 25 -> 5 fouten / 6
+    //      tap 28 -> 0                tap 30 -> 0          tap 31 -> 0
+    //
+    // Het oog voor CORRECTE TRANSFERS is dus 28..31, niet 22..31, en mijn 25
+    // lag daar net buiten -- dat was de oorzaak van "cannot get freq" en
+    // "unable to retrieve number of sample rates" op deze PHY, waar ik eerder
+    // bandbreedte, rate-afhankelijkheid en Fmax-marge voor heb aangewezen en
+    // elk door meting zag sneuvelen.
+    //
+    // Meet dus met tools/tapsweep.py --criterion errors, niet op enumeratie.
+    main_ulpi_idelay_tap_write(30);
     main_ulpi_idelay_load_write(1);
 #ifdef CSR_MAIN_ULPI2_IDELAY_TAP_ADDR
     main_ulpi2_idelay_tap_write(16);

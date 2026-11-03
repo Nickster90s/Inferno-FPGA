@@ -77,6 +77,40 @@ def port_cycle(port):
         time.sleep(0.6)
 
 
+def kernel_errors(port):
+    """Clock-source class-request failures the kernel logged for this port.
+
+    WHY THIS EXISTS, AND WHY IT IS THE DEFAULT CRITERION. This tool used to
+    score a tap on whether the device ENUMERATED, and that is too coarse: it
+    only says the first few control transfers got through, not that the link is
+    good. Measured 2026-11-03 on one build, 6 power cycles per tap:
+
+        tap 22 -> 2 failures/6    tap 25 -> 5/6
+        tap 28 -> 0              tap 30 -> 0        tap 31 -> 0
+
+    Every one of those taps enumerated 6/6. So the eye for CORRECT TRANSFERS
+    was 28..31 while the eye for "enumerates" was 22..31, and picking the
+    middle of the wider one (25) landed outside the narrower one -- which is
+    exactly how `cannot get freq (v2/v3)` and `unable to retrieve number of
+    sample rates` got blamed on iso bandwidth, on the sample rate and on
+    cd_usb's Fmax margin in turn, each ruled out by measurement.
+
+    Scoring on these messages instead found it in one sweep.
+    """
+    try:
+        out = subprocess.run(["dmesg"], capture_output=True, text=True).stdout
+    except Exception:                                # noqa: BLE001
+        return 0
+    pat = "usb 1-%d" % port
+    return sum(1 for ln in out.splitlines()
+               if pat in ln and ("cannot get freq" in ln
+                                 or "number of sample rates" in ln))
+
+
+def dmesg_clear():
+    subprocess.run(["dmesg", "-C"], capture_output=True)
+
+
 def speed(port, timeout=5.0):
     p = "/sys/bus/usb/devices/1-%d/speed" % port
     t0 = time.time()
@@ -96,6 +130,13 @@ def main():
     ap.add_argument("--port", type=int, default=None,
                     help="hub port (default 8 for main, 10 for backup)")
     ap.add_argument("--taps", default="0-31", help="e.g. 0-31 or 6,8,10")
+    ap.add_argument("--criterion", default="errors", choices=("errors", "enum"),
+                    help="errors (default): a tap only passes if it enumerates "
+                         "AND logs no clock-source class-request failure. enum: "
+                         "the old, too-coarse test -- see kernel_errors().")
+    ap.add_argument("--trials", type=int, default=3,
+                    help="power cycles per tap. One is not enough: the failure "
+                         "is probabilistic (5 of 6 at the worst tap).")
     a = ap.parse_args()
     port = a.port if a.port is not None else (8 if a.phy == "main" else 10)
 
@@ -112,18 +153,24 @@ def main():
     print("sweeping %s on hub port %d\n" % (a.phy, port))
 
     found = []
-    print("tap  speed")
+    print("tap  hs/%d  fouten" % a.trials)
     for t in taps:
         set_tap(a.board, a.phy, t)
-        port_cycle(port)
-        sp = speed(port)
-        print("%3d  %s" % (t, sp or "-"), flush=True)
-        if sp == "480":
+        dmesg_clear()
+        hs = 0
+        for _ in range(a.trials):
+            port_cycle(port)
+            if speed(port) == "480":
+                hs += 1
+        errs = kernel_errors(port)
+        print("%3d  %4d  %6d" % (t, hs, errs), flush=True)
+        ok = (hs == a.trials) and (errs == 0 or a.criterion == "enum")
+        if ok:
             found.append(t)
 
     print()
     if found:
-        print("HIGH SPEED on taps: %s" % found)
+        print("CLEAN taps (%s criterion): %s" % (a.criterion, found))
         print("Pin the centre of that run as the CSR reset in avb_soc.py")
         print("(ulpi_idelay_tap / ulpi2_idelay_tap) and re-measure after any")
         print("gateware change -- the eye centre moves with placement.")
