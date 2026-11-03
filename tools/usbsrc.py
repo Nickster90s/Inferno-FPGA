@@ -34,7 +34,8 @@ TAG_SINGLE = 0x55534231   # 'USB1' - built without USB2=1
 
 FIELDS = ["select", "live", "switches",
           "main_rx_beats", "main_ep_out", "main_overflow",
-          "bkp_rx_beats", "bkp_ep_out", "bkp_overflow"]
+          "bkp_rx_beats", "bkp_ep_out", "bkp_overflow",
+          "forced"]
 # 48 ch x 4 B x fs. WAS HARDCODED OP 48 kHz, en op een 96 kHz-bord meldde dit
 # "+116% vs nominal" voor een stroom die 8% boven nominaal lag -- een getal dat
 # paniek suggereert waar niets aan de hand is. De rate komt uit de 'R'-opcode
@@ -75,6 +76,16 @@ def query(board, arg=b"", timeout=3.0, tries=4):
     raise last
 
 
+# PLAUSIBILITEITSGRENS. Dit gereedschap leidt een snelheid af uit twee
+# momentopnamen 2 s na elkaar, en dat gaat mis als er in dat venster iets
+# herstart: op 2026-11-03 meldde het +149% op BEIDE bronnen tegelijk, wat samen
+# 92 MB/s zou zijn en dus fysiek onmogelijk. Een onmogelijk getal moet zichzelf
+# aangeven in plaats van paniek te zaaien; de per-seconde-tellers van
+# tools/usbdiag.py zijn de betrouwbare bron voor een momentopname.
+def _implausible(bps):
+    return bps > 2.5 * _NOM
+
+
 def name(v):
     return "Backup(USB2)" if v else "Main(USB1)"
 
@@ -96,15 +107,20 @@ def show(board):
         print("    -> HANDOVER PENDING. Normal for microseconds. If it persists,")
         print("       the candidate is not delivering frames and the gateware is")
         print("       correctly refusing to switch mid-frame.")
-    print(f"  handovers  {a['switches']}")
+    print(f"  handovers  {a['switches']}   (waarvan geforceerd: {a.get('forced', 0)})")
     for tag, pfx in (("Main  ", "main"), ("Backup", "bkp")):
         rx = ((b[f"{pfx}_rx_beats"] - a[f"{pfx}_rx_beats"]) & 0xffffffff) / 2.0
         ep = ((b[f"{pfx}_ep_out"] - a[f"{pfx}_ep_out"]) & 0xffffffff) / 2.0
         leak = (rx - ep) / rx * 100 if rx else float("nan")
         live = "LIVE" if rx > 1_000_000 else "NO INGRESS"
         off = (rx - _NOM) / _NOM * 100 if rx else float("nan")
-        print(f"  {tag}  {rx:>11,.0f} B/s  {off:+6.2f}% vs nominal  "
-              f"leak {leak:+5.2f}%  overflow {b[f'{pfx}_overflow']:,}  {live}")
+        if _implausible(rx):
+            # Zie _implausible(): het 2-seconden-venster ving iets dat herstartte.
+            print(f"  {tag}  {rx:>11,.0f} B/s  -- ONMOGELIJK, meetvenster "
+                  f"vervuild; lees tools/usbdiag.py  {live}")
+        else:
+            print(f"  {tag}  {rx:>11,.0f} B/s  {off:+6.2f}% vs nominal  "
+                  f"leak {leak:+5.2f}%  overflow {b[f'{pfx}_overflow']:,}  {live}")
     if query(board) and b["bkp_rx_beats"] == a["bkp_rx_beats"]:
         print("    -> the BACKUP is not receiving. Do NOT switch to it.")
     return 0

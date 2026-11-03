@@ -1123,9 +1123,59 @@ class AVBSoC(SoCCore):
                 _cand_first.eq(Mux(sel_req, sample_hi2_w[_FIRST_BIT],
                                             sample_hi_w[_FIRST_BIT])),
             ]
+            # ---- HARDE SWITCH NA EEN TIMEOUT ------------------------------
+            #
+            # Frame-uitgelijnd commiteren is mooi als de kandidaat gezond is,
+            # maar het WACHT EEUWIG als hij dat niet is -- en dat is precies het
+            # geval waarin je omschakelt. Je schakelt niet voor niets; als je het
+             # doet is er al iets mis, en dan is "blijven hangen op de kapotte
+            # bron" het verkeerde gedrag.
+            #
+            # DIT KAN NU VEILIG, en dat kon het niet toen deze lus werd gebouwd.
+            # Het oorspronkelijke argument staat hierboven: een mid-frame switch
+            # gaf de ring een half frame en ROTEERDE ALLE 48 KANALEN permanent.
+            # Maar de packetizer schrijft inmiddels met EXPLICIETE
+            # kanaaladressering uit het sample zelf in plaats van uit de positie
+            # (zie dante_packetizer.py): "a drop leaves ONE stale channel slot
+            # (a tiny per-channel glitch) and the frame grid self-aligns every
+            # `first`, so drift heals within one media-frame". De kosten van een
+            # harde switch zijn dus een enkel media-frame met wat oude slots, en
+            # dat heelt zichzelf.
+            #
+            # Dus: commiteer uitgelijnd als dat binnen de timeout kan, en forceer
+            # daarna. Een media-frame duurt 20,8 us bij 48 kHz en 10,4 us bij
+            # 96 kHz, dus ~1050 sys-cycles; de default van 50.000 (1 ms bij
+            # 50 MHz) geeft ~48 frames gratie en is operationeel onmerkbaar.
+            # Zet de CSR op 0 voor "schakel onmiddellijk, uitlijning boeit niet".
+            self.usb_switch_timeout = CSRStorage(24, reset=50000,
+                description="Sys cycles to wait for a frame-aligned A/B "
+                            "handover before FORCING it. 0 = switch at once. "
+                            "The aligned path needs ~1050 cycles (one media "
+                            "frame), so the 50000 default is ~48 frames of "
+                            "grace and still imperceptible.")
+            # Twee tellers, want het VERSCHIL is de diagnose: een geforceerde
+            # switch betekent dat de kandidaat geen frames leverde, en dat wil je
+            # achteraf kunnen zien in plaats van vermoeden.
+            self.usb_switch_forced = CSRStatus(16,
+                description="A/B handovers that had to be FORCED because the "
+                            "candidate presented no frame marker in time. "
+                            "Nonzero means the standby was not delivering.")
+            _fc_cnt   = Signal(16)
+            _wait     = Signal(24)
+            _timeout  = Signal()
+            self.comb += [_timeout.eq(_wait >= self.usb_switch_timeout.storage),
+                          self.usb_switch_forced.status.eq(_fc_cnt)]
+            self.sync += If(~_pending, _wait.eq(0)).Elif(~_timeout,
+                                                         _wait.eq(_wait + 1))
+
             _commit = Signal()
-            self.comb += _commit.eq(_pending & _cand_rdy & _cand_first)
-            self.sync += If(_commit, sel_live.eq(sel_req), _sw_cnt.eq(_sw_cnt + 1))
+            _aligned = Signal()
+            self.comb += [_aligned.eq(_cand_rdy & _cand_first),
+                          _commit.eq(_pending & (_aligned | _timeout))]
+            self.sync += If(_commit,
+                            sel_live.eq(sel_req),
+                            _sw_cnt.eq(_sw_cnt + 1),
+                            If(~_aligned, _fc_cnt.eq(_fc_cnt + 1)))
 
             self._usb2_pop   = sample_pop2_w
             self._usb2_rdy   = sample_rdy2_w
@@ -1504,11 +1554,30 @@ def main():
         # 2nd ULPI is actually built, else get_nets matches nothing and naming an
         # undefined usb2_clk in set_clock_groups would abort the whole block.
         _usb2_xdc = getattr(soc.platform, "_has_ulpi2", False)
-        _usb2_create = (
-            ["create_clock -name usb2_clk   -period 16.667 "
-             "[get_nets avbsoc_crg_s7pll2_clkout_buf]"]        # 60 MHz Backup ULPI
-            if _usb2_xdc else [])
+        _usb2_create = []     # gevuld na _ck(), zie onder
         _usb2_group = " -group {usb2_clk}" if _usb2_xdc else ""
+        # ---- DE NETNAAM, GEMETEN IN PLAATS VAN AANGENOMEN -------------------
+        # Dit stond hardcoded op `avbsoc_crg_...` met een comment dat die naam
+        # "geverifieerd" was. Gemeten 2026-11-03 op de echte netlist:
+        #     avbsoc_crg_s7pll0_clkout_buf0  -> 0 keer in colorlight_i9plus.v
+        #     main_crg_s7pll0_clkout_buf0    -> 3 keer
+        # en nextpnr rapporteert de klokken bij hun NETNAAM (main_crg_...) in
+        # plaats van bij een constraint-naam (sys_clk), wat betekent dat er geen
+        # create_clock matchte. Deze constraints hebben dus nooit gebonden.
+        #
+        # Daarom nu een kandidatenlijst: nextpnr negeert een get_nets die niets
+        # matcht stilletjes, dus de juiste prefix bindt en de rest is een no-op.
+        # LiteX heeft die prefix vandaag al een keer veranderd, dus een vaste
+        # naam is hier structureel fragiel.
+        _CLK_PREFIXES = ("main_crg_", "avbsoc_crg_", "crg_")
+
+        def _ck(name, period_ns, net):
+            return ["create_clock -name %s -period %.3f [get_nets %s%s]"
+                    % (name, period_ns, pfx, net) for pfx in _CLK_PREFIXES]
+
+        if _usb2_xdc:
+            _usb2_create = _ck("usb2_clk", 16.667, "s7pll2_clkout_buf")
+
         soc.platform.toolchain.additional_xdc_commands += _usb2_create + [
             # NOTE: the PLL output nets carry the CRG submodule prefix
             # `avbsoc_crg_…`. Without it get_nets matched NOTHING, so BOTH the
@@ -1546,10 +1615,22 @@ def main():
             # nodig heeft. 16.667 ns = 60 MHz is 20% boven de 50 MHz die het
             # audiopad nodig heeft en ligt binnen het gemeten bereik, dus de placer
             # blijft optimaliseren. SYS_PERIOD_NS overschrijft voor een sweep.
-            "create_clock -name sys_clk    -period %6.3f [get_nets avbsoc_crg_s7pll0_clkout_buf0]"
-            % float(os.environ.get("SYS_PERIOD_NS", "16.667")),
-            "create_clock -name usb_clk    -period 16.667 [get_nets avbsoc_crg_s7pll1_clkout_buf]",   # 60 MHz
-            "create_clock -name idelay_clk -period  5.000 [get_nets avbsoc_crg_s7pll0_clkout_buf1]",  # 200 MHz
+            # (de regels hieronder zijn vervangen door _ck() verderop; deze
+            #  tekst blijft als anker voor de onderliggende redenering)
+        ] + _ck("sys_clk", float(os.environ.get("SYS_PERIOD_NS", "16.667")),
+                "s7pll0_clkout_buf0") + [
+        ] + _ck("usb_clk", 16.667, "s7pll1_clkout_buf") \
+          + _ck("idelay_clk", 5.000, "s7pll0_clkout_buf1") + [
+            # SET_CLOCK_GROUPS WORDT GENEGEERD. Gemeten in de build-log van
+            # 2026-11-03:
+            #     Info: ignoring unsupported XDC command 'set_clock_groups'
+            # nextpnr-xilinx ondersteunt hem niet. De regel blijft staan omdat
+            # hij voor een Vivado-flow wel zin heeft, maar reken er NIET op dat
+            # de CDC-overgangen hier zijn uitgesloten -- ze worden als echte
+            # single-cycle paden getimed, en dat is plausibel waarom de Fmax hier
+            # zo placement-afhankelijk is en seeds zo'n lottery zijn.
+            # set_false_path wordt in deze flow ook niet geemitteerd (0 regels in
+            # de XDC), dus er is op dit moment GEEN werkende CDC-uitsluiting.
             "set_clock_groups -asynchronous "
             "-group {sys_clk} -group {usb_clk} -group {idelay_clk}" + _usb2_group,
         ]

@@ -459,7 +459,8 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         if (len >= 2) {
             if (req[1] == '0' || req[1] == '1') {
                 main_usb_source_select_write(req[1] - '0');
-                printf("[usb] source REQUEST -> %s (frame-aligned handover)\n",
+                printf("[usb] source REQUEST -> %s (aligned if the candidate "
+                       "delivers a frame, FORCED after the timeout)\n",
                        req[1] == '1' ? "Backup(USB2)" : "Main(USB1)");
             }
         }
@@ -475,6 +476,15 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         put32(pu, nu, main_usb2_dbg_rx_beats_read());      nu += 4;  // Backup
         put32(pu, nu, main_usb2_dbg_ep_out_read());        nu += 4;
         put32(pu, nu, main_usb2_sample_overflow_read());   nu += 4;
+        // APPENDED: geforceerde switches. Het VERSCHIL met switch_count is de
+        // diagnose -- een geforceerde switch betekent dat de kandidaat geen
+        // frame-marker aanbood, dus dat de standby niets leverde. Dat wil je
+        // achteraf kunnen zien in plaats van vermoeden.
+#ifdef CSR_MAIN_USB_SWITCH_FORCED_ADDR
+        put32(pu, nu, main_usb_switch_forced_read());      nu += 4;
+#else
+        put32(pu, nu, 0);                                  nu += 4;
+#endif
         net_udp_commit(src_ip, src_port, STATS_PORT, nu, NET_TOS_BEST_EFFORT);
 #else
         // Single-USB build (USB2 not set at build time). Answer rather than
