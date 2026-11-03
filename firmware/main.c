@@ -34,6 +34,7 @@
 #include "mcr_dante.h"
 #include "telem.h"
 void dante_stats_init(void);
+void osc_init(void);
 
 // MAC address — locally administered, unique per device.
 // TODO: read from SPI flash or EEPROM in production.
@@ -816,6 +817,7 @@ static void aaf_gw_push_binding(void)
     dante_tx_init();
     dante_flows_init();
     dante_stats_init();
+    osc_init();          // UDP 9000: /usb/source, /usb/main, /usb/backup, /usb/rate
 }
 
 static void aaf_gw_set(uint8_t on)
@@ -1030,6 +1032,20 @@ int main(void)
     // staat. Schrijf hem VOOR de talker aangaat.
 #ifdef CSR_AAF_PKT_TS_SUBSEC_MAX_ADDR
     aaf_pkt_ts_subsec_max_write(g_fs);
+#endif
+
+    // ---- NU PAS DE PHYs VRIJGEVEN --------------------------------------
+    // MOET NA de rate-CSR hierboven. De gateware houdt beide ULPI-PHYs in
+    // reset tot dit punt, zodat de host niet kan enumereren met de
+    // CSR-resetwaarde (48 kHz) en die onthouden terwijl het bord op 96 draait.
+    // Dat gebeurde: ALSA meldde "Rates: 48000", de ingress was 9,34 MB/s --
+    // exact de halve snelheid -- en de ring gaf 47.400 underruns/s.
+    //
+    // Zet deze regel niet hogerop en haal hem niet weg: dan is de race terug,
+    // en hij valt alleen op als je de USB-poort na elke flash opnieuw cyclet.
+#ifdef CSR_MAIN_USB_PHY_HOLD_ADDR
+    main_usb_phy_hold_write(0);
+    printf("[usb] PHYs vrijgegeven op %lu Hz\n", (unsigned long)g_fs);
 #endif
     telem_init();
     // Start the gateware talker from boot so the USB ring always has a

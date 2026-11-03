@@ -930,6 +930,38 @@ class AVBSoC(SoCCore):
                                        odomain="usb")
             _rate_port = {"i_rate_48k_i": _r48_usb}
 
+            # ---- HOUD DE PHYs IN RESET TOT DE RATE BEKEND IS ---------------
+            # De rate-CSR reset op 1 (48 kHz), maar het USB-device enumereert
+            # zodra het BITSTREAM laadt -- en de firmware komt er pas seconden
+            # later via netload bij om de echte rate te zetten. De host leest de
+            # rate tijdens die eerste enumeratie en ONTHOUDT hem, dus een bord
+            # dat op 96 kHz staat werd als 48 kHz gestreamd: halve aanvoer,
+            # 47.400 underruns/s, onbruikbare audio.
+            #
+            # Gemeten op 2026-11-03: bord meldt 96000 Hz, ALSA meldt
+            # "Rates: 48000" en ingress 9,34 MB/s = exact de 48 kHz-snelheid.
+            # Een poort-cycle repareerde het, en dat is ook waarom ik het niet
+            # eerder zag: ik cyclede na elke flash de poorten voor mijn
+            # metingen, dus bij mij enumereerde hij altijd opnieuw met de goede
+            # waarde. In productie is er niemand die dat doet.
+            #
+            # Dus: RST van beide PHYs vasthouden tot de firmware deze CSR
+            # vrijgeeft. RST is active-HIGH op de USB3300, dus hold=1 betekent
+            # in reset. Een paar seconden later verschijnt het device, met een
+            # rate die dan al klopt.
+            self.usb_phy_hold = CSRStorage(1, reset=1,
+                description="1 = hold BOTH ULPI PHYs in reset. Reset value is "
+                            "1 on purpose: firmware clears it after writing the "
+                            "sample rate, so the host can never enumerate and "
+                            "cache a stale rate. Clearing it early re-creates "
+                            "that bug.")
+
+        # RST active-HIGH: de subsysteem-uitgang OF de hold houdt de PHY in reset.
+        _ulpi_rst_w = Signal()
+        _hold = (self.usb_phy_hold.storage
+                 if getattr(platform, "_usb_dual_rate", False) else 0)
+        self.comb += ulpi.rst.eq(_ulpi_rst_w | _hold)
+
         self.specials += Instance("usb_avb_subsystem",
             i_clk       = ClockSignal("sys"),
             i_rst       = ResetSignal("sys"),
@@ -940,7 +972,7 @@ class AVBSoC(SoCCore):
             o_ulpi_data_o  = ulpi_data_ts.o,
             o_ulpi_data_oe = ulpi_data_ts.oe,
             o_ulpi_stp_o   = ulpi.stp,
-            o_ulpi_rst_o   = ulpi.rst,
+            o_ulpi_rst_o   = _ulpi_rst_w,
             o_sample_lo             = sample_lo_w,
             o_sample_hi             = sample_hi_w,
             o_sample_readable       = sample_rdy_w,
@@ -1037,6 +1069,8 @@ class AVBSoC(SoCCore):
             self.usb2_fb_ovr = CSRStorage(32, description="Backup USB async-feedback override (0=auto).")
             usb2_block_level_usb2 = Signal(8)
             self.specials += _MultiReg(usb_block_level, usb2_block_level_usb2, odomain="usb2")
+            _ulpi2_rst_w = Signal()
+            self.comb += ulpi2.rst.eq(_ulpi2_rst_w | _hold)
             _r48_usb2 = Signal()
             if getattr(platform, "_usb_dual_rate", False):
                 self.specials += _MultiReg(self.usb_rate_48k.storage,
@@ -1046,7 +1080,7 @@ class AVBSoC(SoCCore):
                 i_usb_clk=ClockSignal("usb2"),
                 i_ulpi_dir_i=ulpi2_dir_d, i_ulpi_nxt_i=ulpi2_nxt_d, i_ulpi_data_i=ulpi2_data_d,
                 o_ulpi_data_o=ulpi2_data_ts.o, o_ulpi_data_oe=ulpi2_data_ts.oe,
-                o_ulpi_stp_o=ulpi2.stp, o_ulpi_rst_o=ulpi2.rst,
+                o_ulpi_stp_o=ulpi2.stp, o_ulpi_rst_o=_ulpi2_rst_w,
                 o_sample_lo=sample_lo2_w, o_sample_hi=sample_hi2_w,
                 o_sample_readable=sample_rdy2_w, i_sample_pop=sample_pop2_w,
                 o_sample_overflow_count=sample_ovf2_w,
