@@ -84,8 +84,17 @@ sub = USBAVBSubsystem(standalone=True,
                       serial={serial!r},
                       product_id={product_id!r},
                       dual_rate={dual_rate!r})
-with open({out!r}, "w") as f:
-    f.write(verilog.convert(sub, name={module!r}, ports=sub.ports()))
+# EERST ELABOREREN, DAN SCHRIJVEN. Een `open(out,"w")` voor de convert laat
+# bij een fout een 0-byte bestand achter, en de volgende gateware-build faalt
+# dan op "Module `\usb_avb_subsystem2' is not part of the design" -- een
+# melding die niets zegt over de echte oorzaak. Dat is op 2026-10-30 precies
+# een build gekost.
+_v = verilog.convert(sub, name={module!r}, ports=sub.ports())
+import os as _os
+_tmp = {out!r} + ".tmp"
+with open(_tmp, "w") as f:
+    f.write(_v)
+_os.replace(_tmp, {out!r})
 print("wrote", {out!r}, "module", {module!r})
 '''
 

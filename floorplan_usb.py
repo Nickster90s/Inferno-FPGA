@@ -114,6 +114,19 @@ _HAS_USB2 = any(USB2_PREFIX in c for c, _ in ctx.cells)
 _split = os.environ.get("NEXTPNR_USB_SPLIT", "") == "1"
 if _HAS_USB2 and not _u:
     UX1, UY1 = 48, 156                        # USB1 -> tall left column (avb-aes3's bewezen breedte)
+# In de LICHTE modus stopt de doos onder de eth-pads. Moet HIER staan en niet
+# lager in het bestand: createRectangularRegion() gebruikt UY1 verderop, dus een
+# toekenning na die aanroep doet niets (en dat kostte een build).
+# Y AFTOPPEN WERKT NIET -- OPT-IN GELATEN, DEFAULT UIT.
+# Gedachte was: de doos stopt onder de eth-pads (TX Y51-54, RX Y55-72) want
+# alle ULPI-pads liggen onder Y50. Gemeten 2026-11-03: met USBControlEndpoint
+# erbij zijn dat 2276 cellen, en in X 0..48 x Y 0..50 STALT HeAP -- die
+# aftopping laat een derde van de oppervlakte over. Met een RECHTHOEK kun je
+# niet om een band van 22 rijen heen zonder de doos onhaalbaar te maken.
+# Herstel van eth_rx loopt daarom via de SEED, niet via de geometrie: dat getal
+# varieerde over seeds van 109 tot 173 MHz.
+if os.environ.get("NEXTPNR_USB_FP_LIGHT_YMAX", "") and not _u:
+    UY1 = int(os.environ["NEXTPNR_USB_FP_LIGHT_YMAX"])
 U2X0, U2Y0, U2X1, U2Y1 = 0, 0, 48, 156        # USB2 -> zelfde kolom, maar wordt niet gevuld (zie _u2_on)
 # ---- GEMETEN PAD-COORDINATEN, 2026-10-30 ---------------------------------
 # Uit een GEROUTEERD ontwerp (NEXTPNR_BEL in de routed json), niet geraden:
@@ -396,14 +409,60 @@ for cname, cell in ctx.cells:
 # een echte "failed to place chain ... PACKED_CARRY4". Een strikt ZWAKKERE
 # constraint is de enige richting die nog niet gemeten is.
 _light = os.environ.get("NEXTPNR_USB_FP_LIGHT", "") == "1"
+# Welk deel van het control endpoint meegaat. "get_descriptor" is het gemeten
+# kritieke pad; "usbcontrolendpoint" trekt de hele ouder (2276 cellen, plaatst
+# alleen op seed 7); "" laat het control endpoint helemaal vrij (~690 cellen,
+# plaatst overal maar usb blijft op ~62 MHz).
+_ctrl_match = os.environ.get("NEXTPNR_USB_FP_CTRL", "get_descriptor").lower()
+
+# ---- IN DE LICHTE MODUS IS DE DOOS OOK IN Y BEGRENSD ------------------------
+# Y 0..156 (de volle kolom) bedekt ook de ETH-pad-rijen -- zie de kop van dit
+# bestand: eth TX X1,Y51-54 en eth RX X1,Y55-72, terwijl ALLE ULPI-pads onder
+# Y50 zitten (Main Y23-49, Backup Y1-32 gemeten).
+#
+# Met alleen de pad-nets (~690 cellen) stoorde die overlap niet. Zodra
+# USBControlEndpoint erbij kwam (2273 cellen) wel: gemeten 2026-11-03 ging de
+# usb-klok van 62,37 naar 80,47 MHz -- de winst waar het om ging -- maar eth_rx
+# zakte van 138 naar 117,01 MHz, dus ONDER de 125 die gigabit-RGMII eist. De
+# USB-logica verdrong de eth-RX-datapath uit zijn eigen hoek bij zijn pads.
+#
+# Dus de doos stopt onder de eth-pads. De USB-cellen hebben daar niets te
+# zoeken: hun eigen pads liggen allemaal lager.
 
 # Pass 2 — net connectivity: pull driver + users of every usb-named net.
 # This is what catches the anonymous combinational soup.
 nnets = 0
 for nname, net in ctx.nets:
     if _light:
-        # Alleen de pad-kant: nets die de ULPI-pinnen raken.
-        if "ulpi" not in nname.lower() or "ulpi2" in nname.lower():
+        _n = nname.lower()
+        # Twee groepen, beide GEMETEN nodig:
+        #  1. de pad-kant -- nets die de ULPI-pinnen raken. Dit is waarvoor de
+        #     floorplan in mei is toegevoegd (IOB->eerste-flop op 60 MHz).
+        #  2. het CONTROL ENDPOINT. Het kritieke pad van cd_usb is niet de
+        #     pad-kant maar de byte-teller van get_descriptor in LUNA's
+        #     StandardRequestHandler, met zijn CARRY4-keten -- uit de
+        #     build-log van 2026-10-30:
+        #       Source StandardRequestHandler.get_descriptor.bytes_sent[2]
+        #       Net ... budget 0.327 ns, route 2.4 ns, (70,138) -> (33,100)
+        #     Die net liep dus dwars over de die omdat de lichte doos hem niet
+        #     pakte. Daarmee bleef het usb-domein op ~62 MHz hangen tegen de 60
+        #     die de ULPI-bus nodig heeft, en faalden de clock-source
+        #     class-requests op de krapste PHY in ruim de helft van de
+        #     enumeraties.
+        #     Dit is het middenpad tussen de lichte doos (~690 cellen) en de
+        #     volle (~3000, die HeAP laat stallen).
+        if "ulpi2" in _n:
+            continue
+        # GET_DESCRIPTOR, NIET HET HELE CONTROL ENDPOINT.
+        # Het hele USBControlEndpoint trekken gaf 2276 cellen en werkte
+        # (usb 62 -> 80,47 MHz), maar alleen op seed 7: de andere TWAALF seeds
+        # stallen allemaal, dus die doos zit op de rand van haalbaarheid net als
+        # de volle van ~3000. En met een enkele seed kon eth_rx niet hersteld
+        # worden, die zakte daar naar 117 MHz tegen de vereiste 125.
+        # De build-log noemt het kritieke pad exact:
+        #   StandardRequestHandler.get_descriptor.bytes_sent[2] -> CARRY4
+        # dus trek dat, en niet zijn hele ouder.
+        if ("ulpi" not in _n) and (_ctrl_match not in _n):
             continue
     elif USB_PREFIX not in nname or USB2_PREFIX in nname:  # USB1 only (excl USB2)
         continue
