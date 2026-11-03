@@ -129,26 +129,47 @@ Not expected to matter for the production target: macOS + QLab handles a
 *(A first hypothesis — PipeWire's `default.clock.allowed-rates` not containing
 96000 — is weakened: Inferno DVS runs at 96 kHz on that same machine.)*
 
-### 3. Bench bandwidth, production topology
+### 3. ~~Bench bandwidth~~ — the limit I claimed does not exist
 
-At 96 kHz each PHY needs high-bandwidth isochronous: 3 transactions per
-microframe, 2880 B, ~23 MB/s. Two PHYs **streaming** at once does not fit one
-host controller. On this bench both sit on bus 001, so 48ch/96k on both
-simultaneously cannot be verified here. In production each PHY has its own Mac,
-so it is not a limit — but note that many USB hubs and some older xHCI
-controllers refuse high-bandwidth iso endpoints. Plug into a motherboard port.
+I had written that two PHYs streaming 48ch/96k at once "does not fit one host
+controller", on the arithmetic that each reserves 2880 B/microframe = ~23 MB/s.
+**Measured 2026-11-03 and it is wrong:** both stream simultaneously on this
+bench, on one controller, bus 001:
 
-Enumeration and configuration of both at once **do** work on one controller;
-it is the streaming reservation that will not.
+```
+Main   18,446,844 B/s  +0.08% vs nominal  leak +0.00%  LIVE
+Backup 18,446,824 B/s  +0.08% vs nominal  leak +0.00%  LIVE
+```
 
-### 4. The A/B mux has never been exercised end to end
+36.9 MB/s together. The error was comparing a per-endpoint reservation against
+the controller's total as if 2 × 23 had to fit in ~24; high-speed isochronous
+has roughly 48 MB/s of budget, and 2 × 2880 B per microframe fits inside it.
 
-`tools/usbsrc.py backup` sets the request, but the handover is frame-aligned in
-gateware: `live` follows only when the candidate presents a channel-0-of-frame
-marker. With nothing streaming, both sources read `NO INGRESS` and the request
-stays pending — correct behaviour, but it means the switch itself is untested.
-To test: stream 48ch/96k into Backup, confirm ingress climbs to ~9.216 MB/s per
-8-channel block, then switch and check `live` follows and `handovers` increments.
+What does remain true: many USB hubs and some older xHCI controllers refuse
+high-bandwidth isochronous endpoints altogether. Plug into a motherboard port,
+not a hub or a dock.
+
+### 4. ~~The A/B mux has never been exercised end to end~~ — DONE 2026-11-03
+
+Exercised in both directions at 96 kHz with both sources live:
+
+```
+to Backup:   select 1  live 1  handovers 1
+back to Main: select 0  live 0  handovers 2
+```
+
+Both sources kept streaming at +0.08% with zero leak, `block_level` stayed at
+target (65-66) and `overrun` stayed 0. The first handover showed one brief
+underrun burst (412/s, back to 0 immediately) — that is the frame-aligned
+commit waiting a frame for the candidate's channel-0 marker, which is what it
+is for. The second was clean.
+
+The prerequisite is the one that made this look broken before: the handover
+cannot complete unless the candidate is **actually delivering frames**. With
+nothing streaming to it, `select` moves and `live` does not, permanently — the
+gateware protecting the audio, not a fault. Start a stream to the standby
+first (`aplay -D hw:<Backup>,0 -c 48 -r 96000 -f S32_LE ...`) and check its
+ingress is at nominal before switching.
 
 ### 5. The 3-hour wedge is still open
 
