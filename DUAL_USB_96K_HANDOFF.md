@@ -20,7 +20,29 @@ two distinct, correctly named cards:
  3 [Backup ]: USB-Audio - N-Series Dante Backup  at usb-...-10  1209:eab2  serial 1
 ```
 
-**96 kHz works.** Both cards report `Format: S32_LE  Channels: 48  Rates: 96000`.
+**96 kHz works, and the data path is now measured, not inferred.** Both cards
+report `Format: S32_LE  Channels: 48  Rates: 96000`, and under a real
+48-channel stream, two minutes continuous:
+
+```
+rx_beats 18,431,959/s   ep_out 18,431,959/s   leak -0.01%
+overrun 0/s             underrun 0.0/s        block_level 65 (target 64)
+ingress exactly nominal (18,432,000 B/s)
+```
+
+Getting there took finding **five** constants that were tuned as absolutes on
+48 kHz and had to be relative: the NCO increment, the Dante timestamp
+arithmetic, the packetizer's subsecond wrap, the feedback clamp
+(`FB_LO/FB_HI`, which pinned 96 kHz feedback at 6.5 samples/µframe so Linux
+rejected it and ran open-loop), and the feedback gains (`err<<6`, half the
+relative authority at 96 kHz). Plus one that was not a constant at all: LUNA's
+iso OUT endpoint `buffer_size`, defaulted to two transactions while 96 kHz
+delivers three, silently discarding the third.
+
+**That is the pattern to expect for the next one: something tuned as an
+absolute value on one rate that should have been relative to it.** Enumeration
+and descriptors tell you nothing about any of them — all five were found by
+playing audio and reading `rx_beats` against `ep_out`.
 The rate is chosen on the Dante side, persisted in `cfg.sample_rate`, and
 applied live — `g_fs`, the media-clock NCO, the packetizer's subsecond wrap and
 the USB clock source are all rewritten without a reset. Switched 48↔96 three

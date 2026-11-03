@@ -5,6 +5,24 @@
 module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_data_oe, ulpi_stp_o, ulpi_rst_o, sample_lo, sample_hi, sample_readable, sample_pop, sample_overflow_count, dbg_rx_beats, dbg_ep_out, sample_strobe, block_level, fb_ovr, rate_48k_i, clk, rst, usb_clk
 );
   reg \$auto$verilog_backend.cc:2334:dump_module$1  = 0;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:540" *)
+  wire \$101 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:540" *)
+  wire \$103 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:541" *)
+  wire \$105 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:543" *)
+  wire \$107 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:555" *)
+  wire \$109 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:562" *)
+  wire [31:0] \$111 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:562" *)
+  wire [14:0] \$112 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:562" *)
+  wire [31:0] \$114 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:562" *)
+  wire [31:0] \$116 ;
   (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:186" *)
   wire [7:0] \$12 ;
   (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:186" *)
@@ -13,102 +31,108 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
   wire \$15 ;
   (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:185" *)
   wire \$16 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:346" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:366" *)
   wire [6:0] \$19 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:346" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:366" *)
   wire [6:0] \$20 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:361" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:381" *)
   wire \$22 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:367" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:387" *)
   wire \$24 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:367" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:387" *)
   wire \$26 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:368" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:388" *)
   wire [32:0] \$28 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:368" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:388" *)
   wire [32:0] \$29 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:384" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:404" *)
   wire \$31 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:385" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:405" *)
   wire [32:0] \$33 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:385" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:405" *)
   wire [32:0] \$34 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:386" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:406" *)
   wire \$36 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:387" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:407" *)
   wire [32:0] \$38 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:387" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:407" *)
   wire [32:0] \$39 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:397" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:417" *)
   wire \$41 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:450" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:470" *)
   wire [8:0] \$43 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:472" *)
-  wire [24:0] \$45 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:476" *)
-  wire [37:0] \$47 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:476" *)
-  wire [35:0] \$48 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:476" *)
-  wire [34:0] \$49 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:476" *)
-  wire [35:0] \$52 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:476" *)
-  wire [15:0] \$53 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:476" *)
-  wire [36:0] \$56 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:476" *)
-  wire [23:0] \$58 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:494" *)
+  wire [34:0] \$45 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:494" *)
+  wire [34:0] \$46 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:495" *)
+  wire [31:0] \$48 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:515" *)
+  wire [24:0] \$50 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:519" *)
+  wire [37:0] \$52 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:519" *)
+  wire [35:0] \$53 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:519" *)
+  wire [34:0] \$54 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:519" *)
+  wire [35:0] \$57 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:519" *)
+  wire [15:0] \$58 ;
   (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:178" *)
   wire \$6 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:476" *)
-  wire [37:0] \$60 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:477" *)
-  wire \$62 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:479" *)
-  wire \$64 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:485" *)
-  wire [20:0] \$66 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:485" *)
-  wire [20:0] \$67 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:489" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:519" *)
+  wire [36:0] \$61 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:519" *)
+  wire [23:0] \$63 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:519" *)
+  wire [37:0] \$65 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:496" *)
+  wire [32:0] \$67 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:520" *)
   wire \$69 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:420" *)
-  wire [19:0] \$71 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:487" *)
-  wire [8:0] \$73 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:487" *)
-  wire [8:0] \$74 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:489" *)
-  wire \$76 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:492" *)
-  wire \$78 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:497" *)
+  wire [33:0] \$71 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:497" *)
+  wire [32:0] \$72 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:522" *)
+  wire \$75 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:496" *)
+  wire [32:0] \$77 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:496" *)
+  wire [32:0] \$78 ;
   (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:185" *)
   wire \$8 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:492" *)
-  wire \$80 ;
   (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:497" *)
-  wire \$82 ;
+  wire [32:0] \$80 ;
   (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:497" *)
-  wire \$84 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:497" *)
+  wire [32:0] \$81 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:528" *)
+  wire [20:0] \$83 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:528" *)
+  wire [20:0] \$84 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:532" *)
   wire \$86 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:498" *)
-  wire \$88 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:440" *)
+  wire [19:0] \$88 ;
   (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:185" *)
   wire \$9 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:500" *)
-  wire \$90 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:512" *)
-  wire \$92 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:519" *)
-  wire [31:0] \$94 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:519" *)
-  wire [14:0] \$95 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:519" *)
-  wire [31:0] \$97 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:519" *)
-  wire [31:0] \$99 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:530" *)
+  wire [8:0] \$90 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:530" *)
+  wire [8:0] \$91 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:532" *)
+  wire \$93 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:535" *)
+  wire \$95 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:535" *)
+  wire \$97 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:540" *)
+  wire \$99 ;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:492" *)
+  wire [31:0] _fb_nom;
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:493" *)
+  wire [31:0] _fb_win;
   (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:121" *)
   input [7:0] block_level;
   wire [7:0] block_level;
@@ -127,11 +151,11 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/amaranth/hdl/ir.py:508" *)
   input clk;
   wire clk;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:427" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:447" *)
   reg [19:0] clock_counter = 20'h00000;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:427" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:447" *)
   reg [19:0] \clock_counter$next ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:337" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:357" *)
   reg [5:0] cur_ch;
   (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:113" *)
   output [31:0] dbg_ep_out;
@@ -143,28 +167,28 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
   wire dm_pulldown;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/interface/utmi.py:96" *)
   wire dp_pulldown;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:388" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:408" *)
   reg [31:0] ep_out_sys = 32'd0;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:388" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:408" *)
   reg [31:0] \ep_out_sys$next ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:383" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:403" *)
   reg [31:0] ep_out_usb = 32'd0;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:383" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:403" *)
   reg [31:0] \ep_out_usb$next ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:449" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:469" *)
   wire [8:0] err;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:475" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:518" *)
   reg [31:0] fb_clamp;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:424" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:444" *)
   wire [7:0] fb_level_sync_level_usb;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:474" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:517" *)
   wire [33:0] fb_new;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:511" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:554" *)
   reg [31:0] fb_out;
   (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:122" *)
   input [31:0] fb_ovr;
   wire [31:0] fb_ovr;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:509" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:552" *)
   wire [31:0] fb_ovr_sync_fb_ovr_usb;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/amlib/utils/edgetopulse.py:16" *)
   reg fb_strobe_edge_edge_in = 1'h0;
@@ -172,29 +196,29 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
   reg \fb_strobe_edge_edge_in$next ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/amlib/utils/edgetopulse.py:17" *)
   wire fb_strobe_edge_pulse_out;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:417" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:437" *)
   wire fb_strobe_sync_strobe_usb;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:429" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:449" *)
   reg [31:0] fb_value = 32'd393216;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:429" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:449" *)
   reg [31:0] \fb_value$next ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/interface/utmi.py:96" *)
   wire host_disconnect;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/interface/utmi.py:96" *)
   wire id_digital;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:470" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:513" *)
   reg [23:0] integ = 24'h000000;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:470" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:513" *)
   reg [23:0] \integ$next ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:471" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:514" *)
   wire [24:0] integ_n;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/amlib/stream/__init__.py:59" *)
   wire last;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/interface/utmi.py:96" *)
   wire [1:0] line_state;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:454" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:471" *)
   reg [19:0] nco_rate = 20'h00600;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:454" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:471" *)
   reg [19:0] \nco_rate$next ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/interface/utmi.py:96" *)
   wire [1:0] op_mode;
@@ -216,13 +240,13 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
   wire out2ch_valid;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/amlib/stream/__init__.py:59" *)
   wire \out2ch_valid$3 ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:374" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:394" *)
   reg [31:0] overflow_sys = 32'd0;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:374" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:394" *)
   reg [31:0] \overflow_sys$next ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:366" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:386" *)
   reg [31:0] overflow_usb = 32'd0;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:366" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:386" *)
   reg [31:0] \overflow_usb$next ;
   (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:83" *)
   input rate_48k_i;
@@ -232,13 +256,13 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
   wire rst;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/interface/utmi.py:96" *)
   wire rx_active;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:388" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:408" *)
   reg [31:0] rx_beats_sys = 32'd0;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:388" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:408" *)
   reg [31:0] \rx_beats_sys$next ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:383" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:403" *)
   reg [31:0] rx_beats_usb = 32'd0;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:383" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:403" *)
   reg [31:0] \rx_beats_usb$next ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/interface/utmi.py:96" *)
   wire [7:0] rx_data;
@@ -264,17 +288,17 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
   (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:120" *)
   input sample_strobe;
   wire sample_strobe;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:336" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:356" *)
   reg [5:0] seq = 6'h00;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:336" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:356" *)
   reg [5:0] \seq$next ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/interface/utmi.py:96" *)
   wire session_valid;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:428" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:448" *)
   reg [7:0] sof_counter = 8'h00;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:428" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:448" *)
   reg [7:0] \sof_counter$next ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:420" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:440" *)
   wire strobe_tick;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/interface/utmi.py:96" *)
   wire term_select;
@@ -353,6 +377,14 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/interface/utmi.py:96" *)
   wire [1:0] xcvr_select;
   assign \$9  = & (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:185" *) wrap_rstcnt;
+  assign \$99  = $signed(err) <= (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:540" *) $signed(9'h020);
+  assign \$101  = $signed(err) >= (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:540" *) $signed(6'h20);
+  assign \$103  = \$99  & (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:540" *) \$101 ;
+  assign \$105  = $signed(integ_n) > (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:541" *) $signed(25'h0080000);
+  assign \$107  = $signed(integ_n) < (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:543" *) $signed(20'h80000);
+  assign \$8  = ~ (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:185" *) \$9 ;
+  assign \$109  = | (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:555" *) fb_ovr_sync_fb_ovr_usb;
+  assign \$114  = fb_out >>> (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:562" *) \$112 ;
   always @(posedge \usb_clk$1 )
     wrap_rstcnt <= \wrap_rstcnt$next ;
   always @(posedge \usb_clk$1 )
@@ -371,7 +403,6 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
     clock_counter <= \clock_counter$next ;
   always @(posedge \usb_clk$1 )
     sof_counter <= \sof_counter$next ;
-  assign \$8  = ~ (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:185" *) \$9 ;
   always @(posedge \usb_clk$1 )
     nco_rate <= \nco_rate$next ;
   always @(posedge \usb_clk$1 )
@@ -387,39 +418,37 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
   assign \$13  = wrap_rstcnt + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:186" *) 1'h1;
   assign \$16  = & (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:185" *) wrap_rstcnt;
   assign \$15  = ~ (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:185" *) \$16 ;
-  assign \$20  = seq + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:346" *) 1'h1;
-  assign \$22  = \out2ch_valid$3  & (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:361" *) bridge_fifo_w_rdy;
-  assign \$24  = ~ (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:367" *) bridge_fifo_w_rdy;
-  assign \$26  = \out2ch_valid$3  & (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:367" *) \$24 ;
-  assign \$29  = overflow_usb + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:368" *) 1'h1;
-  assign \$31  = usb_next & (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:384" *) usb_valid;
-  assign \$34  = rx_beats_usb + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:385" *) 1'h1;
-  assign \$36  = usb_isochronous_endpoint1__valid & (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:386" *) usb_isochronous_endpoint1__ready;
-  assign \$39  = ep_out_usb + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:387" *) 1'h1;
-  assign \$41  = sample_pop & (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:397" *) bridge_fifo_r_rdy;
-  assign \$43  = 7'h40 - (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:450" *) fb_level_sync_level_usb;
-  assign \$45  = $signed(integ) + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:472" *) $signed(err);
-  assign \$48  = + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:476" *) \$49 ;
-  assign \$52  = + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:476" *) $signed(\$53 );
-  assign \$56  = $signed(\$48 ) + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:476" *) $signed(\$52 );
-  assign \$60  = $signed(\$56 ) + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:476" *) $signed(\$58 );
-  assign \$62  = $signed(fb_new) < (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:477" *) $signed(34'h000058000);
-  assign \$64  = $signed(fb_new) > (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:479" *) $signed(34'h000068000);
-  assign \$67  = clock_counter + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:485" *) 1'h1;
+  assign \$20  = seq + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:366" *) 1'h1;
+  assign \$22  = \out2ch_valid$3  & (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:381" *) bridge_fifo_w_rdy;
+  assign \$24  = ~ (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:387" *) bridge_fifo_w_rdy;
+  assign \$26  = \out2ch_valid$3  & (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:387" *) \$24 ;
+  assign \$29  = overflow_usb + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:388" *) 1'h1;
+  assign \$31  = usb_next & (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:404" *) usb_valid;
+  assign \$34  = rx_beats_usb + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:405" *) 1'h1;
+  assign \$36  = usb_isochronous_endpoint1__valid & (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:406" *) usb_isochronous_endpoint1__ready;
+  assign \$39  = ep_out_usb + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:407" *) 1'h1;
+  assign \$41  = sample_pop & (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:417" *) bridge_fifo_r_rdy;
+  assign \$43  = 7'h40 - (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:470" *) fb_level_sync_level_usb;
+  assign \$50  = $signed(integ) + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:515" *) $signed(err);
+  assign \$53  = + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:519" *) \$54 ;
+  assign \$57  = + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:519" *) $signed(\$58 );
+  assign \$61  = $signed(\$53 ) + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:519" *) $signed(\$57 );
+  assign \$65  = $signed(\$61 ) + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:519" *) $signed(\$63 );
+  assign \$67  = _fb_nom - (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:496" *) _fb_win;
   assign \$6  = ~ (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:178" *) ulpi_dir_i;
-  assign \$69  = ! (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:489" *) sof_counter;
-  assign \$71  = + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:420" *) strobe_tick;
-  assign \$74  = sof_counter + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:487" *) 1'h1;
-  assign \$76  = ! (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:489" *) sof_counter;
-  assign \$78  = ! (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:492" *) sof_counter[2:0];
-  assign \$80  = ! (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:492" *) sof_counter[2:0];
-  assign \$82  = $signed(err) <= (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:497" *) $signed(9'h020);
-  assign \$84  = $signed(err) >= (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:497" *) $signed(6'h20);
-  assign \$86  = \$82  & (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:497" *) \$84 ;
-  assign \$88  = $signed(integ_n) > (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:498" *) $signed(25'h0080000);
-  assign \$90  = $signed(integ_n) < (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:500" *) $signed(20'h80000);
-  assign \$92  = | (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:512" *) fb_ovr_sync_fb_ovr_usb;
-  assign \$97  = fb_out >>> (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:519" *) \$95 ;
+  assign \$69  = $signed(fb_new) < (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:520" *) $signed(\$67 );
+  assign \$72  = _fb_nom + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:497" *) _fb_win;
+  assign \$71  = + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:497" *) \$72 ;
+  assign \$75  = $signed(fb_new) > (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:522" *) $signed(\$71 );
+  assign \$78  = _fb_nom - (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:496" *) _fb_win;
+  assign \$81  = _fb_nom + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:497" *) _fb_win;
+  assign \$84  = clock_counter + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:528" *) 1'h1;
+  assign \$86  = ! (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:532" *) sof_counter;
+  assign \$88  = + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:440" *) strobe_tick;
+  assign \$91  = sof_counter + (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:530" *) 1'h1;
+  assign \$93  = ! (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:532" *) sof_counter;
+  assign \$95  = ! (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:535" *) sof_counter[2:0];
+  assign \$97  = ! (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:535" *) sof_counter[2:0];
   \usb_avb_subsystem.bridge_fifo  bridge_fifo (
     .clk(clk),
     .r_data(bridge_fifo_r_data),
@@ -524,7 +553,7 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
   always @* begin
     if (\$auto$verilog_backend.cc:2334:dump_module$1 ) begin end
     (* full_case = 32'd1 *)
-    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:338" *)
+    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:358" *)
     if (\out2ch_first$2 ) begin
       cur_ch = 6'h00;
     end else begin
@@ -534,10 +563,10 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
   always @* begin
     if (\$auto$verilog_backend.cc:2334:dump_module$1 ) begin end
     \seq$next  = seq;
-    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:342" *)
+    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:362" *)
     if (\out2ch_valid$3 ) begin
       (* full_case = 32'd1 *)
-      (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:343" *)
+      (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:363" *)
       if (\out2ch_first$2 ) begin
         \seq$next  = 6'h01;
       end else begin
@@ -552,7 +581,7 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
   always @* begin
     if (\$auto$verilog_backend.cc:2334:dump_module$1 ) begin end
     \overflow_usb$next  = overflow_usb;
-    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:367" *)
+    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:387" *)
     if (\$26 ) begin
       \overflow_usb$next  = \$29 [31:0];
     end
@@ -572,7 +601,7 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
   always @* begin
     if (\$auto$verilog_backend.cc:2334:dump_module$1 ) begin end
     \rx_beats_usb$next  = rx_beats_usb;
-    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:384" *)
+    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:404" *)
     if (\$31 ) begin
       \rx_beats_usb$next  = \$34 [31:0];
     end
@@ -584,7 +613,7 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
   always @* begin
     if (\$auto$verilog_backend.cc:2334:dump_module$1 ) begin end
     \ep_out_usb$next  = ep_out_usb;
-    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:386" *)
+    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:406" *)
     if (\$36 ) begin
       \ep_out_usb$next  = \$39 [31:0];
     end
@@ -646,11 +675,11 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
   always @* begin
     if (\$auto$verilog_backend.cc:2334:dump_module$1 ) begin end
     (* full_case = 32'd1 *)
-    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:477" *)
-    if (\$62 ) begin
-      fb_clamp = 32'd360448;
-    end else if (\$64 ) begin
-      fb_clamp = 32'd425984;
+    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:520" *)
+    if (\$69 ) begin
+      fb_clamp = \$78 [31:0];
+    end else if (\$75 ) begin
+      fb_clamp = \$81 [31:0];
     end else begin
       fb_clamp = fb_new[31:0];
     end
@@ -658,15 +687,15 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
   always @* begin
     if (\$auto$verilog_backend.cc:2334:dump_module$1 ) begin end
     \clock_counter$next  = clock_counter;
-    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:484" *)
+    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:527" *)
     if (strobe_tick) begin
-      \clock_counter$next  = \$67 [19:0];
+      \clock_counter$next  = \$84 [19:0];
     end
-    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:486" *)
+    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:529" *)
     if (usb_sof_detected) begin
-      (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:489" *)
-      if (\$69 ) begin
-        \clock_counter$next  = \$71 ;
+      (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:532" *)
+      if (\$86 ) begin
+        \clock_counter$next  = \$88 ;
       end
     end
     (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/amaranth/hdl/xfrm.py:503" *)
@@ -677,9 +706,9 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
   always @* begin
     if (\$auto$verilog_backend.cc:2334:dump_module$1 ) begin end
     \sof_counter$next  = sof_counter;
-    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:486" *)
+    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:529" *)
     if (usb_sof_detected) begin
-      \sof_counter$next  = \$74 [7:0];
+      \sof_counter$next  = \$91 [7:0];
     end
     (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/amaranth/hdl/xfrm.py:503" *)
     if (usb_rst) begin
@@ -689,10 +718,10 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
   always @* begin
     if (\$auto$verilog_backend.cc:2334:dump_module$1 ) begin end
     \nco_rate$next  = nco_rate;
-    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:486" *)
+    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:529" *)
     if (usb_sof_detected) begin
-      (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:489" *)
-      if (\$76 ) begin
+      (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:532" *)
+      if (\$93 ) begin
         \nco_rate$next  = clock_counter;
       end
     end
@@ -704,10 +733,10 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
   always @* begin
     if (\$auto$verilog_backend.cc:2334:dump_module$1 ) begin end
     \fb_value$next  = fb_value;
-    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:486" *)
+    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:529" *)
     if (usb_sof_detected) begin
-      (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:492" *)
-      if (\$78 ) begin
+      (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:535" *)
+      if (\$95 ) begin
         \fb_value$next  = fb_clamp;
       end
     end
@@ -719,17 +748,17 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
   always @* begin
     if (\$auto$verilog_backend.cc:2334:dump_module$1 ) begin end
     \integ$next  = integ;
-    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:486" *)
+    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:529" *)
     if (usb_sof_detected) begin
-      (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:492" *)
-      if (\$80 ) begin
-        (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:497" *)
-        if (\$86 ) begin
+      (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:535" *)
+      if (\$97 ) begin
+        (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:540" *)
+        if (\$103 ) begin
           (* full_case = 32'd1 *)
-          (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:498" *)
-          if (\$88 ) begin
+          (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:541" *)
+          if (\$105 ) begin
             \integ$next  = 24'h080000;
-          end else if (\$90 ) begin
+          end else if (\$107 ) begin
             \integ$next  = 24'hf80000;
           end else begin
             \integ$next  = integ_n[23:0];
@@ -745,8 +774,8 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
   always @* begin
     if (\$auto$verilog_backend.cc:2334:dump_module$1 ) begin end
     (* full_case = 32'd1 *)
-    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:512" *)
-    if (\$92 ) begin
+    (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:555" *)
+    if (\$109 ) begin
       fb_out = fb_ovr_sync_fb_ovr_usb;
     end else begin
       fb_out = fb_value;
@@ -757,16 +786,21 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
   assign \$28  = \$29 ;
   assign \$33  = \$34 ;
   assign \$38  = \$39 ;
-  assign \$47  = \$60 ;
-  assign \$66  = \$67 ;
-  assign \$73  = \$74 ;
-  assign \$94  = \$99 ;
+  assign \$45  = \$46 ;
+  assign \$52  = \$65 ;
+  assign \$77  = \$78 ;
+  assign \$80  = \$81 ;
+  assign \$83  = \$84 ;
+  assign \$90  = \$91 ;
+  assign \$111  = \$116 ;
   assign usb_rst = 1'h0;
   assign usb_connect = 1'h1;
-  assign usb_value = \$99 [7:0];
+  assign usb_value = \$116 [7:0];
   assign usb_bytes_in_frame = 12'h004;
-  assign fb_new = \$60 [33:0];
-  assign integ_n = \$45 ;
+  assign fb_new = \$65 [33:0];
+  assign integ_n = \$50 ;
+  assign _fb_win = \$48 ;
+  assign _fb_nom = \$46 [31:0];
   assign err = \$43 ;
   assign strobe_tick = fb_strobe_edge_pulse_out;
   assign bridge_fifo_r_en = \$41 ;
@@ -794,12 +828,14 @@ module usb_avb_subsystem(ulpi_dir_i, ulpi_nxt_i, ulpi_data_i, ulpi_data_o, ulpi_
   assign ulpi_data_oe = \$6 ;
   assign ulpi_rst_o = 1'h0;
   assign \usb_clk$1  = usb_clk;
-  assign \$49  = { 7'h00, nco_rate, 8'h00 };
-  assign \$53  = { \$43 [8], \$43 , 6'h00 };
-  assign \$58  = { integ[23], integ[23], integ[23], integ[23], integ[23], integ[23], integ[23:6] };
-  assign \$95  = { usb_address, 3'h0 };
-  assign \$99 [31:8] = 24'h000000;
-  assign \$99 [7:0] = \$97 [7:0];
+  assign \$46  = { 7'h00, nco_rate, 8'h00 };
+  assign \$48  = { 4'h0, \$46 [31:4] };
+  assign \$54  = { 7'h00, nco_rate, 8'h00 };
+  assign \$58  = { \$43 [8], \$43 , 6'h00 };
+  assign \$63  = { integ[23], integ[23], integ[23], integ[23], integ[23], integ[23], integ[23:6] };
+  assign \$112  = { usb_address, 3'h0 };
+  assign \$116 [31:8] = 24'h000000;
+  assign \$116 [7:0] = \$114 [7:0];
 endmodule
 
 (* generator = "Amaranth" *)
@@ -4086,7 +4122,7 @@ module \usb_avb_subsystem.fb_level_sync (level_usb, usb_rst, block_level, usb_cl
   (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:121" *)
   input [7:0] block_level;
   wire [7:0] block_level;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:424" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:444" *)
   output [7:0] level_usb;
   wire [7:0] level_usb;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/amaranth/lib/cdc.py:89" *)
@@ -4117,7 +4153,7 @@ module \usb_avb_subsystem.fb_ovr_sync (fb_ovr_usb, usb_rst, fb_ovr, usb_clk);
   (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:122" *)
   input [31:0] fb_ovr;
   wire [31:0] fb_ovr;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:509" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:552" *)
   output [31:0] fb_ovr_usb;
   wire [31:0] fb_ovr_usb;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/amaranth/lib/cdc.py:89" *)
@@ -4203,7 +4239,7 @@ module \usb_avb_subsystem.fb_strobe_sync (strobe_usb, usb_rst, sample_strobe, us
   reg stage1 = 1'h0;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/amaranth/lib/cdc.py:89" *)
   wire \stage1$next ;
-  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:417" *)
+  (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:437" *)
   output strobe_usb;
   wire strobe_usb;
   (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:152" *)
@@ -12875,7 +12911,7 @@ module \usb_avb_subsystem.usb.USBIsochronousOutStreamEndpoint (isochronous_endpo
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:88" *)
   wire fifo_read_en;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:99" *)
-  wire [10:0] fifo_space_available;
+  wire [11:0] fifo_space_available;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:95" *)
   wire fifo_write_commit;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:93" *)
@@ -13466,9 +13502,9 @@ module \usb_avb_subsystem.usb.USBIsochronousOutStreamEndpoint.fifo (usb_rst, wri
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:169" *)
   wire \$14 ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:172" *)
-  wire [11:0] \$16 ;
+  wire [12:0] \$16 ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:172" *)
-  wire [11:0] \$17 ;
+  wire [12:0] \$17 ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:178" *)
   wire \$19 ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:178" *)
@@ -13484,50 +13520,50 @@ module \usb_avb_subsystem.usb.USBIsochronousOutStreamEndpoint.fifo (usb_rst, wri
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:120" *)
   wire \$3 ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:211" *)
-  wire [12:0] \$31 ;
+  wire [13:0] \$31 ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:211" *)
-  wire [11:0] \$32 ;
+  wire [12:0] \$32 ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:211" *)
-  wire [12:0] \$34 ;
+  wire [13:0] \$34 ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:213" *)
-  wire [12:0] \$36 ;
+  wire [13:0] \$36 ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:213" *)
-  wire [11:0] \$37 ;
+  wire [12:0] \$37 ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:213" *)
-  wire [12:0] \$39 ;
+  wire [13:0] \$39 ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:216" *)
   wire \$41 ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:137" *)
   wire \$5 ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:140" *)
-  wire [11:0] \$7 ;
+  wire [12:0] \$7 ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:140" *)
-  wire [11:0] \$8 ;
+  wire [12:0] \$8 ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:162" *)
-  reg [10:0] committed_read_pointer = 11'h000;
+  reg [11:0] committed_read_pointer = 12'h000;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:162" *)
-  reg [10:0] \committed_read_pointer$next ;
+  reg [11:0] \committed_read_pointer$next ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:129" *)
-  reg [10:0] committed_write_pointer = 11'h000;
+  reg [11:0] committed_write_pointer = 12'h000;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:129" *)
-  reg [10:0] \committed_write_pointer$next ;
+  reg [11:0] \committed_write_pointer$next ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:163" *)
-  reg [10:0] current_read_pointer = 11'h000;
+  reg [11:0] current_read_pointer = 12'h000;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:163" *)
-  reg [10:0] \current_read_pointer$next ;
+  reg [11:0] \current_read_pointer$next ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:130" *)
-  reg [10:0] current_write_pointer = 11'h000;
+  reg [11:0] current_write_pointer = 12'h000;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:130" *)
-  reg [10:0] \current_write_pointer$next ;
+  reg [11:0] \current_write_pointer$next ;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:91" *)
   output empty;
   wire empty;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:97" *)
   wire full;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:168" *)
-  reg [10:0] next_read_pointer;
+  reg [11:0] next_read_pointer;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:136" *)
-  reg [10:0] next_write_pointer;
+  reg [11:0] next_write_pointer;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:89" *)
   input read_commit;
   wire read_commit;
@@ -13540,20 +13576,20 @@ module \usb_avb_subsystem.usb.USBIsochronousOutStreamEndpoint.fifo (usb_rst, wri
   input read_en;
   wire read_en;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:112" *)
-  reg [10:0] rx_fifo_r_addr;
+  reg [11:0] rx_fifo_r_addr;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:112" *)
   wire [9:0] rx_fifo_r_data;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:112" *)
   wire rx_fifo_r_en;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:113" *)
-  wire [10:0] rx_fifo_w_addr;
+  wire [11:0] rx_fifo_w_addr;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:113" *)
   wire [9:0] rx_fifo_w_data;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:113" *)
   wire rx_fifo_w_en;
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:99" *)
-  output [10:0] space_available;
-  reg [10:0] space_available;
+  output [11:0] space_available;
+  reg [11:0] space_available;
   (* src = "/home/lisp/FPGA/avb-usb-host/gateware/usb_avb_subsystem.py:152" *)
   input usb_clk;
   wire usb_clk;
@@ -13572,7 +13608,7 @@ module \usb_avb_subsystem.usb.USBIsochronousOutStreamEndpoint.fifo (usb_rst, wri
   (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:94" *)
   input write_en;
   wire write_en;
-  reg [9:0] read_port [1920:0];
+  reg [9:0] read_port [2880:0];
   initial begin
     read_port[0] = 10'h000;
     read_port[1] = 10'h000;
@@ -15495,6 +15531,966 @@ module \usb_avb_subsystem.usb.USBIsochronousOutStreamEndpoint.fifo (usb_rst, wri
     read_port[1918] = 10'h000;
     read_port[1919] = 10'h000;
     read_port[1920] = 10'h000;
+    read_port[1921] = 10'h000;
+    read_port[1922] = 10'h000;
+    read_port[1923] = 10'h000;
+    read_port[1924] = 10'h000;
+    read_port[1925] = 10'h000;
+    read_port[1926] = 10'h000;
+    read_port[1927] = 10'h000;
+    read_port[1928] = 10'h000;
+    read_port[1929] = 10'h000;
+    read_port[1930] = 10'h000;
+    read_port[1931] = 10'h000;
+    read_port[1932] = 10'h000;
+    read_port[1933] = 10'h000;
+    read_port[1934] = 10'h000;
+    read_port[1935] = 10'h000;
+    read_port[1936] = 10'h000;
+    read_port[1937] = 10'h000;
+    read_port[1938] = 10'h000;
+    read_port[1939] = 10'h000;
+    read_port[1940] = 10'h000;
+    read_port[1941] = 10'h000;
+    read_port[1942] = 10'h000;
+    read_port[1943] = 10'h000;
+    read_port[1944] = 10'h000;
+    read_port[1945] = 10'h000;
+    read_port[1946] = 10'h000;
+    read_port[1947] = 10'h000;
+    read_port[1948] = 10'h000;
+    read_port[1949] = 10'h000;
+    read_port[1950] = 10'h000;
+    read_port[1951] = 10'h000;
+    read_port[1952] = 10'h000;
+    read_port[1953] = 10'h000;
+    read_port[1954] = 10'h000;
+    read_port[1955] = 10'h000;
+    read_port[1956] = 10'h000;
+    read_port[1957] = 10'h000;
+    read_port[1958] = 10'h000;
+    read_port[1959] = 10'h000;
+    read_port[1960] = 10'h000;
+    read_port[1961] = 10'h000;
+    read_port[1962] = 10'h000;
+    read_port[1963] = 10'h000;
+    read_port[1964] = 10'h000;
+    read_port[1965] = 10'h000;
+    read_port[1966] = 10'h000;
+    read_port[1967] = 10'h000;
+    read_port[1968] = 10'h000;
+    read_port[1969] = 10'h000;
+    read_port[1970] = 10'h000;
+    read_port[1971] = 10'h000;
+    read_port[1972] = 10'h000;
+    read_port[1973] = 10'h000;
+    read_port[1974] = 10'h000;
+    read_port[1975] = 10'h000;
+    read_port[1976] = 10'h000;
+    read_port[1977] = 10'h000;
+    read_port[1978] = 10'h000;
+    read_port[1979] = 10'h000;
+    read_port[1980] = 10'h000;
+    read_port[1981] = 10'h000;
+    read_port[1982] = 10'h000;
+    read_port[1983] = 10'h000;
+    read_port[1984] = 10'h000;
+    read_port[1985] = 10'h000;
+    read_port[1986] = 10'h000;
+    read_port[1987] = 10'h000;
+    read_port[1988] = 10'h000;
+    read_port[1989] = 10'h000;
+    read_port[1990] = 10'h000;
+    read_port[1991] = 10'h000;
+    read_port[1992] = 10'h000;
+    read_port[1993] = 10'h000;
+    read_port[1994] = 10'h000;
+    read_port[1995] = 10'h000;
+    read_port[1996] = 10'h000;
+    read_port[1997] = 10'h000;
+    read_port[1998] = 10'h000;
+    read_port[1999] = 10'h000;
+    read_port[2000] = 10'h000;
+    read_port[2001] = 10'h000;
+    read_port[2002] = 10'h000;
+    read_port[2003] = 10'h000;
+    read_port[2004] = 10'h000;
+    read_port[2005] = 10'h000;
+    read_port[2006] = 10'h000;
+    read_port[2007] = 10'h000;
+    read_port[2008] = 10'h000;
+    read_port[2009] = 10'h000;
+    read_port[2010] = 10'h000;
+    read_port[2011] = 10'h000;
+    read_port[2012] = 10'h000;
+    read_port[2013] = 10'h000;
+    read_port[2014] = 10'h000;
+    read_port[2015] = 10'h000;
+    read_port[2016] = 10'h000;
+    read_port[2017] = 10'h000;
+    read_port[2018] = 10'h000;
+    read_port[2019] = 10'h000;
+    read_port[2020] = 10'h000;
+    read_port[2021] = 10'h000;
+    read_port[2022] = 10'h000;
+    read_port[2023] = 10'h000;
+    read_port[2024] = 10'h000;
+    read_port[2025] = 10'h000;
+    read_port[2026] = 10'h000;
+    read_port[2027] = 10'h000;
+    read_port[2028] = 10'h000;
+    read_port[2029] = 10'h000;
+    read_port[2030] = 10'h000;
+    read_port[2031] = 10'h000;
+    read_port[2032] = 10'h000;
+    read_port[2033] = 10'h000;
+    read_port[2034] = 10'h000;
+    read_port[2035] = 10'h000;
+    read_port[2036] = 10'h000;
+    read_port[2037] = 10'h000;
+    read_port[2038] = 10'h000;
+    read_port[2039] = 10'h000;
+    read_port[2040] = 10'h000;
+    read_port[2041] = 10'h000;
+    read_port[2042] = 10'h000;
+    read_port[2043] = 10'h000;
+    read_port[2044] = 10'h000;
+    read_port[2045] = 10'h000;
+    read_port[2046] = 10'h000;
+    read_port[2047] = 10'h000;
+    read_port[2048] = 10'h000;
+    read_port[2049] = 10'h000;
+    read_port[2050] = 10'h000;
+    read_port[2051] = 10'h000;
+    read_port[2052] = 10'h000;
+    read_port[2053] = 10'h000;
+    read_port[2054] = 10'h000;
+    read_port[2055] = 10'h000;
+    read_port[2056] = 10'h000;
+    read_port[2057] = 10'h000;
+    read_port[2058] = 10'h000;
+    read_port[2059] = 10'h000;
+    read_port[2060] = 10'h000;
+    read_port[2061] = 10'h000;
+    read_port[2062] = 10'h000;
+    read_port[2063] = 10'h000;
+    read_port[2064] = 10'h000;
+    read_port[2065] = 10'h000;
+    read_port[2066] = 10'h000;
+    read_port[2067] = 10'h000;
+    read_port[2068] = 10'h000;
+    read_port[2069] = 10'h000;
+    read_port[2070] = 10'h000;
+    read_port[2071] = 10'h000;
+    read_port[2072] = 10'h000;
+    read_port[2073] = 10'h000;
+    read_port[2074] = 10'h000;
+    read_port[2075] = 10'h000;
+    read_port[2076] = 10'h000;
+    read_port[2077] = 10'h000;
+    read_port[2078] = 10'h000;
+    read_port[2079] = 10'h000;
+    read_port[2080] = 10'h000;
+    read_port[2081] = 10'h000;
+    read_port[2082] = 10'h000;
+    read_port[2083] = 10'h000;
+    read_port[2084] = 10'h000;
+    read_port[2085] = 10'h000;
+    read_port[2086] = 10'h000;
+    read_port[2087] = 10'h000;
+    read_port[2088] = 10'h000;
+    read_port[2089] = 10'h000;
+    read_port[2090] = 10'h000;
+    read_port[2091] = 10'h000;
+    read_port[2092] = 10'h000;
+    read_port[2093] = 10'h000;
+    read_port[2094] = 10'h000;
+    read_port[2095] = 10'h000;
+    read_port[2096] = 10'h000;
+    read_port[2097] = 10'h000;
+    read_port[2098] = 10'h000;
+    read_port[2099] = 10'h000;
+    read_port[2100] = 10'h000;
+    read_port[2101] = 10'h000;
+    read_port[2102] = 10'h000;
+    read_port[2103] = 10'h000;
+    read_port[2104] = 10'h000;
+    read_port[2105] = 10'h000;
+    read_port[2106] = 10'h000;
+    read_port[2107] = 10'h000;
+    read_port[2108] = 10'h000;
+    read_port[2109] = 10'h000;
+    read_port[2110] = 10'h000;
+    read_port[2111] = 10'h000;
+    read_port[2112] = 10'h000;
+    read_port[2113] = 10'h000;
+    read_port[2114] = 10'h000;
+    read_port[2115] = 10'h000;
+    read_port[2116] = 10'h000;
+    read_port[2117] = 10'h000;
+    read_port[2118] = 10'h000;
+    read_port[2119] = 10'h000;
+    read_port[2120] = 10'h000;
+    read_port[2121] = 10'h000;
+    read_port[2122] = 10'h000;
+    read_port[2123] = 10'h000;
+    read_port[2124] = 10'h000;
+    read_port[2125] = 10'h000;
+    read_port[2126] = 10'h000;
+    read_port[2127] = 10'h000;
+    read_port[2128] = 10'h000;
+    read_port[2129] = 10'h000;
+    read_port[2130] = 10'h000;
+    read_port[2131] = 10'h000;
+    read_port[2132] = 10'h000;
+    read_port[2133] = 10'h000;
+    read_port[2134] = 10'h000;
+    read_port[2135] = 10'h000;
+    read_port[2136] = 10'h000;
+    read_port[2137] = 10'h000;
+    read_port[2138] = 10'h000;
+    read_port[2139] = 10'h000;
+    read_port[2140] = 10'h000;
+    read_port[2141] = 10'h000;
+    read_port[2142] = 10'h000;
+    read_port[2143] = 10'h000;
+    read_port[2144] = 10'h000;
+    read_port[2145] = 10'h000;
+    read_port[2146] = 10'h000;
+    read_port[2147] = 10'h000;
+    read_port[2148] = 10'h000;
+    read_port[2149] = 10'h000;
+    read_port[2150] = 10'h000;
+    read_port[2151] = 10'h000;
+    read_port[2152] = 10'h000;
+    read_port[2153] = 10'h000;
+    read_port[2154] = 10'h000;
+    read_port[2155] = 10'h000;
+    read_port[2156] = 10'h000;
+    read_port[2157] = 10'h000;
+    read_port[2158] = 10'h000;
+    read_port[2159] = 10'h000;
+    read_port[2160] = 10'h000;
+    read_port[2161] = 10'h000;
+    read_port[2162] = 10'h000;
+    read_port[2163] = 10'h000;
+    read_port[2164] = 10'h000;
+    read_port[2165] = 10'h000;
+    read_port[2166] = 10'h000;
+    read_port[2167] = 10'h000;
+    read_port[2168] = 10'h000;
+    read_port[2169] = 10'h000;
+    read_port[2170] = 10'h000;
+    read_port[2171] = 10'h000;
+    read_port[2172] = 10'h000;
+    read_port[2173] = 10'h000;
+    read_port[2174] = 10'h000;
+    read_port[2175] = 10'h000;
+    read_port[2176] = 10'h000;
+    read_port[2177] = 10'h000;
+    read_port[2178] = 10'h000;
+    read_port[2179] = 10'h000;
+    read_port[2180] = 10'h000;
+    read_port[2181] = 10'h000;
+    read_port[2182] = 10'h000;
+    read_port[2183] = 10'h000;
+    read_port[2184] = 10'h000;
+    read_port[2185] = 10'h000;
+    read_port[2186] = 10'h000;
+    read_port[2187] = 10'h000;
+    read_port[2188] = 10'h000;
+    read_port[2189] = 10'h000;
+    read_port[2190] = 10'h000;
+    read_port[2191] = 10'h000;
+    read_port[2192] = 10'h000;
+    read_port[2193] = 10'h000;
+    read_port[2194] = 10'h000;
+    read_port[2195] = 10'h000;
+    read_port[2196] = 10'h000;
+    read_port[2197] = 10'h000;
+    read_port[2198] = 10'h000;
+    read_port[2199] = 10'h000;
+    read_port[2200] = 10'h000;
+    read_port[2201] = 10'h000;
+    read_port[2202] = 10'h000;
+    read_port[2203] = 10'h000;
+    read_port[2204] = 10'h000;
+    read_port[2205] = 10'h000;
+    read_port[2206] = 10'h000;
+    read_port[2207] = 10'h000;
+    read_port[2208] = 10'h000;
+    read_port[2209] = 10'h000;
+    read_port[2210] = 10'h000;
+    read_port[2211] = 10'h000;
+    read_port[2212] = 10'h000;
+    read_port[2213] = 10'h000;
+    read_port[2214] = 10'h000;
+    read_port[2215] = 10'h000;
+    read_port[2216] = 10'h000;
+    read_port[2217] = 10'h000;
+    read_port[2218] = 10'h000;
+    read_port[2219] = 10'h000;
+    read_port[2220] = 10'h000;
+    read_port[2221] = 10'h000;
+    read_port[2222] = 10'h000;
+    read_port[2223] = 10'h000;
+    read_port[2224] = 10'h000;
+    read_port[2225] = 10'h000;
+    read_port[2226] = 10'h000;
+    read_port[2227] = 10'h000;
+    read_port[2228] = 10'h000;
+    read_port[2229] = 10'h000;
+    read_port[2230] = 10'h000;
+    read_port[2231] = 10'h000;
+    read_port[2232] = 10'h000;
+    read_port[2233] = 10'h000;
+    read_port[2234] = 10'h000;
+    read_port[2235] = 10'h000;
+    read_port[2236] = 10'h000;
+    read_port[2237] = 10'h000;
+    read_port[2238] = 10'h000;
+    read_port[2239] = 10'h000;
+    read_port[2240] = 10'h000;
+    read_port[2241] = 10'h000;
+    read_port[2242] = 10'h000;
+    read_port[2243] = 10'h000;
+    read_port[2244] = 10'h000;
+    read_port[2245] = 10'h000;
+    read_port[2246] = 10'h000;
+    read_port[2247] = 10'h000;
+    read_port[2248] = 10'h000;
+    read_port[2249] = 10'h000;
+    read_port[2250] = 10'h000;
+    read_port[2251] = 10'h000;
+    read_port[2252] = 10'h000;
+    read_port[2253] = 10'h000;
+    read_port[2254] = 10'h000;
+    read_port[2255] = 10'h000;
+    read_port[2256] = 10'h000;
+    read_port[2257] = 10'h000;
+    read_port[2258] = 10'h000;
+    read_port[2259] = 10'h000;
+    read_port[2260] = 10'h000;
+    read_port[2261] = 10'h000;
+    read_port[2262] = 10'h000;
+    read_port[2263] = 10'h000;
+    read_port[2264] = 10'h000;
+    read_port[2265] = 10'h000;
+    read_port[2266] = 10'h000;
+    read_port[2267] = 10'h000;
+    read_port[2268] = 10'h000;
+    read_port[2269] = 10'h000;
+    read_port[2270] = 10'h000;
+    read_port[2271] = 10'h000;
+    read_port[2272] = 10'h000;
+    read_port[2273] = 10'h000;
+    read_port[2274] = 10'h000;
+    read_port[2275] = 10'h000;
+    read_port[2276] = 10'h000;
+    read_port[2277] = 10'h000;
+    read_port[2278] = 10'h000;
+    read_port[2279] = 10'h000;
+    read_port[2280] = 10'h000;
+    read_port[2281] = 10'h000;
+    read_port[2282] = 10'h000;
+    read_port[2283] = 10'h000;
+    read_port[2284] = 10'h000;
+    read_port[2285] = 10'h000;
+    read_port[2286] = 10'h000;
+    read_port[2287] = 10'h000;
+    read_port[2288] = 10'h000;
+    read_port[2289] = 10'h000;
+    read_port[2290] = 10'h000;
+    read_port[2291] = 10'h000;
+    read_port[2292] = 10'h000;
+    read_port[2293] = 10'h000;
+    read_port[2294] = 10'h000;
+    read_port[2295] = 10'h000;
+    read_port[2296] = 10'h000;
+    read_port[2297] = 10'h000;
+    read_port[2298] = 10'h000;
+    read_port[2299] = 10'h000;
+    read_port[2300] = 10'h000;
+    read_port[2301] = 10'h000;
+    read_port[2302] = 10'h000;
+    read_port[2303] = 10'h000;
+    read_port[2304] = 10'h000;
+    read_port[2305] = 10'h000;
+    read_port[2306] = 10'h000;
+    read_port[2307] = 10'h000;
+    read_port[2308] = 10'h000;
+    read_port[2309] = 10'h000;
+    read_port[2310] = 10'h000;
+    read_port[2311] = 10'h000;
+    read_port[2312] = 10'h000;
+    read_port[2313] = 10'h000;
+    read_port[2314] = 10'h000;
+    read_port[2315] = 10'h000;
+    read_port[2316] = 10'h000;
+    read_port[2317] = 10'h000;
+    read_port[2318] = 10'h000;
+    read_port[2319] = 10'h000;
+    read_port[2320] = 10'h000;
+    read_port[2321] = 10'h000;
+    read_port[2322] = 10'h000;
+    read_port[2323] = 10'h000;
+    read_port[2324] = 10'h000;
+    read_port[2325] = 10'h000;
+    read_port[2326] = 10'h000;
+    read_port[2327] = 10'h000;
+    read_port[2328] = 10'h000;
+    read_port[2329] = 10'h000;
+    read_port[2330] = 10'h000;
+    read_port[2331] = 10'h000;
+    read_port[2332] = 10'h000;
+    read_port[2333] = 10'h000;
+    read_port[2334] = 10'h000;
+    read_port[2335] = 10'h000;
+    read_port[2336] = 10'h000;
+    read_port[2337] = 10'h000;
+    read_port[2338] = 10'h000;
+    read_port[2339] = 10'h000;
+    read_port[2340] = 10'h000;
+    read_port[2341] = 10'h000;
+    read_port[2342] = 10'h000;
+    read_port[2343] = 10'h000;
+    read_port[2344] = 10'h000;
+    read_port[2345] = 10'h000;
+    read_port[2346] = 10'h000;
+    read_port[2347] = 10'h000;
+    read_port[2348] = 10'h000;
+    read_port[2349] = 10'h000;
+    read_port[2350] = 10'h000;
+    read_port[2351] = 10'h000;
+    read_port[2352] = 10'h000;
+    read_port[2353] = 10'h000;
+    read_port[2354] = 10'h000;
+    read_port[2355] = 10'h000;
+    read_port[2356] = 10'h000;
+    read_port[2357] = 10'h000;
+    read_port[2358] = 10'h000;
+    read_port[2359] = 10'h000;
+    read_port[2360] = 10'h000;
+    read_port[2361] = 10'h000;
+    read_port[2362] = 10'h000;
+    read_port[2363] = 10'h000;
+    read_port[2364] = 10'h000;
+    read_port[2365] = 10'h000;
+    read_port[2366] = 10'h000;
+    read_port[2367] = 10'h000;
+    read_port[2368] = 10'h000;
+    read_port[2369] = 10'h000;
+    read_port[2370] = 10'h000;
+    read_port[2371] = 10'h000;
+    read_port[2372] = 10'h000;
+    read_port[2373] = 10'h000;
+    read_port[2374] = 10'h000;
+    read_port[2375] = 10'h000;
+    read_port[2376] = 10'h000;
+    read_port[2377] = 10'h000;
+    read_port[2378] = 10'h000;
+    read_port[2379] = 10'h000;
+    read_port[2380] = 10'h000;
+    read_port[2381] = 10'h000;
+    read_port[2382] = 10'h000;
+    read_port[2383] = 10'h000;
+    read_port[2384] = 10'h000;
+    read_port[2385] = 10'h000;
+    read_port[2386] = 10'h000;
+    read_port[2387] = 10'h000;
+    read_port[2388] = 10'h000;
+    read_port[2389] = 10'h000;
+    read_port[2390] = 10'h000;
+    read_port[2391] = 10'h000;
+    read_port[2392] = 10'h000;
+    read_port[2393] = 10'h000;
+    read_port[2394] = 10'h000;
+    read_port[2395] = 10'h000;
+    read_port[2396] = 10'h000;
+    read_port[2397] = 10'h000;
+    read_port[2398] = 10'h000;
+    read_port[2399] = 10'h000;
+    read_port[2400] = 10'h000;
+    read_port[2401] = 10'h000;
+    read_port[2402] = 10'h000;
+    read_port[2403] = 10'h000;
+    read_port[2404] = 10'h000;
+    read_port[2405] = 10'h000;
+    read_port[2406] = 10'h000;
+    read_port[2407] = 10'h000;
+    read_port[2408] = 10'h000;
+    read_port[2409] = 10'h000;
+    read_port[2410] = 10'h000;
+    read_port[2411] = 10'h000;
+    read_port[2412] = 10'h000;
+    read_port[2413] = 10'h000;
+    read_port[2414] = 10'h000;
+    read_port[2415] = 10'h000;
+    read_port[2416] = 10'h000;
+    read_port[2417] = 10'h000;
+    read_port[2418] = 10'h000;
+    read_port[2419] = 10'h000;
+    read_port[2420] = 10'h000;
+    read_port[2421] = 10'h000;
+    read_port[2422] = 10'h000;
+    read_port[2423] = 10'h000;
+    read_port[2424] = 10'h000;
+    read_port[2425] = 10'h000;
+    read_port[2426] = 10'h000;
+    read_port[2427] = 10'h000;
+    read_port[2428] = 10'h000;
+    read_port[2429] = 10'h000;
+    read_port[2430] = 10'h000;
+    read_port[2431] = 10'h000;
+    read_port[2432] = 10'h000;
+    read_port[2433] = 10'h000;
+    read_port[2434] = 10'h000;
+    read_port[2435] = 10'h000;
+    read_port[2436] = 10'h000;
+    read_port[2437] = 10'h000;
+    read_port[2438] = 10'h000;
+    read_port[2439] = 10'h000;
+    read_port[2440] = 10'h000;
+    read_port[2441] = 10'h000;
+    read_port[2442] = 10'h000;
+    read_port[2443] = 10'h000;
+    read_port[2444] = 10'h000;
+    read_port[2445] = 10'h000;
+    read_port[2446] = 10'h000;
+    read_port[2447] = 10'h000;
+    read_port[2448] = 10'h000;
+    read_port[2449] = 10'h000;
+    read_port[2450] = 10'h000;
+    read_port[2451] = 10'h000;
+    read_port[2452] = 10'h000;
+    read_port[2453] = 10'h000;
+    read_port[2454] = 10'h000;
+    read_port[2455] = 10'h000;
+    read_port[2456] = 10'h000;
+    read_port[2457] = 10'h000;
+    read_port[2458] = 10'h000;
+    read_port[2459] = 10'h000;
+    read_port[2460] = 10'h000;
+    read_port[2461] = 10'h000;
+    read_port[2462] = 10'h000;
+    read_port[2463] = 10'h000;
+    read_port[2464] = 10'h000;
+    read_port[2465] = 10'h000;
+    read_port[2466] = 10'h000;
+    read_port[2467] = 10'h000;
+    read_port[2468] = 10'h000;
+    read_port[2469] = 10'h000;
+    read_port[2470] = 10'h000;
+    read_port[2471] = 10'h000;
+    read_port[2472] = 10'h000;
+    read_port[2473] = 10'h000;
+    read_port[2474] = 10'h000;
+    read_port[2475] = 10'h000;
+    read_port[2476] = 10'h000;
+    read_port[2477] = 10'h000;
+    read_port[2478] = 10'h000;
+    read_port[2479] = 10'h000;
+    read_port[2480] = 10'h000;
+    read_port[2481] = 10'h000;
+    read_port[2482] = 10'h000;
+    read_port[2483] = 10'h000;
+    read_port[2484] = 10'h000;
+    read_port[2485] = 10'h000;
+    read_port[2486] = 10'h000;
+    read_port[2487] = 10'h000;
+    read_port[2488] = 10'h000;
+    read_port[2489] = 10'h000;
+    read_port[2490] = 10'h000;
+    read_port[2491] = 10'h000;
+    read_port[2492] = 10'h000;
+    read_port[2493] = 10'h000;
+    read_port[2494] = 10'h000;
+    read_port[2495] = 10'h000;
+    read_port[2496] = 10'h000;
+    read_port[2497] = 10'h000;
+    read_port[2498] = 10'h000;
+    read_port[2499] = 10'h000;
+    read_port[2500] = 10'h000;
+    read_port[2501] = 10'h000;
+    read_port[2502] = 10'h000;
+    read_port[2503] = 10'h000;
+    read_port[2504] = 10'h000;
+    read_port[2505] = 10'h000;
+    read_port[2506] = 10'h000;
+    read_port[2507] = 10'h000;
+    read_port[2508] = 10'h000;
+    read_port[2509] = 10'h000;
+    read_port[2510] = 10'h000;
+    read_port[2511] = 10'h000;
+    read_port[2512] = 10'h000;
+    read_port[2513] = 10'h000;
+    read_port[2514] = 10'h000;
+    read_port[2515] = 10'h000;
+    read_port[2516] = 10'h000;
+    read_port[2517] = 10'h000;
+    read_port[2518] = 10'h000;
+    read_port[2519] = 10'h000;
+    read_port[2520] = 10'h000;
+    read_port[2521] = 10'h000;
+    read_port[2522] = 10'h000;
+    read_port[2523] = 10'h000;
+    read_port[2524] = 10'h000;
+    read_port[2525] = 10'h000;
+    read_port[2526] = 10'h000;
+    read_port[2527] = 10'h000;
+    read_port[2528] = 10'h000;
+    read_port[2529] = 10'h000;
+    read_port[2530] = 10'h000;
+    read_port[2531] = 10'h000;
+    read_port[2532] = 10'h000;
+    read_port[2533] = 10'h000;
+    read_port[2534] = 10'h000;
+    read_port[2535] = 10'h000;
+    read_port[2536] = 10'h000;
+    read_port[2537] = 10'h000;
+    read_port[2538] = 10'h000;
+    read_port[2539] = 10'h000;
+    read_port[2540] = 10'h000;
+    read_port[2541] = 10'h000;
+    read_port[2542] = 10'h000;
+    read_port[2543] = 10'h000;
+    read_port[2544] = 10'h000;
+    read_port[2545] = 10'h000;
+    read_port[2546] = 10'h000;
+    read_port[2547] = 10'h000;
+    read_port[2548] = 10'h000;
+    read_port[2549] = 10'h000;
+    read_port[2550] = 10'h000;
+    read_port[2551] = 10'h000;
+    read_port[2552] = 10'h000;
+    read_port[2553] = 10'h000;
+    read_port[2554] = 10'h000;
+    read_port[2555] = 10'h000;
+    read_port[2556] = 10'h000;
+    read_port[2557] = 10'h000;
+    read_port[2558] = 10'h000;
+    read_port[2559] = 10'h000;
+    read_port[2560] = 10'h000;
+    read_port[2561] = 10'h000;
+    read_port[2562] = 10'h000;
+    read_port[2563] = 10'h000;
+    read_port[2564] = 10'h000;
+    read_port[2565] = 10'h000;
+    read_port[2566] = 10'h000;
+    read_port[2567] = 10'h000;
+    read_port[2568] = 10'h000;
+    read_port[2569] = 10'h000;
+    read_port[2570] = 10'h000;
+    read_port[2571] = 10'h000;
+    read_port[2572] = 10'h000;
+    read_port[2573] = 10'h000;
+    read_port[2574] = 10'h000;
+    read_port[2575] = 10'h000;
+    read_port[2576] = 10'h000;
+    read_port[2577] = 10'h000;
+    read_port[2578] = 10'h000;
+    read_port[2579] = 10'h000;
+    read_port[2580] = 10'h000;
+    read_port[2581] = 10'h000;
+    read_port[2582] = 10'h000;
+    read_port[2583] = 10'h000;
+    read_port[2584] = 10'h000;
+    read_port[2585] = 10'h000;
+    read_port[2586] = 10'h000;
+    read_port[2587] = 10'h000;
+    read_port[2588] = 10'h000;
+    read_port[2589] = 10'h000;
+    read_port[2590] = 10'h000;
+    read_port[2591] = 10'h000;
+    read_port[2592] = 10'h000;
+    read_port[2593] = 10'h000;
+    read_port[2594] = 10'h000;
+    read_port[2595] = 10'h000;
+    read_port[2596] = 10'h000;
+    read_port[2597] = 10'h000;
+    read_port[2598] = 10'h000;
+    read_port[2599] = 10'h000;
+    read_port[2600] = 10'h000;
+    read_port[2601] = 10'h000;
+    read_port[2602] = 10'h000;
+    read_port[2603] = 10'h000;
+    read_port[2604] = 10'h000;
+    read_port[2605] = 10'h000;
+    read_port[2606] = 10'h000;
+    read_port[2607] = 10'h000;
+    read_port[2608] = 10'h000;
+    read_port[2609] = 10'h000;
+    read_port[2610] = 10'h000;
+    read_port[2611] = 10'h000;
+    read_port[2612] = 10'h000;
+    read_port[2613] = 10'h000;
+    read_port[2614] = 10'h000;
+    read_port[2615] = 10'h000;
+    read_port[2616] = 10'h000;
+    read_port[2617] = 10'h000;
+    read_port[2618] = 10'h000;
+    read_port[2619] = 10'h000;
+    read_port[2620] = 10'h000;
+    read_port[2621] = 10'h000;
+    read_port[2622] = 10'h000;
+    read_port[2623] = 10'h000;
+    read_port[2624] = 10'h000;
+    read_port[2625] = 10'h000;
+    read_port[2626] = 10'h000;
+    read_port[2627] = 10'h000;
+    read_port[2628] = 10'h000;
+    read_port[2629] = 10'h000;
+    read_port[2630] = 10'h000;
+    read_port[2631] = 10'h000;
+    read_port[2632] = 10'h000;
+    read_port[2633] = 10'h000;
+    read_port[2634] = 10'h000;
+    read_port[2635] = 10'h000;
+    read_port[2636] = 10'h000;
+    read_port[2637] = 10'h000;
+    read_port[2638] = 10'h000;
+    read_port[2639] = 10'h000;
+    read_port[2640] = 10'h000;
+    read_port[2641] = 10'h000;
+    read_port[2642] = 10'h000;
+    read_port[2643] = 10'h000;
+    read_port[2644] = 10'h000;
+    read_port[2645] = 10'h000;
+    read_port[2646] = 10'h000;
+    read_port[2647] = 10'h000;
+    read_port[2648] = 10'h000;
+    read_port[2649] = 10'h000;
+    read_port[2650] = 10'h000;
+    read_port[2651] = 10'h000;
+    read_port[2652] = 10'h000;
+    read_port[2653] = 10'h000;
+    read_port[2654] = 10'h000;
+    read_port[2655] = 10'h000;
+    read_port[2656] = 10'h000;
+    read_port[2657] = 10'h000;
+    read_port[2658] = 10'h000;
+    read_port[2659] = 10'h000;
+    read_port[2660] = 10'h000;
+    read_port[2661] = 10'h000;
+    read_port[2662] = 10'h000;
+    read_port[2663] = 10'h000;
+    read_port[2664] = 10'h000;
+    read_port[2665] = 10'h000;
+    read_port[2666] = 10'h000;
+    read_port[2667] = 10'h000;
+    read_port[2668] = 10'h000;
+    read_port[2669] = 10'h000;
+    read_port[2670] = 10'h000;
+    read_port[2671] = 10'h000;
+    read_port[2672] = 10'h000;
+    read_port[2673] = 10'h000;
+    read_port[2674] = 10'h000;
+    read_port[2675] = 10'h000;
+    read_port[2676] = 10'h000;
+    read_port[2677] = 10'h000;
+    read_port[2678] = 10'h000;
+    read_port[2679] = 10'h000;
+    read_port[2680] = 10'h000;
+    read_port[2681] = 10'h000;
+    read_port[2682] = 10'h000;
+    read_port[2683] = 10'h000;
+    read_port[2684] = 10'h000;
+    read_port[2685] = 10'h000;
+    read_port[2686] = 10'h000;
+    read_port[2687] = 10'h000;
+    read_port[2688] = 10'h000;
+    read_port[2689] = 10'h000;
+    read_port[2690] = 10'h000;
+    read_port[2691] = 10'h000;
+    read_port[2692] = 10'h000;
+    read_port[2693] = 10'h000;
+    read_port[2694] = 10'h000;
+    read_port[2695] = 10'h000;
+    read_port[2696] = 10'h000;
+    read_port[2697] = 10'h000;
+    read_port[2698] = 10'h000;
+    read_port[2699] = 10'h000;
+    read_port[2700] = 10'h000;
+    read_port[2701] = 10'h000;
+    read_port[2702] = 10'h000;
+    read_port[2703] = 10'h000;
+    read_port[2704] = 10'h000;
+    read_port[2705] = 10'h000;
+    read_port[2706] = 10'h000;
+    read_port[2707] = 10'h000;
+    read_port[2708] = 10'h000;
+    read_port[2709] = 10'h000;
+    read_port[2710] = 10'h000;
+    read_port[2711] = 10'h000;
+    read_port[2712] = 10'h000;
+    read_port[2713] = 10'h000;
+    read_port[2714] = 10'h000;
+    read_port[2715] = 10'h000;
+    read_port[2716] = 10'h000;
+    read_port[2717] = 10'h000;
+    read_port[2718] = 10'h000;
+    read_port[2719] = 10'h000;
+    read_port[2720] = 10'h000;
+    read_port[2721] = 10'h000;
+    read_port[2722] = 10'h000;
+    read_port[2723] = 10'h000;
+    read_port[2724] = 10'h000;
+    read_port[2725] = 10'h000;
+    read_port[2726] = 10'h000;
+    read_port[2727] = 10'h000;
+    read_port[2728] = 10'h000;
+    read_port[2729] = 10'h000;
+    read_port[2730] = 10'h000;
+    read_port[2731] = 10'h000;
+    read_port[2732] = 10'h000;
+    read_port[2733] = 10'h000;
+    read_port[2734] = 10'h000;
+    read_port[2735] = 10'h000;
+    read_port[2736] = 10'h000;
+    read_port[2737] = 10'h000;
+    read_port[2738] = 10'h000;
+    read_port[2739] = 10'h000;
+    read_port[2740] = 10'h000;
+    read_port[2741] = 10'h000;
+    read_port[2742] = 10'h000;
+    read_port[2743] = 10'h000;
+    read_port[2744] = 10'h000;
+    read_port[2745] = 10'h000;
+    read_port[2746] = 10'h000;
+    read_port[2747] = 10'h000;
+    read_port[2748] = 10'h000;
+    read_port[2749] = 10'h000;
+    read_port[2750] = 10'h000;
+    read_port[2751] = 10'h000;
+    read_port[2752] = 10'h000;
+    read_port[2753] = 10'h000;
+    read_port[2754] = 10'h000;
+    read_port[2755] = 10'h000;
+    read_port[2756] = 10'h000;
+    read_port[2757] = 10'h000;
+    read_port[2758] = 10'h000;
+    read_port[2759] = 10'h000;
+    read_port[2760] = 10'h000;
+    read_port[2761] = 10'h000;
+    read_port[2762] = 10'h000;
+    read_port[2763] = 10'h000;
+    read_port[2764] = 10'h000;
+    read_port[2765] = 10'h000;
+    read_port[2766] = 10'h000;
+    read_port[2767] = 10'h000;
+    read_port[2768] = 10'h000;
+    read_port[2769] = 10'h000;
+    read_port[2770] = 10'h000;
+    read_port[2771] = 10'h000;
+    read_port[2772] = 10'h000;
+    read_port[2773] = 10'h000;
+    read_port[2774] = 10'h000;
+    read_port[2775] = 10'h000;
+    read_port[2776] = 10'h000;
+    read_port[2777] = 10'h000;
+    read_port[2778] = 10'h000;
+    read_port[2779] = 10'h000;
+    read_port[2780] = 10'h000;
+    read_port[2781] = 10'h000;
+    read_port[2782] = 10'h000;
+    read_port[2783] = 10'h000;
+    read_port[2784] = 10'h000;
+    read_port[2785] = 10'h000;
+    read_port[2786] = 10'h000;
+    read_port[2787] = 10'h000;
+    read_port[2788] = 10'h000;
+    read_port[2789] = 10'h000;
+    read_port[2790] = 10'h000;
+    read_port[2791] = 10'h000;
+    read_port[2792] = 10'h000;
+    read_port[2793] = 10'h000;
+    read_port[2794] = 10'h000;
+    read_port[2795] = 10'h000;
+    read_port[2796] = 10'h000;
+    read_port[2797] = 10'h000;
+    read_port[2798] = 10'h000;
+    read_port[2799] = 10'h000;
+    read_port[2800] = 10'h000;
+    read_port[2801] = 10'h000;
+    read_port[2802] = 10'h000;
+    read_port[2803] = 10'h000;
+    read_port[2804] = 10'h000;
+    read_port[2805] = 10'h000;
+    read_port[2806] = 10'h000;
+    read_port[2807] = 10'h000;
+    read_port[2808] = 10'h000;
+    read_port[2809] = 10'h000;
+    read_port[2810] = 10'h000;
+    read_port[2811] = 10'h000;
+    read_port[2812] = 10'h000;
+    read_port[2813] = 10'h000;
+    read_port[2814] = 10'h000;
+    read_port[2815] = 10'h000;
+    read_port[2816] = 10'h000;
+    read_port[2817] = 10'h000;
+    read_port[2818] = 10'h000;
+    read_port[2819] = 10'h000;
+    read_port[2820] = 10'h000;
+    read_port[2821] = 10'h000;
+    read_port[2822] = 10'h000;
+    read_port[2823] = 10'h000;
+    read_port[2824] = 10'h000;
+    read_port[2825] = 10'h000;
+    read_port[2826] = 10'h000;
+    read_port[2827] = 10'h000;
+    read_port[2828] = 10'h000;
+    read_port[2829] = 10'h000;
+    read_port[2830] = 10'h000;
+    read_port[2831] = 10'h000;
+    read_port[2832] = 10'h000;
+    read_port[2833] = 10'h000;
+    read_port[2834] = 10'h000;
+    read_port[2835] = 10'h000;
+    read_port[2836] = 10'h000;
+    read_port[2837] = 10'h000;
+    read_port[2838] = 10'h000;
+    read_port[2839] = 10'h000;
+    read_port[2840] = 10'h000;
+    read_port[2841] = 10'h000;
+    read_port[2842] = 10'h000;
+    read_port[2843] = 10'h000;
+    read_port[2844] = 10'h000;
+    read_port[2845] = 10'h000;
+    read_port[2846] = 10'h000;
+    read_port[2847] = 10'h000;
+    read_port[2848] = 10'h000;
+    read_port[2849] = 10'h000;
+    read_port[2850] = 10'h000;
+    read_port[2851] = 10'h000;
+    read_port[2852] = 10'h000;
+    read_port[2853] = 10'h000;
+    read_port[2854] = 10'h000;
+    read_port[2855] = 10'h000;
+    read_port[2856] = 10'h000;
+    read_port[2857] = 10'h000;
+    read_port[2858] = 10'h000;
+    read_port[2859] = 10'h000;
+    read_port[2860] = 10'h000;
+    read_port[2861] = 10'h000;
+    read_port[2862] = 10'h000;
+    read_port[2863] = 10'h000;
+    read_port[2864] = 10'h000;
+    read_port[2865] = 10'h000;
+    read_port[2866] = 10'h000;
+    read_port[2867] = 10'h000;
+    read_port[2868] = 10'h000;
+    read_port[2869] = 10'h000;
+    read_port[2870] = 10'h000;
+    read_port[2871] = 10'h000;
+    read_port[2872] = 10'h000;
+    read_port[2873] = 10'h000;
+    read_port[2874] = 10'h000;
+    read_port[2875] = 10'h000;
+    read_port[2876] = 10'h000;
+    read_port[2877] = 10'h000;
+    read_port[2878] = 10'h000;
+    read_port[2879] = 10'h000;
+    read_port[2880] = 10'h000;
   end
   always @(posedge usb_clk) begin
     if (rx_fifo_w_en)
@@ -15510,7 +16506,7 @@ module \usb_avb_subsystem.usb.USBIsochronousOutStreamEndpoint.fifo (usb_rst, wri
   assign rx_fifo_r_data = _0_;
   assign \$10  = ~ (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:144" *) full;
   assign \$12  = write_en & (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:144" *) \$10 ;
-  assign \$14  = current_read_pointer == (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:169" *) 11'h780;
+  assign \$14  = current_read_pointer == (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:169" *) 12'hb40;
   assign \$17  = current_read_pointer + (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:172" *) 1'h1;
   assign \$1  = ~ (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:120" *) full;
   assign \$19  = ~ (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:178" *) empty;
@@ -15520,10 +16516,10 @@ module \usb_avb_subsystem.usb.USBIsochronousOutStreamEndpoint.fifo (usb_rst, wri
   assign \$27  = current_read_pointer == (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:203" *) committed_write_pointer;
   assign \$29  = committed_read_pointer <= (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:210" *) current_write_pointer;
   assign \$32  = current_write_pointer - (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:211" *) committed_read_pointer;
-  assign \$34  = $signed(12'h780) - (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:211" *) $signed(\$32 );
+  assign \$34  = $signed(13'h0b40) - (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:211" *) $signed(\$32 );
   assign \$37  = committed_read_pointer - (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:213" *) current_write_pointer;
   assign \$3  = write_en & (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:120" *) \$1 ;
-  assign \$39  = $signed(\$37 ) - (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:213" *) $signed(12'h001);
+  assign \$39  = $signed(\$37 ) - (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:213" *) $signed(13'h0001);
   assign \$41  = next_write_pointer == (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:216" *) committed_read_pointer;
   always @(posedge usb_clk)
     current_write_pointer <= \current_write_pointer$next ;
@@ -15533,7 +16529,7 @@ module \usb_avb_subsystem.usb.USBIsochronousOutStreamEndpoint.fifo (usb_rst, wri
     current_read_pointer <= \current_read_pointer$next ;
   always @(posedge usb_clk)
     committed_read_pointer <= \committed_read_pointer$next ;
-  assign \$5  = current_write_pointer == (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:137" *) 11'h780;
+  assign \$5  = current_write_pointer == (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:137" *) 12'hb40;
   assign \$8  = current_write_pointer + (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:140" *) 1'h1;
   always @* begin
     if (\$auto$verilog_backend.cc:2334:dump_module$21 ) begin end
@@ -15544,7 +16540,7 @@ module \usb_avb_subsystem.usb.USBIsochronousOutStreamEndpoint.fifo (usb_rst, wri
     end
     (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/amaranth/hdl/xfrm.py:503" *)
     if (usb_rst) begin
-      \committed_read_pointer$next  = 11'h000;
+      \committed_read_pointer$next  = 12'h000;
     end
   end
   always @* begin
@@ -15552,11 +16548,11 @@ module \usb_avb_subsystem.usb.USBIsochronousOutStreamEndpoint.fifo (usb_rst, wri
     (* full_case = 32'd1 *)
     (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:208" *)
     if (full) begin
-      space_available = 11'h000;
+      space_available = 12'h000;
     end else if (\$29 ) begin
-      space_available = \$34 [10:0];
+      space_available = \$34 [11:0];
     end else begin
-      space_available = \$39 [10:0];
+      space_available = \$39 [11:0];
     end
   end
   always @* begin
@@ -15564,9 +16560,9 @@ module \usb_avb_subsystem.usb.USBIsochronousOutStreamEndpoint.fifo (usb_rst, wri
     (* full_case = 32'd1 *)
     (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:137" *)
     if (\$5 ) begin
-      next_write_pointer = 11'h000;
+      next_write_pointer = 12'h000;
     end else begin
-      next_write_pointer = \$8 [10:0];
+      next_write_pointer = \$8 [11:0];
     end
   end
   always @* begin
@@ -15582,7 +16578,7 @@ module \usb_avb_subsystem.usb.USBIsochronousOutStreamEndpoint.fifo (usb_rst, wri
     end
     (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/amaranth/hdl/xfrm.py:503" *)
     if (usb_rst) begin
-      \current_write_pointer$next  = 11'h000;
+      \current_write_pointer$next  = 12'h000;
     end
   end
   always @* begin
@@ -15594,7 +16590,7 @@ module \usb_avb_subsystem.usb.USBIsochronousOutStreamEndpoint.fifo (usb_rst, wri
     end
     (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/amaranth/hdl/xfrm.py:503" *)
     if (usb_rst) begin
-      \committed_write_pointer$next  = 11'h000;
+      \committed_write_pointer$next  = 12'h000;
     end
   end
   always @* begin
@@ -15602,9 +16598,9 @@ module \usb_avb_subsystem.usb.USBIsochronousOutStreamEndpoint.fifo (usb_rst, wri
     (* full_case = 32'd1 *)
     (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/luna/gateware/memory.py:169" *)
     if (\$14 ) begin
-      next_read_pointer = 11'h000;
+      next_read_pointer = 12'h000;
     end else begin
-      next_read_pointer = \$17 [10:0];
+      next_read_pointer = \$17 [11:0];
     end
   end
   always @* begin
@@ -15630,7 +16626,7 @@ module \usb_avb_subsystem.usb.USBIsochronousOutStreamEndpoint.fifo (usb_rst, wri
     end
     (* src = "/home/lisp/FPGA/avb-usb-host/.venv/lib/python3.11/site-packages/amaranth/hdl/xfrm.py:503" *)
     if (usb_rst) begin
-      \current_read_pointer$next  = 11'h000;
+      \current_read_pointer$next  = 12'h000;
     end
   end
   assign \$7  = \$8 ;

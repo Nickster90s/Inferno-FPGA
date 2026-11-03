@@ -28,13 +28,32 @@ import sys
 import time
 
 PORT = 7779
+BOARD_DEFAULT = "169.254.9.200"
 TAG_DUAL   = 0x55534232   # 'USB2' - dual-USB build
 TAG_SINGLE = 0x55534231   # 'USB1' - built without USB2=1
 
 FIELDS = ["select", "live", "switches",
           "main_rx_beats", "main_ep_out", "main_overflow",
           "bkp_rx_beats", "bkp_ep_out", "bkp_overflow"]
-NOMINAL = 9_216_000       # 48 ch x 4 B x 48 kHz
+# 48 ch x 4 B x fs. WAS HARDCODED OP 48 kHz, en op een 96 kHz-bord meldde dit
+# "+116% vs nominal" voor een stroom die 8% boven nominaal lag -- een getal dat
+# paniek suggereert waar niets aan de hand is. De rate komt uit de 'R'-opcode
+# (firmware/dstats.c); faalt die, dan val je terug op 48 kHz zoals voorheen.
+_NOM = 48 * 4 * 48000
+
+
+def _nominal():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(2.0)
+        s.sendto(b"R", (BOARD_DEFAULT, PORT))
+        d, _ = s.recvfrom(512)
+        fs = struct.unpack(">I", d[4:8])[0]
+        if fs in (48000, 96000):
+            return 48 * 4 * fs, fs
+    except Exception:                                 # noqa: BLE001
+        pass
+    return 48 * 4 * 48000, 48000
 
 
 def query(board, arg=b"", timeout=3.0, tries=4):
@@ -61,6 +80,9 @@ def name(v):
 
 
 def show(board):
+    global _NOM
+    _NOM, _fs = _nominal()
+    print("  rate       %d Hz   (nominaal %d B/s per bron)" % (_fs, _NOM))
     a = query(board)
     if a is None:
         print("  this bitstream was built WITHOUT dual USB.")
@@ -80,7 +102,7 @@ def show(board):
         ep = ((b[f"{pfx}_ep_out"] - a[f"{pfx}_ep_out"]) & 0xffffffff) / 2.0
         leak = (rx - ep) / rx * 100 if rx else float("nan")
         live = "LIVE" if rx > 1_000_000 else "NO INGRESS"
-        off = (rx - NOMINAL) / NOMINAL * 100 if rx else float("nan")
+        off = (rx - _NOM) / _NOM * 100 if rx else float("nan")
         print(f"  {tag}  {rx:>11,.0f} B/s  {off:+6.2f}% vs nominal  "
               f"leak {leak:+5.2f}%  overflow {b[f'{pfx}_overflow']:,}  {live}")
     if query(board) and b["bkp_rx_beats"] == a["bkp_rx_beats"]:
