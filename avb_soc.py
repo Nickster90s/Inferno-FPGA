@@ -142,33 +142,36 @@ class _CRG(LiteXModule):
         # tap-sweep MET RANDOM DATA te herhalen: de onderrand van het oog moet
         # van ~31 naar ~15 ZAKKEN. Gaat hij omhoog, neem dan 27.
         #
-        # *** 333 GRADEN IS GEPROBEERD EN HEEFT DE USB-HOSTCONTROLLER GESLOOPT.
-        #     NIET HERHALEN ZONDER DE TX-KANT MEE TE NEMEN. ***
-        # Gemeten 2026-11-04, build_phase333_s1: de bitstream bouwt, alle vijf
-        # klokken sluiten identiek (fase is een PLL-parameter, dus dezelfde
-        # netlist en dezelfde placement), beide PHYs enumereren nog. Maar zodra
-        # er isochroon verkeer liep vulde de kernel zich met
+        # *** 333 GRADEN IS GEBOUWD MAAR NOOIT EERLIJK GETEST. ***
+        # build_phase333_s1 (2026-11-04) bouwt en sluit identiek aan de build
+        # zonder fase -- logisch, want een PLL-fase is een parameter, dus
+        # dezelfde netlist en dezelfde placement. Beide PHYs enumereerden ook.
+        # Daarna stierf de xHCI-hostcontroller van de host:
         #     xhci_hcd: ERROR Transfer event TRB DMA ptr not part of current TD
-        # en daarna
         #     xhci_hcd: xHCI host controller not responding, assume dead
-        #     xhci_hcd: HC died; cleaning up
-        # waarna ALLE USB van de machine wegviel -- beide PHYs en ook de CH347,
-        # dus ook de JTAG/UART-brug waarmee je zou willen herflashen.
+        # en ik schreef dat op het conto van deze fase.
         #
-        # WAAROM HET NIET KAN WERKEN ZOALS IK HET DEED. cd_usb klokt niet alleen
-        # de RX-capture maar ook de TX-kant die naar de PHY terugstuurt. ULPI is
-        # source-synchronous: de PHY eist setup/hold op ZIJN klok. Deze fase
-        # verschuift dus net zo goed onze UITGANGStiming, de PHY leest onze
-        # TXCMD/data verkeerd, en er gaat rommel de USB-draad op. De
-        # verschuiving repareert RX en breekt TX, omdat ze hetzelfde domein
-        # delen. Dat is geen afstemkwestie, dat is de opzet.
+        # DAT WAS FOUT. De werkelijke oorzaak was dat er AUDIO LIEP OP EEN VAN DE
+        # PHYs TOEN ER GEFLASHT WERD: `pld load` herconfigureert de FPGA, dus het
+        # USB-device verdwijnt MIDDEN IN EEN TRANSFER, en "TRB DMA ptr not part
+        # of current TD" is precies die storing. flash.sh weigert dit nu (zie de
+        # streaming-guard daar). De fase is dus niet weerlegd -- hij is nooit
+        # onder normale omstandigheden gemeten.
         #
-        # WAT WEL ZOU KUNNEN: een TWEEDE PLL-uitgang op een verschoven fase die
-        # ALLEEN de RX-samplevlak klokt (de ULPI-wrapper moet daarvoor zijn
-        # RX-capture losknippen van de rest), of de skew fysiek aanpakken --
-        # Main's oog ligt ~1,3 ns hoger dan Backup's, en Main zit op J4 terwijl
-        # J5 handmatig is gesoldeerd, dus een te lange klokdraad op Main is een
-        # reele kandidaat die met een meting aan het bord te checken is.
+        # WAT WEL EEN RISICO BLIJFT, en vooraf te controleren: cd_usb klokt niet
+        # alleen de RX-capture maar ook de TX-kant naar de PHY. ULPI is
+        # source-synchronous, dus deze fase verschuift ook onze UITGANGStiming
+        # ten opzichte van de PHY-klok. 27 graden is 1,25 ns; of dat binnen de
+        # setup/hold van de USB3300-ingangen valt staat NIET vast en is niet
+        # gemeten. Als TX breekt zie je het als enumeratiefouten of
+        # transferfouten, niet als een lek. Meet dus eerst of beide PHYs normaal
+        # blijven werken VOORDAT je conclusies trekt over het oog.
+        #
+        # HOE HET TE TESTEN, in deze orde: stop alle spelers, flash, wacht op
+        # PTP, controleer dat beide PHYs enumereren en dat Backup nog 0,0000%
+        # lek haalt, en herhaal dan de tap-sweep op Main MET RANDOM DATA. De
+        # onderrand van het oog moet van ~31 naar ~15 ZAKKEN. Gaat hij omhoog,
+        # neem 27 in plaats van 333.
         #
         # HERSTEL ALS DE CONTROLLER ALSNOG STERFT (geen reboot nodig):
         #     echo 0000:00:14.0 | sudo tee /sys/bus/pci/drivers/xhci_hcd/unbind

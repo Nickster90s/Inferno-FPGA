@@ -109,6 +109,36 @@ if fuser -s /dev/ttyACM0 2>/dev/null; then
     exit 1
 fi
 
+# NEVER FLASH WHILE AUDIO IS STREAMING. `pld load` reconfigures the FPGA, so the
+# USB device disappears MID-TRANSFER. The host sees an isochronous TD that stops
+# responding and xHCI can take the whole controller down with it:
+#     xhci_hcd: ERROR Transfer event TRB DMA ptr not part of current TD
+#     xhci_hcd: xHCI host controller not responding, assume dead
+#     xhci_hcd: HC died; cleaning up
+# That happened on 2026-11-04 and it took out BOTH PHYs and the CH347 -- i.e.
+# the JTAG bridge you would need to undo it. Recovery is possible without a
+# reboot:
+#     echo 0000:00:14.0 | sudo tee /sys/bus/pci/drivers/xhci_hcd/unbind
+#     sleep 3
+#     echo 0000:00:14.0 | sudo tee /sys/bus/pci/drivers/xhci_hcd/bind
+# but the cheaper thing is to not do it. Stop the player first.
+_busy=""
+for _st in /proc/asound/card*/pcm0p/sub0/status; do
+    [[ -r "$_st" ]] || continue
+    if grep -q "state: RUNNING" "$_st" 2>/dev/null; then
+        _card="${_st#/proc/asound/card}"; _card="${_card%%/*}"
+        _name=$(sed -n "/^ $_card \[/s/.*: USB-Audio - //p" /proc/asound/cards 2>/dev/null)
+        _busy+=" card$_card${_name:+ ($_name)}"
+    fi
+done
+if [[ -n "$_busy" ]] && [[ "$FLASH_ALLOW_STREAMING" != "1" ]]; then
+    echo "*** AUDIO IS STREAMING on:$_busy" >&2
+    echo "*** Flashing now pulls the USB device out mid-transfer and can kill" >&2
+    echo "*** the xHCI host controller (all USB, including the CH347)." >&2
+    echo "*** Stop the player, then re-run. FLASH_ALLOW_STREAMING=1 overrides." >&2
+    exit 1
+fi
+
 # Always build the firmware: "flash the latest version" must not ship a stale
 # binary just because someone forgot to run make.
 if [[ "$MODE" != "unlock" ]]; then

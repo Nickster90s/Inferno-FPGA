@@ -900,7 +900,7 @@ mpv log showed its network cache draining 28 s -> 0 over ~44 minutes, which is
 for ~1.2% more -> a network-sourced player drains its buffer until it underruns.
 "Audio loopt" was exactly that.
 
-### The phase shift killed the host controller. Do not repeat it as written.
+### The phase shift was never fairly tested — I flashed over a live stream
 
 `USB_PHASE_DEG=333` on `cd_usb` builds fine and closes identically (a PLL phase
 is a parameter, so same netlist, same placement, same Fmax), and both PHYs still
@@ -913,12 +913,22 @@ enumerate. Then, under isochronous traffic:
 All USB on the machine went away — both PHYs and the CH347, so the JTAG/UART
 bridge you would reflash with disappears too.
 
-**Why it cannot work as written:** `cd_usb` clocks the RX capture AND the TX
-side that drives the PHY. ULPI is source-synchronous and the PHY requires
-setup/hold against ITS clock, so the shift moves our OUTPUT timing as well, the
-PHY misreads our TXCMD/data, and malformed traffic goes onto the USB wire. It
-fixes RX by breaking TX. That is structural, not a matter of picking a better
-angle.
+**I blamed the phase for that, and I was wrong.** The real cause was that
+AUDIO WAS STILL STREAMING ON ONE OF THE PHYS WHEN I FLASHED. `pld load`
+reconfigures the FPGA, so the USB device vanishes mid-transfer, and "TRB DMA ptr
+not part of current TD" is exactly that failure. `flash.sh` now refuses to flash
+while any card reports `state: RUNNING` (override with
+`FLASH_ALLOW_STREAMING=1`). So the phase shift is not refuted — it has never
+been measured under normal conditions.
+
+**What remains a real risk, to check first rather than assume:** `cd_usb` clocks
+the RX capture AND the TX side driving the PHY. ULPI is source-synchronous, so
+the shift moves our OUTPUT timing relative to the PHY's clock too. 27 degrees is
+1.25 ns; whether that still meets the USB3300's input setup/hold is NOT
+established and was not measured. If TX breaks it shows up as enumeration or
+transfer errors, not as a leak — so verify both PHYs still work normally BEFORE
+drawing any conclusion about the eye. I wrote this up as a proven mechanism when
+it is an untested one.
 
 **Recovery without a reboot:**
 
@@ -928,7 +938,12 @@ angle.
 
 Both PHYs and the CH347 come back and flashing works again. Verified.
 
-**What could still work, in order of expected value.** (a) A second PLL output
+**How to test it properly, in this order:** stop every player, flash, wait for
+PTP, confirm both PHYs enumerate and that Backup still measures 0.0000% leak,
+and only then repeat the tap sweep on Main WITH RANDOM DATA. The eye's lower
+edge should move DOWN from ~31 toward ~15; if it moves up, use 27 instead of 333.
+
+**If the phase genuinely cannot work, then in order of expected value.** (a) A second PLL output
 at a shifted phase clocking ONLY the RX capture flops, which means separating
 the ULPI wrapper's RX capture from the rest of `cd_usb` — the real fix, and a
 contained RTL change. (b) The physical skew: Main's eye sits ~1.3 ns higher than
