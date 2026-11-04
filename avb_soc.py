@@ -142,46 +142,70 @@ class _CRG(LiteXModule):
         # tap-sweep MET RANDOM DATA te herhalen: de onderrand van het oog moet
         # van ~31 naar ~15 ZAKKEN. Gaat hij omhoog, neem dan 27.
         #
-        # *** 333 GRADEN IS GEBOUWD MAAR NOOIT EERLIJK GETEST. ***
-        # build_phase333_s1 (2026-11-04) bouwt en sluit identiek aan de build
-        # zonder fase -- logisch, want een PLL-fase is een parameter, dus
-        # dezelfde netlist en dezelfde placement. Beide PHYs enumereerden ook.
-        # Daarna stierf de xHCI-hostcontroller van de host:
-        #     xhci_hcd: ERROR Transfer event TRB DMA ptr not part of current TD
-        #     xhci_hcd: xHCI host controller not responding, assume dead
-        # en ik schreef dat op het conto van deze fase.
+        # *** 333 GRADEN (= -27) IS DE FIX, GEMETEN OP HARDWARE 2026-11-04. ***
+        # Main's lek per IDELAY-tap, 48 ch @ 96 kHz, MET RANDOM DATA
+        # (lek = dbg_rx_beats tegen dbg_ep_out, 18 s per punt):
         #
-        # DAT WAS FOUT. De werkelijke oorzaak was dat er AUDIO LIEP OP EEN VAN DE
-        # PHYs TOEN ER GEFLASHT WERD: `pld load` herconfigureert de FPGA, dus het
-        # USB-device verdwijnt MIDDEN IN EEN TRANSFER, en "TRB DMA ptr not part
-        # of current TD" is precies die storing. flash.sh weigert dit nu (zie de
-        # streaming-guard daar). De fase is dus niet weerlegd -- hij is nooit
-        # onder normale omstandigheden gemeten.
+        #        tap      fase 0        fase 333
+        #         31      +1,2841 %     +0,0002 %
+        #         30      +4,9970 %        --
+        #         29     +14,2055 %        --
+        #         28     +29,9451 %        --
+        #         24         --          0,0000 %
+        #         20         --          0,0000 %
+        #         16         --         +0,0002 %
+        #         12         --          0,0000 %
+        #          8         --          0,0000 %
+        #          4         --         +0,0002 %
+        #          0         --          0,0000 %
         #
-        # WAT WEL EEN RISICO BLIJFT, en vooraf te controleren: cd_usb klokt niet
-        # alleen de RX-capture maar ook de TX-kant naar de PHY. ULPI is
-        # source-synchronous, dus deze fase verschuift ook onze UITGANGStiming
-        # ten opzichte van de PHY-klok. 27 graden is 1,25 ns; of dat binnen de
-        # setup/hold van de USB3300-ingangen valt staat NIET vast en is niet
-        # gemeten. Als TX breekt zie je het als enumeratiefouten of
-        # transferfouten, niet als een lek. Meet dus eerst of beide PHYs normaal
-        # blijven werken VOORDAT je conclusies trekt over het oog.
+        # Op fase 0 leakte zelfs tap 31 -- het HARDWARE-MAXIMUM -- nog 1,28%, en
+        # drie taps lager was het al 30%: het oog lag voorbij wat IDELAYE2 kan
+        # geven (31 x ~78 ps = ~2,4 ns). Met deze fase is ELKE tap schoon,
+        # inclusief tap 0, dus het oog is nu breder dan de hele delaylijn --
+        # dezelfde situatie die Backup altijd had. Maximale marge die er is.
         #
-        # HOE HET TE TESTEN, in deze orde: stop alle spelers, flash, wacht op
-        # PTP, controleer dat beide PHYs enumereren en dat Backup nog 0,0000%
-        # lek haalt, en herhaal dan de tap-sweep op Main MET RANDOM DATA. De
-        # onderrand van het oog moet van ~31 naar ~15 ZAKKEN. Gaat hij omhoog,
-        # neem 27 in plaats van 333.
+        # En de overlevering verdween mee: rx stond op fase 0 met random data op
+        # +1,2% boven nominaal en staat nu exact op nominaal. Die +1,2% was dus
+        # een GEVOLG van het dataverlies, niet de oorzaak -- wat ook verklaart
+        # waarom de netwerkbuffer van een speler leegliep (28 s -> 0 in ~44 min,
+        # ~1,06%) en daarna hoorbaar haperde.
         #
-        # HERSTEL ALS DE CONTROLLER ALSNOG STERFT (geen reboot nodig):
+        # Dubbele stroom na de fix, beide PHYs 48 ch @ 96 kHz met random data:
+        # Main leak +0,00%, Backup leak +0,00%, overflow 0, write_drops 0,
+        # underrun 0,0/s, fifo_level 66 (servo-doel 64), rx_crc_err 0, PTP
+        # gelockt. Eerste keer in dit project dat beide bronnen tegelijk schoon
+        # zijn met echte data.
+        #
+        # ALLEEN cd_usb, NIET cd_usb2. Backup hangt aan een eigen PLL en zat al
+        # goed; gemeten na deze wijziging nog steeds -0,0002% met random data,
+        # dus ongemoeid. Schuif hem niet mee "voor de symmetrie" -- dan moet zijn
+        # tap opnieuw gezocht worden.
+        #
+        # TX-RISICO: GECONTROLEERD, NIET OPGETREDEN. cd_usb klokt ook de TX-kant
+        # naar de PHY, en ULPI is source-synchronous, dus deze 1,25 ns verschuift
+        # ook onze uitgangstiming. Dat had de PHY-ingangen kunnen schenden. Beide
+        # PHYs enumereren op high speed, Main's descriptor leest 48 ch / S32_LE /
+        # 96000 / ASYNC (dus de class-requests slagen) en de kernel meldt geen
+        # enkele transferfout. Blijf dit checken na elke placement-wijziging:
+        # breekt TX, dan zie je enumeratie- of transferfouten, geen lek.
+        #
+        # EEN EERDERE POGING LEEK DIT TE SLOPEN EN DAT WAS MIJN FOUT: er liep nog
+        # audio op een van de PHYs toen ik flashte, `pld load` trok het device
+        # midden in een transfer weg, en de xHCI-hostcontroller van de host ging
+        # eraan ("TRB DMA ptr not part of current TD" -> "HC died"). flash.sh
+        # weigert dat nu. Herstel zonder reboot:
         #     echo 0000:00:14.0 | sudo tee /sys/bus/pci/drivers/xhci_hcd/unbind
         #     sleep 3
         #     echo 0000:00:14.0 | sudo tee /sys/bus/pci/drivers/xhci_hcd/bind
-        # Daarna komen beide PHYs en de CH347 terug en kun je weer flashen.
         #
-        # DEFAULT BLIJFT 0. Alleen cd_usb, niet cd_usb2: Backup zit op een goed
-        # punt met marge en hoeft niet mee te schuiven.
-        _usb_phase = float(os.environ.get("USB_PHASE_DEG", "0"))
+        # *** EN TEST DIT NOOIT MET /dev/zero. *** Op fase 0 meette diezelfde
+        # tap 31 met /dev/zero 0,0000% terwijl er met random data 1,28% wegliep:
+        # constante nulbytes geven bijna geen transities, dus een marginaal
+        # setup/hold-venster blijft onzichtbaar. Dat heeft me een halve dag en
+        # een onjuiste "Main is schoon"-melding gekost.
+        #
+        _usb_phase = float(os.environ.get("USB_PHASE_DEG", "333"))
         usb_pll.create_clkout(self.cd_usb, 60e6, phase=_usb_phase)
         platform.add_false_path_constraints(self.cd_sys.clk, self.cd_usb.clk)
 

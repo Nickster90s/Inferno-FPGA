@@ -953,3 +953,50 @@ the Main bus is a wiring property worth measuring at the board — Main is on J4
 while J5 was hand-soldered, so an over-long clock wire on Main is a real
 candidate. (c) Until either lands, **Backup is the clean source** and measures
 0.0000% with real data; using it as the primary is the honest interim position.
+
+
+### 10. SOLVED: the phase shift fixes Main (2026-11-04)
+
+Run properly -- every player stopped, then flash, then measure -- `USB_PHASE_DEG=333`
+(= -27 degrees, on `cd_usb` only) fixes Main completely. Leak per IDELAY tap,
+48 ch @ 96 kHz, **with random data**:
+
+| tap | phase 0 | phase 333 |
+|---|---|---|
+| 31 (hardware max) | **+1.2841%** | **+0.0002%** |
+| 30 | +4.9970% | — |
+| 29 | +14.2055% | — |
+| 28 | +29.9451% | — |
+| 24 / 20 / 12 / 8 / 0 | — | **0.0000%** |
+| 16 / 4 | — | +0.0002% |
+
+At phase 0 even tap 31 leaked 1.28% and three taps lower it was 30%: the eye lay
+beyond what IDELAYE2 can reach. With the shift **every tap is clean, including
+tap 0**, so the eye is now wider than the whole delay line — the same position
+Backup always enjoyed. The pinned 31/31 is now an arbitrary choice inside the
+eye rather than a cliff edge.
+
+The over-delivery went with it: with random data at phase 0, `rx` sat +1.2% above
+nominal; it is now exactly nominal. So the +1.2% was a CONSEQUENCE of the loss,
+which is also why a network-sourced player drained its buffer (28 s -> 0 in
+~44 min, ~1.06%) and then stuttered.
+
+Dual stream, both PHYs at 48 ch / 96 kHz with random data: Main leak +0.00%,
+Backup leak +0.00%, overflow 0, `write_drops` 0, `underrun` 0.0/s, `fifo_level`
+66 against a servo target of 64, `packets` 24016/s, `rx_crc_err` 0,
+`mac_writer_err` 2.5/s, PTP locked. **First time in this project that both
+sources are clean at once with real data.**
+
+`cd_usb2` is deliberately left at phase 0: Backup runs off its own PLL, was
+already well-placed, and measured -0.0002% after the change. Do not shift it
+"for symmetry" — that would move its eye and force a fresh tap search.
+
+The TX risk was real and was checked, not assumed: `cd_usb` also clocks the side
+that drives the PHY and ULPI is source-synchronous, so 1.25 ns moves our output
+timing too. Both PHYs enumerate at high speed, Main's descriptor reads
+48 ch / S32_LE / 96000 / ASYNC (so class requests succeed) and the kernel logs no
+transfer errors. Re-check this after any placement change: if TX breaks it shows
+as enumeration or transfer errors, never as a leak.
+
+Archived as `bitstreams/dual-usb-96k_2026-11-04_phase333_BOTH-CLEAN.bit` with the
+full measurement beside it. `USB_PHASE_DEG` now defaults to 333 in `avb_soc.py`.
