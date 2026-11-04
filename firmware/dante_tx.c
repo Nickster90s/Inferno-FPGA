@@ -461,7 +461,7 @@ void dante_tx_poll(void)
             last_servo_ms = now;
             ptp_timestamp_t t = gptp_read_time();
             int64_t ptp_smp = (int64_t)t.seconds * (int64_t)g_fs
-                            + (int64_t)((t.nanoseconds * 3u) / 62500u);
+                            + (int64_t)((t.nanoseconds * 3u) / (3000000000u / g_fs));
             int64_t emit    = (int64_t)aaf_pkt_dbg_last_sec_read() * (int64_t)g_fs
                             + (int64_t)aaf_pkt_dbg_last_ts_read();
             int32_t err = (int32_t)(emit - ptp_smp);     // + = we are ahead
@@ -564,7 +564,27 @@ void dante_tx_poll(void)
             // The anchor puts the counter at PTP + ts_offset_samples, so that
             // is where it should sit.
             int32_t err  = phase - ts_offset_samples;
-            int32_t band = DANTE_TX_REANCHOR_SAMPLES;
+            // *** DE BAND IS EEN TIJD, NIET EEN AANTAL SAMPLES. ***
+            // DANTE_TX_REANCHOR_SAMPLES is 8 en komt uit "24 samples is 0,5 ms"
+            // (mcr_dante.c:155) -- dus uit 48 kHz. Bij 96 kHz is 8 samples maar
+            // 83 us, de helft van het bedoelde budget, en dan valt een
+            // systematische afwijking van 12 samples (125 us) er net buiten en
+            // ankert dit eeuwig door op 10 Hz. Gemeten 2026-11-04: 144
+            // re-anchors in 12 s met "phase -12 samples (-125 us)", terwijl de
+            // werkelijke emit-tegen-PTP fout -0,2 ms was en rotsvast stond.
+            // Schaal mee met de rate zodat het budget 167 us blijft: 8 bij
+            // 48 kHz, 16 bij 96 kHz. Dat blijft binnen de 0,25 ms van de
+            // strengste ontvanger (A16R), die bij 96 kHz 24 samples is.
+            int32_t band = (int32_t)((uint32_t)DANTE_TX_REANCHOR_SAMPLES
+                                     * g_fs / 48000u);
+            if (band < DANTE_TX_REANCHOR_SAMPLES)
+                band = DANTE_TX_REANCHOR_SAMPLES;   // nooit strakker dan ontworpen
+            // RESTEERT: die 12 samples zijn systematisch, niet ruis -- de
+            // re-anchor zet de teller op PTP+offset en meteen daarna meet hij
+            // weer -12. Dat is vermoedelijk de firmware-latency tussen
+            // gptp_read_time() en de load-puls (~125 us = ~6000 cycles op 50
+            // MHz). De band verdraagt het nu; hem WEGHALEN vraagt die latency
+            // meten en compenseren in ts_anchor(). Dat staat nog open.
             // CONFIRM BEFORE STEPPING. A re-anchor is audible, so one bad
             // reading must never cause one. Require the error to persist across
             // two polls; real phase error is monotonic and easily survives
@@ -576,9 +596,14 @@ void dante_tx_poll(void)
                 bad_streak = 0;
             if (bad_streak >= 2) {
                 bad_streak = 0;
+                // us-conversie OOK op g_fs: err*125/6 is 20,833 us/sample
+                // = 48 kHz. Op 96 kHz meldde dit 2,96 s voor een afwijking van
+                // 1,48 s, wat het probleem twee keer zo groot liet lijken als
+                // het was. 1e6/fs us per sample.
                 printf("[dtx] media clock phase %ld samples (%ld us) off "
-                       "-- re-anchoring\n",
-                       (long)err, (long)(err * 125 / 6));
+                       "[band %ld fs %lu] -- re-anchoring\n",
+                       (long)err, (long)((int64_t)err * 1000000 / (int64_t)g_fs),
+                       (long)band, (unsigned long)g_fs);
                 ts_anchor();
             }
         }
@@ -595,7 +620,7 @@ void dante_tx_poll(void)
             uint32_t esec, esub;
             dante_tx_read_emitted(&esec, &esub);      // atomic: see the header
             int64_t ptp_smp = (int64_t)t.seconds * (int64_t)g_fs
-                            + (int64_t)((t.nanoseconds * 3u) / 62500u);
+                            + (int64_t)((t.nanoseconds * 3u) / (3000000000u / g_fs));
             int64_t emit    = (int64_t)esec * (int64_t)g_fs + (int64_t)esub;
             int64_t err     = emit - ptp_smp;
             // Half a second. Far beyond any fpp bias (59 samples at most) and
@@ -1391,10 +1416,35 @@ int dante_tx_media_phase(int32_t *out_samples)
         if (a >= MEDIA_SUBSEC || t.nanoseconds >= 1000000000u)
             return 0;
 
-        int32_t ptp_sub = (int32_t)((t.nanoseconds * 3u) / 62500u);
+        int32_t ptp_sub = (int32_t)((t.nanoseconds * 3u) / (3000000000u / g_fs));
         int32_t d = (int32_t)a - ptp_sub;
-        if (d >= MEDIA_SUBSEC / 2)       d -= MEDIA_SUBSEC;
-        else if (d < -(MEDIA_SUBSEC / 2)) d += MEDIA_SUBSEC;
+        // *** SIGNED FOLD. MEDIA_SUBSEC IS g_fs EN DIE IS uint32_t. ***
+        // Zonder deze casts promoveert C de negatieve `d` naar unsigned in de
+        // vergelijking, wordt elke negatieve fase een gigantisch positief
+        // getal, is de test ALTIJD waar, en wordt er nog een hele seconde
+        // afgetrokken van iets dat al negatief was:
+        //     d = -11  ->  (uint32_t)-11 = 4294967285 >= 48000  ->  waar
+        //              ->  d = -11 - 96000 = -96011
+        // Dat is exact wat de console meldde: "media clock phase -96011 samples
+        // (-1000114 us) off -- re-anchoring", 140 keer in 12 seconden, terwijl
+        // de werkelijke fase -11 tot -17 samples was (los nagemeten uit
+        // last_sec/last_ts tegen ptp_now: -0,2 ms, rotsvast over 88 s).
+        //
+        // GEVOLGSCHADE, en dat is waarom dit zo lang onzichtbaar bleef: de
+        // re-anchor zelf zet de teller op de JUISTE waarde ("offset 0"), dus
+        // geen enkele teller werd ongezond. Wat het kostte was de printf-vloed
+        // op 10 Hz, die de main loop zo lang ophield dat RX-frames wegvielen --
+        // 3,6 van 44 frames/s, 8% -- en daar zaten PTP-berichten tussen. Vandaar
+        // offset-uitschieters van -17 tot -50 us en af en toe een UDP-timeout.
+        //
+        // DEZE BUG BESTOND NIET TOEN MEDIA_SUBSEC EEN LITERAL 48000 WAS: int
+        // tegen int gaat goed. Hij is geintroduceerd toen de constante
+        // rate-instelbaar werd. Let hierop bij elke andere plek waar een
+        // int-expressie tegen g_fs wordt vergeleken.
+        const int32_t _half = (int32_t)(MEDIA_SUBSEC / 2u);
+        const int32_t _full = (int32_t)MEDIA_SUBSEC;
+        if (d >= _half)       d -= _full;
+        else if (d < -_half)  d += _full;
         *out_samples = d;
         return 1;
     }

@@ -772,7 +772,9 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     {
         ptp_timestamp_t t = gptp_read_time();
         put32(p, n, (uint32_t)t.seconds);                      n += 4;
-        put32(p, n, (uint32_t)((t.nanoseconds * 3u) / 62500u)); n += 4;
+        // ns -> samples op g_fs; 62500 was de 48 kHz-waarde en gaf op 96 kHz
+        // de helft. Zie dante_tx.c regel ~267.
+        put32(p, n, (uint32_t)((t.nanoseconds * 3u) / (3000000000u / g_fs))); n += 4;
     }
     // trim_ppb/drift removed from this reply: adding them killed the port
     // outright (no response at all, while ARC 4440 and flow control 4455 kept
