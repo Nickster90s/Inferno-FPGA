@@ -685,38 +685,53 @@ health we can check directly on hardware (`rx_crc_err`, `mac_writer_err` rate),
 while usb's 0.9% shortfall is already proven to cost audio. Measure before
 rejecting it.
 
-#### Result: USB_PERIOD_NS=14 BACKFIRED. Do not repeat it.
+#### Result: USB_PERIOD_NS=14 WORKED. usb 60.52 -> 69.98.
 
-| clock | required | USB_PERIOD_NS=14 | the flashed build |
+**READ THE LAST TIMING REPORT, NOT THE FIRST.** nextpnr prints one per clock
+after PLACEMENT and again after ROUTING, and the two differ a lot. I reported
+the post-placement numbers (usb 54.69, usb2 55.91, eth_rx 120.66) as the result
+and wrote a whole "it backfired" section on them. `tools/`-side, `report.py`
+in the scratchpad was written in the previous session to take the LAST report
+per clock for exactly this reason, and I bypassed it by reading a monitor event.
+Grep it properly:
+
+    for c in s7pll0_clkout_buf0 s7pll1_clkout_buf s7pll2_clkout_buf \
+             eth_rx_clk eth_tx_clk; do
+      grep -a "Max frequency for clock" build.log | grep -a "$c'" | tail -1
+    done
+
+| clock | required | final (USB_PERIOD_NS=14) | the flashed build |
 |---|---|---|---|
-| sys | 50 | 51.96 PASS | 50.48 |
-| usb | 60 | **54.69 FAIL** | 60.52 |
-| usb2 | 60 | **55.91 FAIL** | 65.04 |
-| eth_rx | 125 | 120.66 FAIL | 135.61 |
-| eth_tx | 125 | 162.28 PASS | 160.38 |
+| sys | 50 | 55.52 PASS | 50.48 |
+| usb (Main) | 60 | **69.98 (+16.6%)** | 60.52 (+0.9%) |
+| usb2 (Backup) | 60 | 61.18 (+2.0%) | 65.04 (+8.4%) |
+| eth_rx | 125 | **140.96 PASS** | 135.61 |
+| eth_tx | 125 | 142.63 PASS | 160.38 |
 
-Both USB domains got WORSE and now miss even the real 60 MHz requirement. HeAP
-placed in 30 s without stalling, so this is not the stall failure mode — the
-placer ran and simply produced a worse result for the domains I had tightened.
+Against the REAL requirements all five pass. The two "FAIL" lines are only
+against the artificial 71.43 MHz target, which is not a requirement — so when
+sweeping with a deliberately tight target, score on the MHz number, never on
+PASS/FAIL.
 
-This is the same lesson as the 8 ns sys target, and I walked into it after
-quoting it: a target outside what the design can reach does not push harder, it
-removes the gradient the analytic placer works on. **I misread "inside the
-measured range".** The 70/71 in the table above was reached with usb targeted at
-its real 16.667 ns — it was SURPLUS over an achievable target, not evidence that
-71 MHz works as a target. Four data points for the rule now: sys at 8 ns stalls,
-sys at 16/14 stalls, usb at 14 collapses to 54.7.
+So Main's domain gained 15.6% and `eth_rx` closed at the same time, which the
+section 6 table said could not happen in this configuration (it had eth_rx at
+103.5 / 124.7 FAIL). The difference is that those were P&R-only runs on the
+2026-11-03 netlist; this is a full build on the current one. Treat the section 6
+table as a map of the old netlist, not of this one.
 
-**The knob is the floorplan and the seed, not the period.** Leave the periods on
-the real requirements and change where the cells go.
+Note usb2 at 61.18 is only +2.0%, worse than the flashed build's +8.4%. The
+margin moved from Backup to Main rather than appearing from nowhere, which is
+consistent with the column contention: the two USB subsystems trade with each
+other as well as with ethernet. Backup's eye has ~15 taps of slack, so it can
+afford to lose some — but verify it on hardware rather than assuming.
 
-#### Corrected run
+#### Control run, in parallel
 
     BOARD=breakout USB2=1 USB_DUAL_RATE=1 NEXTPNR_USB_FP_LIGHT=1 \
     STALL_SECS=900 ./build.sh --seed 1 --output-dir build_usbdefault_s1
 
-Same configuration, default constraints — exactly what produced usb 70 / usb2
-66 on seed 1 in the table. Note this is a FULL build on the current
-(post-counter-split) netlist, while the table's numbers were P&R-only runs on
-the 2026-11-03 netlist, so it is not a like-for-like reproduction; it is the
-closest available.
+Same configuration at DEFAULT constraints, to tell whether the 14 ns target did
+the work or seed 1 simply places well on this netlist. That answer decides
+whether `USB_PERIOD_NS` stays a useful knob or is noise. (Both builds ran
+concurrently on a 4-core machine, so wall-clock times from these two runs are
+not comparable with each other.)
