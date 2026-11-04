@@ -561,10 +561,32 @@ begins where the delay line stops. That is the whole of "Main is tight".
 **It is not a gateware asymmetry.** Both PLLs are `create_clkout(..., 60e6,
 phase=0)`, both ULPI buses are in bank 34, and Main's clock pin is the BETTER
 one: T4 is `IO_L13N_T2_MRCC_34` against Backup's AA4 `IO_L11N_T1_SRCC_34`. Pin
-spread is 10 IOB rows on both. So the ~1.3 ns is data-to-clock skew on the Main
-bus itself — board wiring, not placement. (The CRG comment still calls
-ulpi2_clock "V4, a bank-34 MRCC pin"; the map has used AA4/SRCC since
-2026-10-28.)
+spread is 10 IOB rows on both. (The CRG comment still calls ulpi2_clock "V4, a
+bank-34 MRCC pin"; the map has used AA4/SRCC since 2026-10-28.)
+
+**I FIRST WROTE THAT THE ~1.3 ns IS BOARD WIRING, "NOT PLACEMENT". THAT WAS
+WRONG, OR AT LEAST UNSUPPORTED.** The list above rules out a gateware asymmetry
+between the two buses; it does NOT rule out placement. The eye's position is set
+by when data reaches the capture flop against when the clock does, and BOTH of
+those terms are placement-dependent: the IOB-to-flop routing on one side, the
+PLL/BUFG insertion delay and clock-tree path on the other. With a critical path
+that is 86% routing and cells smeared from X=23 to X=84, placement is exactly
+where that skew can come from. The repo's own rule already said so — "the eye
+centre depends on PLACEMENT, so it moves when the floorplan or the netlist
+changes" (tools/tapsweep.py), and "a narrow eye is a symptom of too little Fmax
+margin in cd_usb, so look there BEFORE reaching for a sampling-phase change"
+(README). I proposed the phase shift first and skipped past that rule.
+
+What supports placement as the cause: `usb` Fmax spans **34.3 to 78.9 MHz**
+across the configurations in section 6, and the flashed build sits at 60.52 —
+the bottom of that range. The same floorplan config that ships reached usb
+70 / 71 on seeds 1 and 2. So there is 15-30% of margin available without
+touching a single line of source.
+
+One thing NOT to over-read: the firmware comment records Main's eye as 28..31 on
+the seed-2 build while we measure only 31 clean on seed 8. Suggestive, but the
+two used DIFFERENT CRITERIA — class-request errors then, the leak now, and the
+leak is far more sensitive. It is a hint that the eye moved, not proof.
 
 **Separately, both USB domains are routing-bound and smeared across the die.**
 From the verified build's own log (`ser_s8.log`):
@@ -632,3 +654,69 @@ before the tap CSR write). I nearly concluded a rebuild had not happened.
 fails with "no loader responded". Use plain `./flash.sh`, whose `pld load`
 restarts into the loader; it reloads the same bitstream plus the new firmware in
 one step.
+
+### The experiment that decides it (started 2026-11-04)
+
+    BOARD=breakout USB2=1 USB_DUAL_RATE=1 NEXTPNR_USB_FP_LIGHT=1 \
+    USB_PERIOD_NS=14 STALL_SECS=900 \
+    ./build.sh --seed 1 --output-dir build_usbmargin_s1
+
+`USB_PERIOD_NS=14` (71 MHz) gives the placer a real gradient on both USB
+domains without being unreachable — 70/71 is measured, so this is "ambitious
+but inside the measured range", not the 8 ns that killed HeAP. Verified in the
+generated XDC: `usb_clk` and `usb2_clk` both at 14.000 ns, sys still 20.000.
+
+Read the result as a fork, not as a number:
+
+* **Main's eye drops into the middle of the tap range and the leak reaches the
+  noise floor** → it was placement. Done, and no phase shift is needed.
+* **The eye stays pinned at 31 even though usb now closes near 70** → the skew
+  really is board-level, and the phase shift comes back on the table with
+  evidence behind it instead of a guess.
+
+Acceptance for production, either way: Main's leak at the noise floor with at
+least ~8 taps of margin BELOW the pinned value, so a future placement shift
+cannot walk it back off the edge. A single tap of margin is what we have now,
+and it is why this had to be re-opened.
+
+Watch `eth_rx`: this config measured 103.5 and 124.7 against a 125 MHz
+requirement. That is the trade. 124.7 is a 0.2% shortfall on a clock whose
+health we can check directly on hardware (`rx_crc_err`, `mac_writer_err` rate),
+while usb's 0.9% shortfall is already proven to cost audio. Measure before
+rejecting it.
+
+#### Result: USB_PERIOD_NS=14 BACKFIRED. Do not repeat it.
+
+| clock | required | USB_PERIOD_NS=14 | the flashed build |
+|---|---|---|---|
+| sys | 50 | 51.96 PASS | 50.48 |
+| usb | 60 | **54.69 FAIL** | 60.52 |
+| usb2 | 60 | **55.91 FAIL** | 65.04 |
+| eth_rx | 125 | 120.66 FAIL | 135.61 |
+| eth_tx | 125 | 162.28 PASS | 160.38 |
+
+Both USB domains got WORSE and now miss even the real 60 MHz requirement. HeAP
+placed in 30 s without stalling, so this is not the stall failure mode — the
+placer ran and simply produced a worse result for the domains I had tightened.
+
+This is the same lesson as the 8 ns sys target, and I walked into it after
+quoting it: a target outside what the design can reach does not push harder, it
+removes the gradient the analytic placer works on. **I misread "inside the
+measured range".** The 70/71 in the table above was reached with usb targeted at
+its real 16.667 ns — it was SURPLUS over an achievable target, not evidence that
+71 MHz works as a target. Four data points for the rule now: sys at 8 ns stalls,
+sys at 16/14 stalls, usb at 14 collapses to 54.7.
+
+**The knob is the floorplan and the seed, not the period.** Leave the periods on
+the real requirements and change where the cells go.
+
+#### Corrected run
+
+    BOARD=breakout USB2=1 USB_DUAL_RATE=1 NEXTPNR_USB_FP_LIGHT=1 \
+    STALL_SECS=900 ./build.sh --seed 1 --output-dir build_usbdefault_s1
+
+Same configuration, default constraints — exactly what produced usb 70 / usb2
+66 on seed 1 in the table. Note this is a FULL build on the current
+(post-counter-split) netlist, while the table's numbers were P&R-only runs on
+the 2026-11-03 netlist, so it is not a like-for-like reproduction; it is the
+closest available.
