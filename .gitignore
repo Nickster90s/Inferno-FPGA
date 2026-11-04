@@ -53,3 +53,6 @@ tools/seed_sweep_results.txt
 firmware/loader/.build.lock
 # Zoekruns van 2026-11-04 (floorplan/seed): zelfde 229 MB per dir als build_seed*.
 build_hunt_*/
+# 2026-11-04 usb-marge-experimenten; zelfde 229 MB per dir.
+build_usbmargin_*/
+build_usbdefault_*/
