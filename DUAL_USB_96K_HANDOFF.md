@@ -860,3 +860,81 @@ Still open, in order: the eye has only ~2 taps of margin above the cliff (the
 phase shift, as robustness); usb2 at 61.18 is thinner than the control build's
 65.96, so a better seed/floorplan point exists; and this is running VOLATILE —
 SPI still holds the previous bitstream.
+
+### 9. The leak is Main's input eye, and /dev/zero cannot see it (2026-11-04)
+
+**Test ULPI with random data. Never with `/dev/zero`.** Same bitstream, same
+pinned tap 31, same 48 ch @ 96 kHz, Main:
+
+| source | rx vs nominal | leak | fifo | underrun |
+|---|---|---|---|---|
+| `/dev/zero` | +0.06% | **0.0000%** | 90 | 0/s |
+| random data | +1.2% | **+1.25%** | 30–45 | 39–127/s |
+| mpv, internet radio | +1.2–1.3% | **+1.18–1.23%** | 56–59 | 12/s |
+
+Backup measures 0.0000% with zeros AND with random. Constant zero bytes make
+almost no transitions on the data bus, so a marginal setup/hold window stays
+invisible; I spent half a day concluding Main was clean while 1.28% was walking
+out of it. Every "leak = 0" result taken with `/dev/zero` in the sections above
+is worthless for timing margin.
+
+Tap sweep on Main WITH RANDOM DATA, which is what settles it:
+
+| tap | leak | lost |
+|---|---|---|
+| **31 = the hardware maximum** | **+1.28%** | 624 samples/s/ch |
+| 30 | +4.99% | 2428 |
+| 29 | +14.21% | 6895 |
+| 28 | +29.95% | 14490 |
+
+Monotone and steep, and the highest tap IDELAYE2 has still leaks 1.28%. 31 taps
+x ~78 ps = ~2.4 ns is simply not enough delay. **No tap can fix Main.**
+
+**It is not the media clock and not the feedback loop.** Measured against the
+board's own PTP clock over 180 s: 24002.09 packets/s, **+0.0087%** — the media
+clock is exact. And holding the feedback at true nominal made things worse
+(fifo 13, underrun 1124/s) because the host was already starving: the user's
+mpv log showed its network cache draining 28 s -> 0 over ~44 minutes, which is
+~1.06% and matches the over-delivery. The chain is: Main's ULPI input loses
+~1.25% of real data -> the endpoint passes roughly nominal -> the host is asked
+for ~1.2% more -> a network-sourced player drains its buffer until it underruns.
+"Audio loopt" was exactly that.
+
+### The phase shift killed the host controller. Do not repeat it as written.
+
+`USB_PHASE_DEG=333` on `cd_usb` builds fine and closes identically (a PLL phase
+is a parameter, so same netlist, same placement, same Fmax), and both PHYs still
+enumerate. Then, under isochronous traffic:
+
+    xhci_hcd 0000:00:14.0: ERROR Transfer event TRB DMA ptr not part of current TD
+    xhci_hcd 0000:00:14.0: xHCI host controller not responding, assume dead
+    xhci_hcd 0000:00:14.0: HC died; cleaning up
+
+All USB on the machine went away — both PHYs and the CH347, so the JTAG/UART
+bridge you would reflash with disappears too.
+
+**Why it cannot work as written:** `cd_usb` clocks the RX capture AND the TX
+side that drives the PHY. ULPI is source-synchronous and the PHY requires
+setup/hold against ITS clock, so the shift moves our OUTPUT timing as well, the
+PHY misreads our TXCMD/data, and malformed traffic goes onto the USB wire. It
+fixes RX by breaking TX. That is structural, not a matter of picking a better
+angle.
+
+**Recovery without a reboot:**
+
+    echo 0000:00:14.0 | sudo tee /sys/bus/pci/drivers/xhci_hcd/unbind
+    sleep 3
+    echo 0000:00:14.0 | sudo tee /sys/bus/pci/drivers/xhci_hcd/bind
+
+Both PHYs and the CH347 come back and flashing works again. Verified.
+
+**What could still work, in order of expected value.** (a) A second PLL output
+at a shifted phase clocking ONLY the RX capture flops, which means separating
+the ULPI wrapper's RX capture from the rest of `cd_usb` — the real fix, and a
+contained RTL change. (b) The physical skew: Main's eye sits ~1.3 ns higher than
+Backup's, both PLLs are at phase 0 and both buses are in bank 34 with Main on
+the BETTER clock pin (T4 MRCC vs AA4 SRCC), so ~1.3 ns of data-vs-clock skew on
+the Main bus is a wiring property worth measuring at the board — Main is on J4
+while J5 was hand-soldered, so an over-long clock wire on Main is a real
+candidate. (c) Until either lands, **Backup is the clean source** and measures
+0.0000% with real data; using it as the primary is the honest interim position.

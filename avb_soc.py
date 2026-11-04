@@ -112,7 +112,74 @@ class _CRG(LiteXModule):
         self.usb_pll = usb_pll = S7PLL(speedgrade=-1)
         self.comb += usb_pll.reset.eq(self.rst)
         usb_pll.register_clkin(ulpi_clk, 60e6)
-        usb_pll.create_clkout(self.cd_usb, 60e6, phase=0)
+        # ---- OPNAMEFASE VOOR MAIN'S ULPI: USB_PHASE_DEG --------------------
+        # Main's ingangsoog ligt HOGER dan de delaylijn kan compenseren. Gemeten
+        # 2026-11-04 op build_usbmargin_s1, 48 ch @ 96 kHz met RANDOM data
+        # (lek = dbg_rx_beats tegen dbg_ep_out):
+        #
+        #     tap 31 (= het maximum)  +1,28 %   624 samples/s/kanaal
+        #     tap 30                  +4,99 %
+        #     tap 29                 +14,21 %
+        #     tap 28                 +29,95 %
+        #
+        # Monotoon en steil, en de HOOGSTE tap die IDELAYE2 heeft leakt nog
+        # 1,28%. Geen tap kan dit dus oplossen -- 31 taps x ~78 ps = ~2,4 ns is
+        # niet genoeg. Backup haalt op dezelfde build 0,0000% met zowel nullen
+        # als random, dus het is Main-specifiek.
+        #
+        # *** TEST MET RANDOM DATA, NOOIT MET /dev/zero. ***
+        # Diezelfde tap 31 meet 0,0000% als je /dev/zero inspeelt: constante
+        # nulbytes geven bijna geen transities op de bus, dus een marginaal
+        # setup/hold-venster blijft onzichtbaar. Ik heb daar een halve dag op
+        # geconcludeerd dat Main schoon was terwijl er 1,28% wegliep.
+        #
+        # De uitweg is de DATA niet verder vertragen maar de SAMPLEFLANK
+        # verschuiven, zodat het oog in het bereik van de delaylijn zakt en er
+        # marge aan beide kanten komt. ~16 taps = ~1,25 ns = ~27 graden bij
+        # 60 MHz. Het TEKEN is nog niet vastgesteld: meer datavertraging is
+        # equivalent aan een EERDERE flank, dus de verwachting is negatief
+        # (= 333), maar dat moet uit een build blijken. Verifieer door de
+        # tap-sweep MET RANDOM DATA te herhalen: de onderrand van het oog moet
+        # van ~31 naar ~15 ZAKKEN. Gaat hij omhoog, neem dan 27.
+        #
+        # *** 333 GRADEN IS GEPROBEERD EN HEEFT DE USB-HOSTCONTROLLER GESLOOPT.
+        #     NIET HERHALEN ZONDER DE TX-KANT MEE TE NEMEN. ***
+        # Gemeten 2026-11-04, build_phase333_s1: de bitstream bouwt, alle vijf
+        # klokken sluiten identiek (fase is een PLL-parameter, dus dezelfde
+        # netlist en dezelfde placement), beide PHYs enumereren nog. Maar zodra
+        # er isochroon verkeer liep vulde de kernel zich met
+        #     xhci_hcd: ERROR Transfer event TRB DMA ptr not part of current TD
+        # en daarna
+        #     xhci_hcd: xHCI host controller not responding, assume dead
+        #     xhci_hcd: HC died; cleaning up
+        # waarna ALLE USB van de machine wegviel -- beide PHYs en ook de CH347,
+        # dus ook de JTAG/UART-brug waarmee je zou willen herflashen.
+        #
+        # WAAROM HET NIET KAN WERKEN ZOALS IK HET DEED. cd_usb klokt niet alleen
+        # de RX-capture maar ook de TX-kant die naar de PHY terugstuurt. ULPI is
+        # source-synchronous: de PHY eist setup/hold op ZIJN klok. Deze fase
+        # verschuift dus net zo goed onze UITGANGStiming, de PHY leest onze
+        # TXCMD/data verkeerd, en er gaat rommel de USB-draad op. De
+        # verschuiving repareert RX en breekt TX, omdat ze hetzelfde domein
+        # delen. Dat is geen afstemkwestie, dat is de opzet.
+        #
+        # WAT WEL ZOU KUNNEN: een TWEEDE PLL-uitgang op een verschoven fase die
+        # ALLEEN de RX-samplevlak klokt (de ULPI-wrapper moet daarvoor zijn
+        # RX-capture losknippen van de rest), of de skew fysiek aanpakken --
+        # Main's oog ligt ~1,3 ns hoger dan Backup's, en Main zit op J4 terwijl
+        # J5 handmatig is gesoldeerd, dus een te lange klokdraad op Main is een
+        # reele kandidaat die met een meting aan het bord te checken is.
+        #
+        # HERSTEL ALS DE CONTROLLER ALSNOG STERFT (geen reboot nodig):
+        #     echo 0000:00:14.0 | sudo tee /sys/bus/pci/drivers/xhci_hcd/unbind
+        #     sleep 3
+        #     echo 0000:00:14.0 | sudo tee /sys/bus/pci/drivers/xhci_hcd/bind
+        # Daarna komen beide PHYs en de CH347 terug en kun je weer flashen.
+        #
+        # DEFAULT BLIJFT 0. Alleen cd_usb, niet cd_usb2: Backup zit op een goed
+        # punt met marge en hoeft niet mee te schuiven.
+        _usb_phase = float(os.environ.get("USB_PHASE_DEG", "0"))
+        usb_pll.create_clkout(self.cd_usb, 60e6, phase=_usb_phase)
         platform.add_false_path_constraints(self.cd_sys.clk, self.cd_usb.clk)
 
         # PHASE-2: 2nd USB clock domain (Backup ULPI) — 60 MHz from ulpi2_clock
