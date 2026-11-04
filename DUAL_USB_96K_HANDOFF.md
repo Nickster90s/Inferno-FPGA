@@ -735,3 +735,66 @@ the work or seed 1 simply places well on this netlist. That answer decides
 whether `USB_PERIOD_NS` stays a useful knob or is noise. (Both builds ran
 concurrently on a 4-core machine, so wall-clock times from these two runs are
 not comparable with each other.)
+
+### Outcome: Main's leak is gone. Measured on build_usbmargin_s1.
+
+Flashed volatile, taps 31/31, three 30 s windows per PHY:
+
+| window | Main | Backup |
+|---|---|---|
+| 1 | +0.0001% (14 B/s) | 0.0000% (0 B/s) |
+| 2 | **0.0000% (0 B/s)** | +0.0001% (13 B/s) |
+| 3 | +0.0001% (7 B/s) | −0.0001% (−13 B/s) |
+
+Main and Backup are now indistinguishable, both at the measurement noise floor,
+each with one window at exactly zero. Before: Main 84–93 B/s against Backup
+5–13. Dual stream, both PHYs at 48 ch / 96 kHz simultaneously: 18,458,592 B/s
+each, **leak +0.00% on both**, overflow 0, `packets` 24000.5/s, `rx_crc_err` 0,
+`mac_writer_err` 2.9/s, PTP locked at 213 ns. `eth_rx` at 140.96 MHz is healthy
+on hardware, which answers the trade this build was worried about.
+
+**And the eye did NOT move — it got cleaner where it already was.** Sweeping
+Main's tap on this build: 31 → +0.0003%, 28 → +0.3498%, 24 → +23.9% (3/4 opens
+failed), ≤20 will not open at all. So the lower edge is still at ~30 and the
+fall-off below it is STEEPER than on the 60.52 MHz build, while the leak AT tap
+31 dropped from 84 to ~0 B/s. Conclusion: **eye POSITION is set by board skew,
+eye QUALITY at that position is set by Fmax margin.** Neither of my two
+hypotheses was right alone — placement did not shift the eye into mid-range, and
+skew alone did not explain why more Fmax fixed the leak.
+
+Consequence for production: the audible defect is fixed, but the pin still sits
+~2 taps above the cliff rather than the ~8 I set as the acceptance bar. The
+phase shift from the previous section is still the way to buy that margin, and
+it is now a *robustness* change rather than the fix — different priority.
+
+**USB_PERIOD_NS=14 is a FLOORPLAN lever, not a timing lever.** The control build
+at default constraints gave usb 69.67 / usb2 65.96 — the same usb as the 14 ns
+build (69.98), so the tight target did NOT produce Main's margin; seed 1 simply
+places usb well on this netlist. What it did produce is `eth_rx` 140.96 against
+the control's **103.46 FAIL**: constraining both USB domains harder compacts
+them and frees the left column, exactly the mechanism section 6 describes. Keep
+it for that reason, and note the control's usb2 was BETTER (65.96 vs 61.18), so
+there is a better point still to find.
+
+### A defect I introduced and then measured: write_drop_count is broken
+
+The counter split of commit 7df0575 was right in principle and wrong in this
+instance. `write_drop_count` reads **~4,608,000/s in every configuration** —
+only Main, only Backup, or both — and that is exactly 96000 × 48. A counter
+equal to the sample rate counts SAMPLES, not drops. Meanwhile the leak was
+0.0000% on both PHYs, `packets` exactly 24000/s and `overflow` 0, so nothing was
+actually being lost. `tools/usbsrc.py` was printing "<-- HOORBARE SAMPLE-DROPS"
+at it, which is a false alarm; it now prints the number flagged as broken.
+
+Where to look: the increment is `en & samp_vld & (started | first) & ~have_space`
+and should be the exact complement of `do_write`. `samp_vld` is `do_pop`, a true
+one-cycle strobe, and none of these signals sit inside the `for _s in
+range(streams)` loop (which starts after them), so it is not a scope mistake.
+That leaves `have_space = level < (SRING_DEPTH - 2)`: `~have_space` is true on
+every sample while `do_write` still writes, so `level` is not the quantity it
+appears to be — note the `fifo_level` CSR reads 7 to 95, far below 2046. Fix
+`level`, not the counter.
+
+So the standing rule for "are we losing audio" remains: **the leak, two
+independent counters.** I split one conflated counter and walked straight into a
+second bad one; the leak is the thing that has never lied here.

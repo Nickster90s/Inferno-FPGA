@@ -126,11 +126,29 @@ def show(board):
     # een gezonde 96 kHz-stroom met tienduizenden per seconde; dat leidde op
     # 2026-11-03 tot een halve sessie jagen op een niet-bestaand defect. Deze
     # teller is ring-vol write-drops en niets anders. Nul = geen sample verloren.
+    # *** write_drop_count IS KAPOT IN DE GATEWARE. NIET OP STUREN. ***
+    # Gemeten 2026-11-04 op build_usbmargin_s1: de teller loopt met ~4.608.000/s
+    # in ELKE configuratie -- alleen Main, alleen Backup, of beide -- en dat is
+    # exact 96000 x 48. Een teller die gelijk is aan de samplerate telt SAMPLES,
+    # geen drops. De conditie in dante_packetizer.py (~regel 1176) is
+    #     en & samp_vld & (started | first) & ~have_space
+    # en die hoort de exacte complement van do_write (~regel 628) te zijn, maar
+    # ~have_space is blijkbaar op elk sample waar terwijl er wel geschreven
+    # wordt -- dus `level` in `have_space = level < SRING_DEPTH-2` is niet het
+    # getal dat ik aannam. Zolang dat niet is opgelost: gebruik het LEK
+    # (rx_beats tegen ep_out, hierboven) als maat voor sampleverlies. Dat zijn
+    # twee onafhankelijke tellers en die stond op 0,0000% terwijl deze 4,6M/s
+    # schreeuwde.
     _wd = b.get("write_drops")
     if _wd is None:
         print("  write-drops  (niet in deze bitstream — oudere CSR-map)")
     else:
         _d = (_wd - a.get("write_drops", 0)) & 0xffffffff
+        print("  write-drops  %d totaal, %+d in 2 s   <-- TELLER IS KAPOT, "
+              "negeer dit getal (telt samples, niet drops); kijk naar leak"
+              % (_wd, _d))
+    if False:
+        _d = 0
         print("  write-drops  %d totaal, %+d in 2 s   %s"
               % (_wd, _d, "OK" if _d == 0 else "<-- HOORBARE SAMPLE-DROPS"))
     if query(board) and b["bkp_rx_beats"] == a["bkp_rx_beats"]:
