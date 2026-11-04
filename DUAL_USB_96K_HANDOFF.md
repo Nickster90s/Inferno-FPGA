@@ -514,3 +514,121 @@ the board came up with PTP locked in 40 s, `talker 1` at 60 s, 23998 pkt/s
 that looks alarming after a cold boot is `mac_writer_err`: it accrues a few
 tens of thousands while the rx-gate is still disabled at reset, then settles to
 ~3/s once firmware arms it. Measure the RATE, not the total.
+
+## 8. Why Main is tight, and why its ingress leaks (2026-11-04)
+
+Reported as "audio on Backup is good, on Main it is very bad". It is real, it is
+measurable, and the cause is not what the first measurement suggested.
+
+**Use the LEAK, never `overrun_count`/`sendreq_busy`.** `main_rx_beats` against
+`main_ep_out` are two INDEPENDENT counters, so their difference means exactly
+one thing: bytes that arrived on the ULPI wire and never reached the OUT
+endpoint. `overrun_count` in the shipping bitstream still SUMS benign overruns
+with ring-full write-drops, and during this investigation it read anywhere
+between 0 and 3.5 million/s for the same situation on BOTH PHYs. I built a tap
+theory on an early Main-515k/Backup-0 reading and the control measurement on
+Backup demolished it. The leak's noise floor is +/-30 B/s over a 15 s window
+(+/-0.0003%); one reading came out at -0.0003% because the two counters are not
+sampled atomically.
+
+**Measured leak against the IDELAY tap, 48 ch @ 96 kHz, 15 s per point:**
+
+| tap | Main | Backup |
+|---|---|---|
+| 0 | — | stream will not open (4/4) |
+| 8 | — | +0.0139%  (6.7 samples/s/ch) |
+| 16 | — | +0.0001% |
+| 18–28 | — | at the noise floor |
+| 24 / 28 / 31 | — | 0.0000% |
+| 26 | +2.5237% (1267 samples/s/ch) | — |
+| 27 | +1.2925% (637) | — |
+| 28 | +0.5918% (288) | — |
+| 29 | +0.1750% (84.6) | — |
+| 30 | +0.0231% (11.1) | — |
+| 31 | +0.0010% (0.3) | 0.0000% |
+
+Monotone on both buses: higher tap is better, and **there is no upper edge
+within reach** — Main still improves from 30 to 31, so both eyes continue past
+what IDELAYE2 can deliver (31 taps, ~78 ps each, ~2.4 ns total). "Pick the
+middle of the eye" therefore does not apply here. The only edge we can touch is
+the lower one, so the rule is: **as high as the delay line goes.**
+
+**The asymmetry: Main's eye sits ~16–19 taps (~1.3 ns) HIGHER than Backup's.**
+Backup is flat zero from ~16 to 31 and only fails below ~8, so it has ~15 taps
+of margin. Main's clean region starts exactly at 31, so it has none — its eye
+begins where the delay line stops. That is the whole of "Main is tight".
+
+**It is not a gateware asymmetry.** Both PLLs are `create_clkout(..., 60e6,
+phase=0)`, both ULPI buses are in bank 34, and Main's clock pin is the BETTER
+one: T4 is `IO_L13N_T2_MRCC_34` against Backup's AA4 `IO_L11N_T1_SRCC_34`. Pin
+spread is 10 IOB rows on both. So the ~1.3 ns is data-to-clock skew on the Main
+bus itself — board wiring, not placement. (The CRG comment still calls
+ulpi2_clock "V4, a bank-34 MRCC pin"; the map has used AA4/SRCC since
+2026-10-28.)
+
+**Separately, both USB domains are routing-bound and smeared across the die.**
+From the verified build's own log (`ser_s8.log`):
+
+* `usb` (Main, s7pll1): **2.3 ns logic, 14.2 ns routing**, 16.5 ns total,
+  hopping (84,84) → (84,94) → (81,103) → (30,103) → (70,103) → (33,89) →
+  (70,109) → (30,110) → (23,125) → (70,111) — X=23 to X=84, 0.9–1.5 ns a hop.
+* `usb2` (Backup, s7pll2): **2.0 ns logic, 13.4 ns routing**, 15.3 ns total,
+  same character: (91,110) → (30,134) → (71,134) → (33,106) → (81,127).
+
+86% of both paths is wire, through `usb.USBControlEndpoint`,
+`endpoint_mux.tx_mux` and `ulpi_wrap`. `NEXTPNR_USB_FP_LIGHT=1` constrains only
+the ~690 cells on nets touching the ULPI pads, so the LUNA core itself is free
+to scatter. Main is 1.2 ns worse than Backup — 60.52 vs 65.04 MHz — purely on
+placement luck, not architecture. Neither has the margin a 60 MHz source
+capture deserves.
+
+### What was done now, and what is still needed
+
+Firmware pins **both taps at 31** (was Main 30, Backup 16). Measured after:
+Main +0.0004%/+0.0007% (39 and 68 B/s), Backup +0.0001%/-0.0001% (6 and -9 B/s,
+i.e. the noise floor). Main went from ~11 samples/s/channel — a dropout every
+~90 ms, continuous crackle — to ~0.1–0.3. Written to SPI, so a power cycle
+keeps it.
+
+That is the best firmware can do, and it is **not** the same as Backup's zero.
+Main sits a factor ~2 above the measurement noise floor with zero margin above
+it, which is not a production footing.
+
+**The real fix is to move the capture phase, not the data.** Main needs ~16
+taps (~1.3 ns, ~27 deg at 60 MHz) more effective delay than the line can give.
+Shifting `cd_usb`'s PLL output phase moves the sampling edge instead, which
+drops Main's eye down into the middle of the tap range and gives it margin on
+both sides. Shift both domains by the same amount and Backup's whole range goes
+clean too, so no asymmetry is introduced:
+
+    usb_pll.create_clkout(self.cd_usb,  60e6, phase=333)   # -27 deg
+    usb2_pll.create_clkout(self.cd_usb2, 60e6, phase=333)
+
+**The sign needs one build to confirm.** More data delay is equivalent to an
+EARLIER sampling edge, hence the negative shift, but verify by re-running the
+tap sweep: the eye's lower edge should move DOWN from 31 toward ~15. If it
+moves up instead, use `phase=27`. Two builds settle it, and the eye measurement
+reads out immediately — do not guess from the Fmax number.
+
+Second, give each USB subsystem a compact region so the 14 ns of routing comes
+down. That is the same left-IO-column contention as section 6, now with a
+priority order the audio decides: **usb/usb2 margin matters more than eth_rx
+headroom** — eth_rx needs 125 MHz and reaches 135–161, while usb needs 60 and
+sits at 60.52.
+
+### Two traps that cost time here
+
+**`firmware.bin`'s crc32 is a constant.** The Makefile runs
+`litex.soc.software.crcfbigen`, which patches the binary so its CRC32 is always
+`0x2144df1c`. `mkimage.py` and `netload.py` both print that value, so it is
+useful for spotting corruption and **useless for telling two builds apart** —
+and it will not change when your edit lands. Compare `md5sum firmware/firmware.bin`
+instead, or read the constant out of the disassembly
+(`objdump -d firmware/firmware.elf | grep -B1 "sw.*-2016(a"` shows `li a4,31`
+before the tap CSR write). I nearly concluded a rebuild had not happened.
+
+**`./flash.sh --fw-only` cannot reset this board by itself.** It prints
+"waiting for loader... (reset the board now: 'r' on the console)" and then
+fails with "no loader responded". Use plain `./flash.sh`, whose `pld load`
+restarts into the loader; it reloads the same bitstream plus the new firmware in
+one step.

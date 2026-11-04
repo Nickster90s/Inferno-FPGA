@@ -1017,10 +1017,75 @@ int main(void)
     // elk door meting zag sneuvelen.
     //
     // Meet dus met tools/tapsweep.py --criterion errors, niet op enumeratie.
-    main_ulpi_idelay_tap_write(30);
+    //
+    // *** 31 OP DE SEED-8 DUAL-USB BITSTREAM, GEMETEN 2026-11-04. ***
+    // Klacht: "audio op Backup is goed en op Main zeer slecht". Het criterium
+    // hierboven (class-request fouten) is nog steeds te grof -- het vindt waar
+    // de link OPENT, niet waar hij SCHOON is. Het juiste getal is het LEK:
+    // main_rx_beats tegen main_ep_out, twee ONAFHANKELIJKE tellers, dus bytes
+    // die op de ULPI-draad aankwamen en het OUT-endpoint nooit bereikten.
+    // Gemeten met 48 ch @ 96 kHz erin, 15 s per punt:
+    //
+    //      tap 31 -> +0,0007%     0,3 samples/s/kanaal
+    //      tap 30 -> +0,0231%    11,1          <-- wat hier stond
+    //      tap 29 -> +0,1750%    84,6
+    //      tap 28 -> +0,5918%   288
+    //      tap 27 -> +1,2925%   637
+    //      tap 26 -> +2,5237%  1267
+    //
+    // Monotoon, en 31 is 33x beter dan 30. Over drie vensters van 40 s blijft
+    // 31 op 0,2-0,3 samples/s/kanaal; Backup (tap 16) haalt exact 0,0000%.
+    // Op tap 30 verloor elk kanaal een sample per ~90 ms -- continu geknetter.
+    //
+    // LET OP WAT DIT OOK ZEGT: het oog wil VOORBIJ 31 liggen, en 31 is het
+    // maximum dat IDELAYE2 heeft. Er is dus geen marge meer boven. Dat is geen
+    // tap-probleem maar te weinig Fmax-marge in cd_usb: op deze bitstream sloot
+    // usb (Main, s7pll1) op 60,52 MHz tegen een eis van 60 -- +0,9% -- terwijl
+    // usb2 (Backup, s7pll2) op 65,04 sloot, +8,4%. Vandaar dat Backup elke tap
+    // verdraagt en Main tegen de rand van de delaylijn aan ligt. De echte fix
+    // zit in de volgende build: geef usb marge, desnoods ten koste van eth_rx,
+    // die 125 moet halen en 135-161 haalt. Zie DUAL_USB_96K_HANDOFF.md.
+    //
+    // En NIET op de teller overrun_count/sendreq_busy sturen: die telt in deze
+    // bitstream benigne overruns en ring-vol write-drops BIJ ELKAAR OP, en liep
+    // tijdens dit onderzoek tussen 0 en 3,5 miljoen/s voor dezelfde situatie op
+    // BEIDE PHY's. Ik heb daar eerst een tap-theorie op gebouwd en die is door
+    // de controlemeting op Backup onderuit gehaald. Gebruik het lek.
+    main_ulpi_idelay_tap_write(31);
     main_ulpi_idelay_load_write(1);
 #ifdef CSR_MAIN_ULPI2_IDELAY_TAP_ADDR
-    main_ulpi2_idelay_tap_write(16);
+    // BACKUP OOK OP 31, EN DAT IS GEMETEN, NIET GESPIEGELD AAN MAIN.
+    // De oude 16 kwam uit een sweep op ENUMERATIE, en dat criterium noemde
+    // Backup's oog "0..31, geen rand binnen bereik". Op het LEK gemeten
+    // (bkp_rx_beats tegen bkp_ep_out, 15 s per punt) is dat onjuist:
+    //
+    //      tap  0 -> stroom opent niet (4 van 4 pogingen)
+    //      tap  8 -> +0,0139%   6,7 samples/s/kanaal
+    //      tap 16 -> +0,0001%   (wat hier stond: net boven de onderrand)
+    //      tap 18..28 -> binnen de ruisvloer van de meting (+/-0,0003%,
+    //                    een keer -0,0003% omdat de twee tellers niet
+    //                    atomair worden gelezen)
+    //      tap 24, 28, 31 -> 0,0000%
+    //
+    // Backup is dus vlak nul van ~16 tot 31 en faalt pas onder ~8.
+    //
+    // *** WAAROM 31 EN NIET HET MIDDEN. ***
+    // Er is GEEN BOVENRAND binnen bereik: Main verbetert nog steeds van tap 30
+    // naar 31, dus het oog van beide bussen loopt voorbij wat IDELAYE2 kan
+    // geven (31 taps, ~78 ps elk, samen ~2,4 ns). "Kies het midden van het
+    // oog" is hier dus niet toepasbaar -- de enige rand die we kunnen raken is
+    // de ONDERSTE, en de regel wordt: zo hoog mogelijk, weg van die rand.
+    // Voor Backup is dat 31 met ~15 taps marge; voor Main is dat 31 met
+    // vrijwel geen marge, want zijn oog begint pas daar.
+    //
+    // DAT VERSCHIL IS DE KERN VAN "Main is krap": Main's oog ligt ~16-19 taps
+    // (~1,3 ns) HOGER dan Backup's. Beide PLL's staan op phase=0 en beide
+    // bussen zitten in bank 34, dus dat is geen gateware-asymmetrie maar skew
+    // tussen data en klok op de Main-bus zelf. De echte fix is de opnamefase
+    // verschuiven zodat beide ogen in het bereik van de delaylijn zakken; zie
+    // DUAL_USB_96K_HANDOFF.md. Tot die build is 31/31 het beste dat firmware
+    // kan doen.
+    main_ulpi2_idelay_tap_write(31);
     main_ulpi2_idelay_load_write(1);
 #endif
 
