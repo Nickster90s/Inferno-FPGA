@@ -1649,24 +1649,36 @@ def main():
         # PLL's blijven op 50 en 60 MHz lopen; dit stuurt alleen hoe hard
         # nextpnr optimaliseert. Elk los te overschrijven voor een sweep.
         #
-        # DEFAULTS STAAN OP DE ECHTE EISEN, EN DAT IS GEMETEN, NIET GEKOZEN.
+        # DEFAULTS STAAN OP DE ECHTE EISEN, EN DIT IS DE HELE MEETREEKS.
         # Wat de sys-periode doet met de sys-Fmax, op dit ontwerp:
-        #     8,000 ns  -> sys 50,48  (de geverifieerde seed-8 bitstream; de
-        #                  constraint BOND echt, prefix avbsoc_crg_ is juist,
-        #                  en de build stalde niet -- sys landde wel krap)
+        #    20,000 ns  -> sys 50,48  ALLE VIJF KLOKKEN PASS. Dit IS de
+        #                  geverifieerde dual-USB seed-8 bitstream (bouwlog
+        #                  ser_s8.log, 19:27, prefix main_crg_, "PASS at
+        #                  50.00 MHz"). Het enige ontwerp dat ooit alle vijf
+        #                  klokken sloot en ook echt audio deed.
+        #                  sys 63,24  (seed 1, 1 falende klok)
+        #                  sys 65,96  (seed 7, 1 falende klok)
         #    16,667 ns  -> sys 62,64  (seed 11, 2 falende klokken)
-        #    20,000 ns  -> sys 63,24  (seed 1, 1 falend)
-        #                  sys 65,96  (seed 7, 1 falend)
         #    16,0 / 14,0 -> STALT (HeAP haalt een iteratie en blijft hangen)
-        # Losser zetten VERLAAGDE sys dus niet; het ging omhoog en het aantal
-        # falende klokken ging van 2 naar 1. Sys is op dit ontwerp niet de klok
-        # die door zijn eigen constraint wordt begrensd -- hij landt 62-66
-        # ongeacht wat hier staat. Vandaar: zet de eis, niet een fantasie.
         #
-        # LET OP wat je hierboven NIET mag lezen: twee seeds tegen een is geen
-        # bewijs dat 20 beter sluit dan 16,667. Het is wel genoeg om te zeggen
-        # dat strakker zetten hier niets oplevert, en de echte eis heeft het
-        # voordeel dat een PASS ook echt PASS betekent in de log.
+        # EERDERE VERSIE VAN DIT COMMENTAAR WAS FOUT, twee keer. Het schreef
+        # "8,000 ns -> sys 50,48" als een meting; die 8 ns komt uit
+        # build_seed8/, de SINGLE-USB build, en de 50,48 uit de dual-USB build.
+        # Twee verschillende ontwerpen in een regel. En het concludeerde dat
+        # losser zetten sys niet verlaagt -- terwijl de geverifieerde build op
+        # 20 ns juist de LAAGSTE sys van de reeks haalde.
+        #
+        # Wat de reeks wel zegt: op 20 ns hoeft de placer maar 50 te halen en
+        # stopt hij soms op 50,48 (krap), soms op 66. Op 16,667 moet hij 60
+        # halen en haalde hij 62,64. Strakker zetten koopt dus sys-marge; de
+        # twee runs op 20 ns hadden een falende klok minder, maar dat is usb /
+        # usb2 / eth_rx, niet sys. Twee samples tegen een beslist niets.
+        #
+        # DAAROM BLIJFT 20,0 DE DEFAULT: niet omdat het beter meet, maar omdat
+        # het de enige instelling is waarmee een bitstream is gebouwd die op
+        # hardware werkt. Wil je sys-marge boven dat precedent stellen, zet dan
+        # SYS_PERIOD_NS=16.667 en bouw echt -- en let erop dat 50,48 betekent
+        # dat sys in de werkende build nauwelijks marge had.
         #
         # Het snelle P&R-harnas kan dit NIET aftasten: de controle met
         # 20 / 16,667 -- exact de instelling waarmee de seed-7 build wel
@@ -1719,10 +1731,11 @@ def main():
             # REGEL: een timing-constraint ver buiten wat het ontwerp kan halen
             # "duwt" niet harder, hij haalt de gradient weg die de analytic placer
             # nodig heeft. Dat deel klopt (16,0 / 14,0 stalt).
-            # MAAR de tweede helft van dit argument -- "16.667 ligt binnen het
-            # gemeten bereik, dus de placer blijft optimaliseren" -- is op
-            # 2026-11-04 WEERLEGD: sys landt 62-66 bij 16,667 EN bij 20,0, dus
-            # die 20% "reserve" kocht niets. Zie de metingen bij _P_SYS.
+            # De tweede helft van dit argument -- "16.667 ligt binnen het
+            # gemeten bereik, dus de placer blijft optimaliseren" -- klopt ook:
+            # op 16,667 haalde sys 62,64. Alleen is het geen reden om af te
+            # wijken van de eis, want de enige build die op hardware werkt is
+            # op 20 ns gebouwd. Zie de meetreeks bij _P_SYS.
             # SYS_PERIOD_NS overschrijft voor een sweep.
             # (de regels hieronder zijn vervangen door _ck() verderop; deze
             #  tekst blijft als anker voor de onderliggende redenering)

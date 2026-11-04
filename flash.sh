@@ -22,9 +22,42 @@ CFG=$TOOLS/ch347.cfg
 IFACE=${IFACE:-ens5}
 BOARD=${BOARD:-169.254.9.200}
 
-# WHICH BITSTREAM. build_seed8/ is the bitstream that was VALIDATED on hardware
-# (USB ingress exact, audio to three receivers). build/colorlight_i9plus/ is
-# whatever was built last, which is not the same thing and may be a diagnostic.
+# WHICH BITSTREAM. bitstreams/dual-usb-96k_2026-11-03_seed8_VERIFIED.bit is the
+# one that was VALIDATED on hardware WITH BOTH PHYS: 48 ch @ 96 kHz on each
+# simultaneously, PHY-hold, OSC handover, forced handover to a dead source,
+# PTP locked, 0 failing clocks. build/colorlight_i9plus/ is whatever was built
+# last, which is not the same thing and may be a diagnostic.
+#
+# IT USED TO POINT AT build_seed8/, AND THAT WAS WRONG SINCE DUAL USB LANDED.
+# build_seed8/ has NO usb2 in its XDC -- it is the SINGLE-USB build (validated
+# in its day: USB ingress exact, audio to three receivers). Anyone running
+# ./flash.sh without --bit was therefore quietly putting one PHY on the board.
+# Found 2026-11-04; the dual-USB bitstream existed only in a session temp dir
+# at that point, so it was also one cleanup away from being lost.
+#
+# ---- AND THE FIRMWARE MUST MATCH THE BITSTREAM'S CSR MAP ----
+# This script runs `make -C firmware`, which compiles against
+# build/colorlight_i9plus/software/include/generated/csr.h -- the headers of
+# whatever was generated LAST, not of the bitstream being flashed. On
+# 2026-11-04 those were 20 minutes NEWER than the .bit and carried one extra
+# CSR (aaf_pkt write_drop_count at 0x68), which pushes fifo_level, dbg_last_ts,
+# dbg_last_sec, holdover_count and ts_subsec_max up by 4 bytes. CSR banks sit
+# on fixed 0x800 boundaries so nothing outside aaf_pkt moves, but that is no
+# comfort: fifo_level feeds the USB isochronous feedback accumulator
+# (firmware/main.c) and dbg_last_sec/dbg_last_ts compute the Dante emit
+# timestamp (firmware/dante_tx.c), so a 4-byte shift buys you host sample-rate
+# drift and a missed playout deadline -- "no audio" with perfect packets.
+# BEFORE --permanent OR --fw-only, check that csr.h is not newer than the .bit:
+#     ls -l --time-style=+%H:%M:%S build/colorlight_i9plus/gateware/*.bit \
+#        build/colorlight_i9plus/software/include/generated/csr.h
+# If it is, regenerate the matching header from the commit that built the .bit:
+#     git worktree add /tmp/pre <that-commit>
+#     cd /tmp/pre && BOARD=breakout USB2=1 USB_DUAL_RATE=1 \
+#        python3 ./avb_soc.py --soft-only --firmware firmware/loader/loader.bin \
+#        --output-dir /tmp/pre-out
+# and copy ONLY csr.h over (soc.h differs just in the ident string,
+# variables.mak carries absolute paths and must NOT be copied), then
+# `make -C firmware clean && make -C firmware`.
 #
 # Until 2026-11-03 "rebuild seed 8" did NOT reproduce the validated bitstream:
 # LiteX baked a second-resolution build timestamp into the ident ROM, so every
@@ -34,7 +67,8 @@ BOARD=${BOARD:-169.254.9.200}
 # the one that was listened to on hardware, and timing closure is not the same
 # claim as working audio. Prefer the validated artifact, say so out loud, and
 # warn if a newer one exists rather than silently choosing.
-BIT_VALIDATED=build_seed8/gateware/colorlight_i9plus.bit
+BIT_VALIDATED=bitstreams/dual-usb-96k_2026-11-03_seed8_VERIFIED.bit
+BIT_SINGLE_USB=build_seed8/gateware/colorlight_i9plus.bit   # historisch, 1 PHY
 BIT_LATEST=build/colorlight_i9plus/gateware/colorlight_i9plus.bit
 BIT=""
 MODE=volatile
