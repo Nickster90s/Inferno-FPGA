@@ -1284,6 +1284,38 @@ int main(void)
                     }
                 }
                 main_usb_fb_ovr_write(usb_fb_manual);   // 0 = auto measured loop
+                // *** BACKUP WERD HIER NOOIT GESCHREVEN. GEVONDEN 2026-11-04. ***
+                // usb2_fb_ovr bestaat (avb_soc.py:1094) en reset op 0 = auto,
+                // maar deze regel stond er niet, dus de Backup-PHY hing
+                // PERMANENT aan de gemeten wrapper-loop en was van buiten niet
+                // te beinvloeden. De 'F'-sweep over UDP bereikte hem dus ook
+                // niet, wat jarenlang onzichtbaar bleef omdat alles op Main werd
+                // gemeten.
+                //
+                // Dat werd hoorbaar op build_usbmargin_s1: de gemeten loop
+                // levert daar ~1% te veel, dus de ring loopt vol en blijft vol
+                // (fifo_level pint op 128 = SRING_DEPTH>>_bl_sh = VOL) en elk
+                // binnenkomend sample wordt weggegooid. Gemeten met de
+                // 'F'-sweep op MAIN, 48 ch @ 96 kHz, 6 s per punt:
+                //
+                //     nominaal (786432)  fifo  90   underrun    0/s  pkt 24000
+                //     -0,5%              fifo  32   underrun  471/s
+                //     -1,0%              fifo  41   underrun  964/s
+                //     -2,0%              fifo  11   underrun 1914/s
+                //     +1,0%              fifo 128   underrun 1575/s  <-- auto
+                //
+                // Main was daarmee te repareren en Backup niet, en dat is exact
+                // het verschil dat als "Main schoon, Backup slecht" werd
+                // gehoord. Niet de taps, niet de placement.
+                //
+                // LET OP bij het afregelen: USB_FB_NOMINAL hierboven is
+                // (6 << 16) = 6,0 samples/uframe, de 48 kHz-waarde. Bij 96 kHz
+                // is nominaal 12,0 = 786432. De percentage-print in de
+                // FBSWEEP-handler rekent tegen die 6,0 en is op 96 kHz dus een
+                // factor 2 mis -- lees de ruwe waarde, niet het percentage.
+#ifdef CSR_MAIN_USB2_FB_OVR_ADDR
+                main_usb2_fb_ovr_write(usb_fb_manual);
+#endif
                 uint32_t _lvl = aaf_pkt_fifo_level_read();
                 mcr.usb_last_level = (int)_lvl;
                 // Min/max over a 1 s window. A 1 Hz SNAPSHOT of this value is

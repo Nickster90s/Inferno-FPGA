@@ -314,7 +314,7 @@ class DantePacketizer(LiteXModule):
         #                      audible (a per-channel click) and must stay 0.
         # Never fold them back together.
         self.overrun_count  = CSRStatus(32, description="send_req arriving while builder mid-traversal (benign; pend[] re-serves it).")
-        self.write_drop_count = CSRStatus(32, description="BROKEN 2026-11-04: reads one count per SAMPLE (~4.608M/s at 96k/48ch) in every configuration, not one per drop. Use the rx_beats-vs-ep_out leak instead. See the comment at the increment.")
+        self.write_drop_count = CSRStatus(32, description="USB samples dropped on a FULL ring — audible per-channel click. MUST stay 0. A value equal to the sample rate (~4.608M/s at 96k/48ch) means the ring is pinned full: check fifo_level, where 128 = full and 64 = the servo target.")
         self.fifo_level     = CSRStatus(blk_bits + 8, description="block_fifo occupancy (blocks).")
         # Timestamp instrument: the ACTUAL emitted avtp_timestamp (pres) and the
         # live gPTP-ns(low32) latched at the SAME packet emit. effective offset =
@@ -1167,31 +1167,25 @@ class DantePacketizer(LiteXModule):
         rd_idx    = Signal(max=N_WORDS)
         pkt_count = Signal(32)
         overruns  = Signal(32)
-        # *** DEZE TELLER IS KAPOT. GEMETEN 2026-11-04, NIET OPGELOST. ***
-        # Bedoeld als: een USB-sample arriveert terwijl ~have_space, dus de
-        # channel-addressed write wordt ONDERDRUKT (regel ~358) -> EEN verschaald
-        # kanaalslot = een hoorbare klik per kanaal. Eerst ONGETELD, daarna
-        # opgeteld BIJ overrun_count (wat het weer verstopte achter een benigne
-        # tak), nu een eigen CSR.
+        # Ring-full write-drops: a USB sample arrives while ~have_space, so the
+        # channel-addressed write is SUPPRESSED (line ~358) -> ONE stale channel
+        # slot = an audible per-channel click. This was UNCOUNTED, then folded
+        # INTO overrun_count, which hid it again behind a benign counter. It now
+        # has its own CSR (write_drop_count) and must read 0.
         #
-        # Maar hij meet het niet. Op build_usbmargin_s1 loopt write_drop_count
-        # met ~4.608.000/s in ELKE configuratie -- alleen Main, alleen Backup, of
-        # beide -- en dat is exact 96000 x 48 kanalen. Een teller die gelijk is
-        # aan de samplerate telt SAMPLES, geen drops. Tegelijk was het LEK
-        # (dbg_rx_beats tegen dbg_ep_out, twee onafhankelijke tellers) 0,0000%
-        # op beide PHYs, packets exact 24000/s en overflow 0 -- er ging dus
-        # niets verloren.
+        # HOE JE EEN ENORME WAARDE MOET LEZEN. Op 2026-11-04 las deze teller
+        # ~4.608.000/s en ik concludeerde dat hij kapot was, omdat dat getal
+        # gelijk is aan 96000 x 48 -- de volledige samplerate. Dat was fout: het
+        # is precies wat een VOLLE ring oplevert, want dan wordt elk sample
+        # geweigerd. De bevestiging stond ernaast en ik las hem niet:
+        # fifo_level stond op 128, en 128 == SRING_DEPTH >> _bl_sh == VOL (de
+        # servo hoort hem op 64 te houden). Zodra de ring weer in het midden
+        # stond -- fifo_level 63..67 -- las deze teller exact 0, met twee
+        # gelijktijdige 48ch/96k-stromen.
         #
-        # De conditie hieronder hoort de exacte complement van do_write te zijn
-        # (regel ~628) en die signalen zitten NIET in een loop (die begint op
-        # ~636), dus het is geen scope-fout. Dan is ~have_space op elk sample
-        # waar terwijl do_write toch schrijft, en dat kan alleen als `level` in
-        # `have_space = level < SRING_DEPTH-2` niet het getal is dat ik aannam --
-        # verdacht is dat fifo_level via de CSR 7 tot 95 leest, dus ruim onder
-        # 2046. Zoek daar, niet in de teller zelf.
-        #
-        # TOT DAN: stuur op het lek, niet hierop. tools/usbsrc.py meldt dit
-        # getal expliciet als onbetrouwbaar.
+        # Dus: write_drop_count == samplerate betekent NIET "teller stuk", het
+        # betekent "ring vol, alles wordt weggegooid". Lees fifo_level ernaast:
+        # 128 is vol, 0 is leeg, 64 is waar de servo hem wil hebben.
         write_drops = Signal(32)
         self.sync += If(en & samp_vld & (started | first) & ~have_space,
                         write_drops.eq(write_drops + 1))

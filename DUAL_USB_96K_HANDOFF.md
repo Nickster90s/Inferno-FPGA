@@ -798,3 +798,65 @@ appears to be — note the `fifo_level` CSR reads 7 to 95, far below 2046. Fix
 So the standing rule for "are we losing audio" remains: **the leak, two
 independent counters.** I split one conflated counter and walked straight into a
 second bad one; the leak is the thing that has never lied here.
+
+### Retraction: write_drop_count was never broken, and the "new defect" was my own doing
+
+Both claims in the previous two sections are wrong. Recorded in full because the
+reasoning error is the reusable part.
+
+**The counter is correct.** It read ~4,608,000/s and I concluded "a counter
+equal to the sample rate counts samples, not drops". It does not: that is
+exactly what a FULL ring produces, because then every write is refused. The
+confirmation was sitting beside it and I did not read it — `fifo_level` was
+pinned at **128**, and `_bl_max = SRING_DEPTH >> _bl_sh = 128 = full` with the
+servo target at 64. Once the ring sat at its centre again (fifo_level 63..67),
+the counter read **exactly 0** with two simultaneous 48 ch / 96 kHz streams.
+So `write_drop_count == sample rate` means "ring pinned full", not "counter
+broken". Read `fifo_level` next to it, always.
+
+**And the ring-full state was not a property of build_usbmargin_s1.** I measured
+underrun 387-516/s on Main and 645-774/s on Backup with the ring pinned, and
+wrote that up as a regression in the new bitstream. After a plain firmware
+reload, on the same bitstream, both PHYs sit at fifo_level 63..67 with
+**underrun 0/s** and `write_drops` 0, dual stream, leak -0.00% on both.
+
+The likely cause of the disturbed state is me: within the hour before, I had
+swept Main's IDELAY tap down through 28, 24, 20, 16, 12, 8 and Backup's through
+24, 16, 8, 0 — values that produce 24% byte loss or kill the link outright — and
+then swept the USB async feedback across +/-3%. That is enough to drive the ring
+into a stuck full state that survives until the firmware is reloaded. **The
+board was live and being listened to while I did it**, and "music, beep, off,
+repeating" is a fair description of what a tap sweep sounds like from the other
+end. Do destructive sweeps on a board nobody is listening to, and reload the
+firmware before trusting any measurement taken after one.
+
+**What survives from that detour, as a genuine latent bug:** `main_usb2_fb_ovr`
+exists (avb_soc.py:1094, resets to 0 = auto) and firmware never wrote it —
+`main.c` only wrote `main_usb_fb_ovr`. The Backup PHY was therefore permanently
+on the wrapper's measured loop and could not be influenced from outside at all,
+so the `F` sweep over UDP silently covered only Main. That is fixed now (both
+CSRs get `usb_fb_manual`), but note it was NOT the cause of what was heard —
+both PHYs are healthy on auto. It matters for diagnosis, not for today's audio.
+
+Also noted while in there: `USB_FB_NOMINAL` in main.c is `(6 << 16)` = 6.0
+samples per microframe, the **48 kHz** value. At 96 kHz nominal is 12.0 =
+786432, so the percentage the FBSWEEP handler prints is a factor two out at
+96 kHz. Read the raw value, not the percentage. The F sweep itself was still
+informative: on Main, held at the true 96 kHz nominal, fifo 90 / underrun 0 /
+packets exactly 24000, while +1% pinned the ring full with underrun 1575/s.
+
+### Where build_usbmargin_s1 actually stands
+
+All five clocks pass their real requirements (sys 55.52, usb 69.98, usb2 61.18,
+eth_rx 140.96, eth_tx 142.63). On hardware, after a clean firmware load:
+
+* Main leak -0.00%, Backup leak -0.00%, both with ingress at +0.06% of nominal
+* `write_drops` 0 with both PHYs streaming 48 ch / 96 kHz simultaneously
+* ring centred, fifo_level 63..67, `underrun` 0/s on either source
+* `rx_crc_err` 0, `mac_writer_err` ~3/s, PTP locked
+
+That is the first build in this project with both PHYs clean at the same time.
+Still open, in order: the eye has only ~2 taps of margin above the cliff (the
+phase shift, as robustness); usb2 at 61.18 is thinner than the control build's
+65.96, so a better seed/floorplan point exists; and this is running VOLATILE —
+SPI still holds the previous bitstream.
