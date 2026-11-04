@@ -20,8 +20,9 @@ stream.cfg
 bitstreams/*.bit
 bitstreams/*.info
 !bitstreams/*_BOTH-CLEAN.bit
+!bitstreams/*_BOTH-CLEAN.info
 !bitstreams/*_VERIFIED.bit
-!bitstreams/*.info
+!bitstreams/*_VERIFIED.info
 # editor/backup scratch
 *.bak
 *~
