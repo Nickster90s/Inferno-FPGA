@@ -181,6 +181,69 @@ proportional to actual subscriptions (0.03 Mbit/s idle).
 
 ## Open bugs
 
+**Fixed (2026-11-04): Main's ULPI input eye sat beyond the delay line — both
+PHYs are now clean at once.** The Backup PHY measured perfect while Main lost
+~1.3% of real audio, which a listener heard as crackle and then as drift: the
+loss made the host over-deliver by the same ~1.2%, so a network-sourced player
+drained its buffer (28 s of cache to zero in ~44 minutes) and stuttered.
+
+Main's leak per IDELAY tap, 48 ch @ 96 kHz, **measured with random data**:
+
+| tap | phase 0 | phase 333 |
+|---|---|---|
+| 31 (the hardware maximum) | **+1.2841%** | **+0.0002%** |
+| 30 | +4.9970% | — |
+| 29 | +14.2055% | — |
+| 28 | +29.9451% | — |
+| 24 / 20 / 12 / 8 / 0 | — | **0.0000%** |
+
+At phase 0 even the highest tap IDELAYE2 has still leaked 1.28%, so no tap could
+fix it: 31 taps x ~78 ps is ~2.4 ns and the eye lay past that. The fix is to move
+the sampling edge instead of the data — `USB_PHASE_DEG` (default **333**, i.e.
+−27°) on `cd_usb` only. Every tap is then clean, including tap 0, so the eye is
+wider than the whole delay line. `cd_usb2` stays at phase 0: Backup runs off its
+own PLL, was already well placed, and still measures −0.0002%.
+
+Both PHYs streaming 48 ch / 96 kHz simultaneously with random data: leak +0.00%
+on each, `write_drops` 0, `underrun` 0.0/s, ring at 66 against a servo target of
+64, 24016 packets/s, `rx_crc_err` 0, PTP locked.
+
+> **Three measurement rules this cost us a day to learn.**
+>
+> 1. **Test a clocked bus with RANDOM data, never `/dev/zero`.** The same
+>    bitstream and the same tap measured 0.0000% with zeros and +1.28% with
+>    random: constant bytes barely toggle the lines, so a marginal setup/hold
+>    window is invisible. Pre-generate a file (`head -c 150M /dev/urandom >
+>    rand.raw`) and loop it; `/dev/urandom` live is too slow for 18 MB/s.
+> 2. **The leak is `dbg_rx_beats` vs `dbg_ep_out`** — two independent counters,
+>    so the difference means one thing. `overrun_count` sums a benign cause with
+>    a harmful one and reads anywhere from 0 to millions per second;
+>    `write_drop_count` equal to the sample rate means the ring is pinned full
+>    (check `fifo_level`: 128 is full, 64 is the servo target), not that the
+>    counter is broken.
+> 3. **Never flash while audio is streaming.** `pld load` reconfigures the FPGA,
+>    so the USB device vanishes mid-transfer and xHCI can take the whole
+>    controller down with it (`TRB DMA ptr not part of current TD` → `HC died`),
+>    including the CH347 you would reflash with. `flash.sh` now refuses. Recovery
+>    without a reboot: unbind then bind `0000:00:14.0` on
+>    `/sys/bus/pci/drivers/xhci_hcd`.
+
+Build that produced this (reproducible — see the seed entry below):
+
+```
+BOARD=breakout USB2=1 USB_DUAL_RATE=1 NEXTPNR_USB_FP_LIGHT=1 \
+USB_PERIOD_NS=14 USB_PHASE_DEG=333 STALL_SECS=900 \
+./build.sh --seed 1 --output-dir build_phase333_s1
+```
+
+Timing: sys 55.52, usb 69.98, usb2 61.18, eth_rx 140.96, eth_tx 142.63 MHz —
+all five past their real requirements. The `FAIL` lines in that log are against
+the artificial 71.43 MHz target `USB_PERIOD_NS=14` sets, which is not a
+requirement; score the MHz, not PASS/FAIL. And read the **last** timing report
+per clock: nextpnr prints one after placement and another after routing, and
+they differ by more than 10 MHz.
+
+
 **Fixed (2026-08-07): `netload.py` gave up on a NAK the loader wanted retried.**
 One push was NAKed (`NAKed EXEC ... CRC mismatch or short image`); the tool
 exited, and the board then answered neither UDP nor a further netload, needing a

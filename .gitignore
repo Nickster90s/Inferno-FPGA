@@ -11,9 +11,17 @@ csr.csv
 analyzer.csv
 stream.cfg
 
-# Build-artifact snapshots (archive.sh) — large binaries, kept locally only
+# Build-artifact snapshots (archive.sh) — large binaries, kept locally only.
+# UITZONDERING: de gevalideerde artifacts worden met `git add -f` WEL vastgelegd.
+# Op 2026-11-04 bleek de enige werkende dual-USB bitstream alleen in een
+# sessie-temp-map te bestaan, een opruimactie van verloren -- en `flash.sh` wees
+# ondertussen naar de single-USB build. Een .bit is 2,1 MB; dat is de prijs niet
+# waard om te verliezen. De .info's zijn klein en horen altijd mee.
 bitstreams/*.bit
 bitstreams/*.info
+!bitstreams/*_BOTH-CLEAN.bit
+!bitstreams/*_VERIFIED.bit
+!bitstreams/*.info
 # editor/backup scratch
 *.bak
 *~

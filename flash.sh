@@ -67,7 +67,10 @@ BOARD=${BOARD:-169.254.9.200}
 # the one that was listened to on hardware, and timing closure is not the same
 # claim as working audio. Prefer the validated artifact, say so out loud, and
 # warn if a newer one exists rather than silently choosing.
-BIT_VALIDATED=bitstreams/dual-usb-96k_2026-11-03_seed8_VERIFIED.bit
+BIT_VALIDATED=bitstreams/dual-usb-96k_2026-11-04_phase333_BOTH-CLEAN.bit
+# Vorige validated artifact: Main lekte daar ~1,3% van echte audio (hoorbaar).
+# Bewaard als vangnet, niet om op terug te vallen.
+BIT_PREV=bitstreams/dual-usb-96k_2026-11-03_seed8_VERIFIED.bit
 BIT_SINGLE_USB=build_seed8/gateware/colorlight_i9plus.bit   # historisch, 1 PHY
 BIT_LATEST=build/colorlight_i9plus/gateware/colorlight_i9plus.bit
 BIT=""
