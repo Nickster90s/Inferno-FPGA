@@ -814,6 +814,59 @@ it does not need the CH347 (which JTAG and the UART share).
 `A`/`K`/`B`/`G`/`V` are protocol-archaeology probes. They are RAM-only and a
 reboot reverts them.
 
+### OSC control surface (port 9000)
+
+`firmware/osc.c`, exercised with `tools/osc.py`. The A/B select was already
+reachable over 7779, but only through this project's own binary opcodes — fine
+for a bench script, useless from QLab or any OSC-speaking desk. This binds a
+second port and speaks the subset of OSC that a switch needs.
+
+| address | types | does |
+|---|---|---|
+| `/usb/source` | `i` `f` | 0 = Main, 1 = Backup |
+| `/usb/main` | — | switch to Main (argument ignored) |
+| `/usb/backup` | — | switch to Backup (argument ignored) |
+| `/usb/rate` | `i` `f` | 48000 or 96000 |
+| `/ping` | — | replies `/pong`, so a desk can prove it has the board |
+
+```
+tools/osc.py backup                 # switch, then read the mux back
+tools/osc.py --float source 0       # as a desk would send it
+tools/osc.py rate 96000             # then replug USB so the host re-reads it
+tools/osc.py ping
+```
+
+**Both `i` and `f` are accepted, deliberately.** Plenty of controllers send
+every number as a float — TouchOSC and many QLab cue setups do. Accepting only
+`,i` works on the bench and then silently ignores the desk, which is the worst
+way for this to fail. A missing type tag is treated as "no argument", because
+some desks send exactly that for a trigger. An unknown type tag is logged, not
+dropped. `#bundle` is **detected and reported, not parsed**: a single message
+covers a switch, and a half-supported bundle parser is a worse place to find a
+bug than an explicit "not supported" line on the console.
+
+`/usb/rate` writes `cfg.sample_rate` to NV config and applies it live, but the
+host has already read the descriptor — **replug USB** (or power-cycle) before
+expecting the new rate. 48/96 kHz from Dante Controller goes through the info
+records, not through here.
+
+**The switch is hard, and `forced` is how you know.** OSC is fire-and-forget
+UDP: the board does not acknowledge, so "I sent it" is not "it moved". That is
+why `tools/osc.py` reads the `U` opcode on 7779 afterwards and prints `select`,
+`switches` and `forced`. A `forced` increment is **not** a fault — it means the
+candidate offered no frame marker and the mux went anyway, which is the asked-for
+behaviour: you do not switch for fun, so when you say go, it goes. Measured
+2026-11-04 with nothing streaming, every switch is `forced +1`, and with the
+Backup stream killed outright the mux still moved (`handovers 3, forced 1`).
+Under a live double stream — both PHYs at 48 ch / 96 kHz, 36.9 MB/s on one
+controller — handovers were aligned and `forced 0`.
+
+**Read the counters back after a settle, not immediately.** The CSR write lands
+at once but the handover completes on a frame boundary, so an instant read-back
+catches `select` already updated while `switches` has not ticked. That made
+`tools/osc.py` report a perfectly good switch as a failure until it was taught
+to poll (~1.8 s) for the counter.
+
 ### Dual USB: the build that works
 
 ```
@@ -960,6 +1013,7 @@ flash.sh                flash the board.  Volatile by default (a power cycle
 tools/
   netload.py            push firmware into coderam over raw Ethernet (dev loop)
   stats.py              runtime counters over UDP:7779 -- the main telemetry
+  osc.py                send OSC on 9000 and read the mux back on 7779
   telemetry.py          event stream decoder
   rx_gate.py            arm / back out / measure the RX MAC allow-list
   mclk.py               arm / back out / measure the media-clock discipline
@@ -985,7 +1039,10 @@ firmware/
                         image into coderam from Ethernet or SPI flash and jumps.
                         Changing it re-rolls placement -- avoid.
   main.c                boot, RX dispatcher, UART CLI, main polling loop
-  net.c                 IPv4 / UDP / ICMP / IGMP / ARP.  Replaced osc.c
+  net.c                 IPv4 / UDP / ICMP / IGMP / ARP.  Took over the IP/UDP
+                        handling that the original osc.c carried itself (it
+                        predated net.c); osc.c was then rewritten on top of
+                        it and is the OSC surface described under Console
   gptp.c                802.1AS gPTP slave + PI servo on the 52-bit TSU addend.
                         Phase 4 factors the servo out for reuse by ptpv1.c
   ptpv1.c               PTPv1 slave -- the clock Dante actually speaks
@@ -1012,6 +1069,8 @@ firmware/
   cap.c                 on-FPGA packet capture ring
   rx_gate.c             CSR programming + auto-revert for the RX allow-list
   dstats.c              the UDP:7779 control surface (see Console)
+  osc.c                 the UDP:9000 OSC surface: A/B select + rate,
+                        for a show controller (see Console)
   telem.c               event stream
   cfgflash.c config.c   NV config in SPI flash (versioned + CRC)
   pkt_geom.h            packetizer stream geometry
