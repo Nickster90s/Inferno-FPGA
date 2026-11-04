@@ -491,9 +491,34 @@ class AVBSoC(SoCCore):
         self.crg = _CRG(platform, sys_clk_freq)
 
         # SoCCore (VexRiscv + SRAM).
+        # ident_version=False IS A REPRODUCIBILITY FIX, NOT COSMETICS.
+        #
+        # With ident_version=True LiteX appends build_time() -- date AND time to
+        # the SECOND -- to the ident string and bakes it into the `identifier`
+        # memory, emitted as colorlight_i9plus_mem.init and pulled in by
+        # $readmemh. yosys constant-folds that ROM, so two builds started in
+        # different seconds hand nextpnr DIFFERENT NETLISTS: measured 20496 vs
+        # 20443 cells and ~9000 renamed $abc$ cells from a six-ASCII-byte
+        # timestamp difference (19:01:16 vs 19:27:51), same RTL, same .ys, same
+        # loader ROM, same csr.h.
+        #
+        # That is the whole "seed lottery". A seed is only a seed FOR A GIVEN
+        # NETLIST; re-rolling the netlist every build makes `--seed 8` mean
+        # something different each time, which is why:
+        #   - the same seed scattered sys Fmax 52-65 MHz run to run,
+        #   - the P&R-only sweep never predicted the real build,
+        #   - "rebuild seed 8" did not reproduce the validated bitstream,
+        #   - my floorplan constrained 1419 / 1427 / 1436 cells on "the same"
+        #     design (it matches on cell names, and the names moved).
+        #
+        # Nothing reads the identifier at runtime (firmware never touches it),
+        # so the timestamp bought us nothing and cost us build reproducibility.
+        # Keep the ident string itself: it is a pure constant and therefore free.
+        # Do NOT substitute a git hash -- that re-rolls the netlist on any commit,
+        # including one that does not touch the gateware.
         SoCCore.__init__(self, platform, sys_clk_freq,
             ident         = "Inferno-FPGA USB->Dante SoC on Colorlight i9+",
-            ident_version = True,
+            ident_version = False,
             **kwargs
         )
 
@@ -1605,12 +1630,59 @@ def main():
         # naam is hier structureel fragiel.
         _CLK_PREFIXES = ("main_crg_", "avbsoc_crg_", "crg_")
 
+        # ---- DE DOELEN STAAN STRAKKER DAN DE EIS, EN DAT IS DE BEDOELING ----
+        # Toen deze constraints nog niet bonden (verkeerde netnaam) timede
+        # nextpnr ELKE PLL-klok tegen de --freq 125 default. Onhaalbaar voor een
+        # 60 MHz-domein, dus de placer duwde alles zo hard als hij kon: eth_rx
+        # kwam op 137-154 en usb boven 65. Zodra ik de namen repareerde en de
+        # echte eisen gingen binden, stopte de placer zodra een domein er net
+        # over was -- en landden de getallen OP de eis: eth_rx 121-130, usb
+        # 55-68, met regelmatig een FAIL. De seeds waren niet slechter geworden;
+        # de druk was eraf.
+        #
+        # Dat is de keerzijde van de 8 ns-les hieronder. Een eis ver BUITEN
+        # bereik haalt de gradient weg; een eis die te makkelijk te halen is
+        # haalt de DRUK weg. Dus mik tussen die twee: ambitieus maar binnen wat
+        # gemeten is haalbaar (usb is 68-70 geweest, eth_rx 137-157, sys 62-66).
+        #
+        # Deze getallen zijn TIMING-DOELEN, niet de echte klokfrequenties. De
+        # PLL's blijven op 50 en 60 MHz lopen; dit stuurt alleen hoe hard
+        # nextpnr optimaliseert. Elk los te overschrijven voor een sweep.
+        #
+        # DEFAULTS STAAN OP DE ECHTE EISEN, EN DAT IS GEMETEN, NIET GEKOZEN.
+        # Wat de sys-periode doet met de sys-Fmax, op dit ontwerp:
+        #     8,000 ns  -> sys 50,48  (de geverifieerde seed-8 bitstream; de
+        #                  constraint BOND echt, prefix avbsoc_crg_ is juist,
+        #                  en de build stalde niet -- sys landde wel krap)
+        #    16,667 ns  -> sys 62,64  (seed 11, 2 falende klokken)
+        #    20,000 ns  -> sys 63,24  (seed 1, 1 falend)
+        #                  sys 65,96  (seed 7, 1 falend)
+        #    16,0 / 14,0 -> STALT (HeAP haalt een iteratie en blijft hangen)
+        # Losser zetten VERLAAGDE sys dus niet; het ging omhoog en het aantal
+        # falende klokken ging van 2 naar 1. Sys is op dit ontwerp niet de klok
+        # die door zijn eigen constraint wordt begrensd -- hij landt 62-66
+        # ongeacht wat hier staat. Vandaar: zet de eis, niet een fantasie.
+        #
+        # LET OP wat je hierboven NIET mag lezen: twee seeds tegen een is geen
+        # bewijs dat 20 beter sluit dan 16,667. Het is wel genoeg om te zeggen
+        # dat strakker zetten hier niets oplevert, en de echte eis heeft het
+        # voordeel dat een PASS ook echt PASS betekent in de log.
+        #
+        # Het snelle P&R-harnas kan dit NIET aftasten: de controle met
+        # 20 / 16,667 -- exact de instelling waarmee de seed-7 build wel
+        # afrondde -- stalt daar eveneens. Dat harnas reproduceert de build dus
+        # niet. Wil je periodes afstemmen, doe het met echte builds (een
+        # kwartier per punt) en neem 20 / 16,667 als controle mee.
+        _P_SYS = float(os.environ.get("SYS_PERIOD_NS",  "20.0"))   # = de eis, 50 MHz
+        _P_USB = float(os.environ.get("USB_PERIOD_NS",  "16.667")) # = de eis, 60 MHz
+        _P_IDL = float(os.environ.get("IDELAY_PERIOD_NS", "5.0"))  # 200 MHz
+
         def _ck(name, period_ns, net):
             return ["create_clock -name %s -period %.3f [get_nets %s%s]"
                     % (name, period_ns, pfx, net) for pfx in _CLK_PREFIXES]
 
         if _usb2_xdc:
-            _usb2_create = _ck("usb2_clk", 16.667, "s7pll2_clkout_buf")
+            _usb2_create = _ck("usb2_clk", _P_USB, "s7pll2_clkout_buf")
 
         soc.platform.toolchain.additional_xdc_commands += _usb2_create + [
             # NOTE: the PLL output nets carry the CRG submodule prefix
@@ -1646,15 +1718,17 @@ def main():
             #
             # REGEL: een timing-constraint ver buiten wat het ontwerp kan halen
             # "duwt" niet harder, hij haalt de gradient weg die de analytic placer
-            # nodig heeft. 16.667 ns = 60 MHz is 20% boven de 50 MHz die het
-            # audiopad nodig heeft en ligt binnen het gemeten bereik, dus de placer
-            # blijft optimaliseren. SYS_PERIOD_NS overschrijft voor een sweep.
+            # nodig heeft. Dat deel klopt (16,0 / 14,0 stalt).
+            # MAAR de tweede helft van dit argument -- "16.667 ligt binnen het
+            # gemeten bereik, dus de placer blijft optimaliseren" -- is op
+            # 2026-11-04 WEERLEGD: sys landt 62-66 bij 16,667 EN bij 20,0, dus
+            # die 20% "reserve" kocht niets. Zie de metingen bij _P_SYS.
+            # SYS_PERIOD_NS overschrijft voor een sweep.
             # (de regels hieronder zijn vervangen door _ck() verderop; deze
             #  tekst blijft als anker voor de onderliggende redenering)
-        ] + _ck("sys_clk", float(os.environ.get("SYS_PERIOD_NS", "16.667")),
-                "s7pll0_clkout_buf0") + [
-        ] + _ck("usb_clk", 16.667, "s7pll1_clkout_buf") \
-          + _ck("idelay_clk", 5.000, "s7pll0_clkout_buf1") + [
+        ] + _ck("sys_clk", _P_SYS, "s7pll0_clkout_buf0") + [
+        ] + _ck("usb_clk", _P_USB, "s7pll1_clkout_buf") \
+          + _ck("idelay_clk", _P_IDL, "s7pll0_clkout_buf1") + [
             # SET_CLOCK_GROUPS WORDT GENEGEERD. Gemeten in de build-log van
             # 2026-11-03:
             #     Info: ignoring unsupported XDC command 'set_clock_groups'

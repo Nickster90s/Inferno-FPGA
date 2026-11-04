@@ -10,10 +10,14 @@ gateware state (and therefore the wedge) intact -- proven twice, 2026-08-12 and
 """
 import socket, struct, sys, time
 
-FIELDS = ["tag", "rx_beats", "ep_out", "overrun", "underrun",
+# "sendreq_busy" heette "overrun" en is BENIGNE (send_req midden in een
+# traversal; pend[] serveert hem alsnog). "write_drops" achteraan is de teller
+# die wel audio-verlies betekent en moet 0 zijn. Zie firmware/dstats.c.
+FIELDS = ["tag", "rx_beats", "ep_out", "sendreq_busy", "underrun",
           "sample_overflow", "fb_ovr", "block_level",
           "head_valid_of_256", "head_raw",   # these two: see the note below
-          "frame_holdover", "rx_ts_resyncs", "rx_pops", "ts_ring_level"]
+          "frame_holdover", "rx_ts_resyncs", "rx_pops", "ts_ring_level",
+          "write_drops"]
 
 
 def read(board):

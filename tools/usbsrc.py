@@ -35,7 +35,7 @@ TAG_SINGLE = 0x55534231   # 'USB1' - built without USB2=1
 FIELDS = ["select", "live", "switches",
           "main_rx_beats", "main_ep_out", "main_overflow",
           "bkp_rx_beats", "bkp_ep_out", "bkp_overflow",
-          "forced"]
+          "forced", "write_drops"]
 # 48 ch x 4 B x fs. WAS HARDCODED OP 48 kHz, en op een 96 kHz-bord meldde dit
 # "+116% vs nominal" voor een stroom die 8% boven nominaal lag -- een getal dat
 # paniek suggereert waar niets aan de hand is. De rate komt uit de 'R'-opcode
@@ -121,6 +121,18 @@ def show(board):
         else:
             print(f"  {tag}  {rx:>11,.0f} B/s  {off:+6.2f}% vs nominal  "
                   f"leak {leak:+5.2f}%  overflow {b[f'{pfx}_overflow']:,}  {live}")
+    # DE ENIGE TELLER DIE "AUDIO GAAT VERLOREN" BETEKENT.
+    # overrun_count uit tools/stats.py telt ook een benigne tak mee en loopt op
+    # een gezonde 96 kHz-stroom met tienduizenden per seconde; dat leidde op
+    # 2026-11-03 tot een halve sessie jagen op een niet-bestaand defect. Deze
+    # teller is ring-vol write-drops en niets anders. Nul = geen sample verloren.
+    _wd = b.get("write_drops")
+    if _wd is None:
+        print("  write-drops  (niet in deze bitstream — oudere CSR-map)")
+    else:
+        _d = (_wd - a.get("write_drops", 0)) & 0xffffffff
+        print("  write-drops  %d totaal, %+d in 2 s   %s"
+              % (_wd, _d, "OK" if _d == 0 else "<-- HOORBARE SAMPLE-DROPS"))
     if query(board) and b["bkp_rx_beats"] == a["bkp_rx_beats"]:
         print("    -> the BACKUP is not receiving. Do NOT switch to it.")
     return 0

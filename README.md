@@ -491,20 +491,48 @@ The filter is disabled at reset and armed explicitly (`tools/rx_gate.py on`, or
 software allow-list in `dispatch_rx()` could never have fixed this on its own: it
 runs after the frame has already taken a slot, and the slot is what is exhausted.
 
-**sys Fmax is not reproducible — the artifact is a BITSTREAM, not a seed.**
-`avb_soc.py` re-execs with `PYTHONHASHSEED=0` to stop the same seed scattering
-52-65 MHz run to run. That reduced the scatter; it did not remove it. Measured
-2026-08-07 on one netlist: seed 8 gave **54.97 MHz** in a serial build and
-**63.26 MHz** in a sweep, same source, same loader, same parsing. So
-`--seed 8` does not name a result, and rebuilding a validated seed may not
-reproduce the bitstream that was validated. Keep `build_seed8/`.
+**The seed lottery: SOLVED 2026-11-03. A build timestamp was in a ROM.**
+For months the same `--seed` scattered sys Fmax across 52-65 MHz run to run,
+sweeps never predicted real builds, and rebuilding a validated seed did not
+reproduce the validated bitstream. `PYTHONHASHSEED=0` reduced the scatter but
+never removed it, and the residue was written off as toolchain noise.
 
-Two consequences. A sweep table is a snapshot, not a spec — re-sweep after any
-gateware or loader change. And Fmax must never pick the seed on its own: seed 1
-had the highest clean sys Fmax (63.54) and the LOWEST USB margin (79.62), and
-flashed, the MacBook enumerated the audio device and showed **no outputs at
-all**. Prefer the higher `USB_MHz` when seeds tie, then confirm on hardware --
-see the header of `tools/seed_sweep.sh`.
+It was not noise. `SoCCore(ident_version=True)` makes LiteX append
+`build_time()` -- date **and time to the second** -- to the ident string and
+bake it into the `identifier` memory. That is emitted as
+`colorlight_i9plus_mem.init` and pulled in by `$readmemh`, so yosys
+constant-folds it. Two builds started in different seconds therefore hand
+nextpnr DIFFERENT NETLISTS. Measured, with identical RTL, identical `.ys`,
+byte-identical loader ROM and byte-identical `csr.h`:
+
+| | hunt build | serial build |
+|---|---|---|
+| ident ROM | `...19:01:16` | `...19:27:51` |
+| cells in the netlist | 20496 | 20443 |
+| cell names in common | | ~11500 of 20496 |
+
+A seed is only a seed FOR A GIVEN NETLIST. Re-rolling the netlist every build
+made `--seed 8` mean something different each time, which is why the sweep was
+never predictive and why `floorplan_usb.py` -- which matches on cell NAMES --
+constrained 1419 / 1427 / 1436 cells on "the same" design.
+
+Supporting measurement, so this is not a story: yosys run twice on identical
+input in the same directory produced a **byte-identical 36 MB JSON**. The tool
+was always deterministic; the input was not.
+
+The fix is `ident_version=False` in `avb_soc.py` (see the comment block there).
+Nothing reads the identifier at runtime, so the timestamp bought nothing. Do NOT
+substitute a git hash: that re-rolls the netlist on any commit, including one
+that never touches the gateware.
+
+Consequences, all good: the same seed now reproduces, a P&R-only sweep from a
+fixed `.json` is a valid predictor again (`$SCRATCH/pnr_sweep.sh` pattern -- copy
+the json+xdc, vary only `--seed`), and "rebuild seed N" gives back the bitstream
+you validated. One caveat survives: Fmax must still never pick the seed on its
+own. Seed 1 once had the highest clean sys Fmax (63.54) and the LOWEST USB
+margin (79.62), and flashed, the MacBook enumerated the audio device and showed
+**no outputs at all**. Prefer the higher `USB_MHz` when seeds tie, then confirm
+on hardware -- see the header of `tools/seed_sweep.sh`.
 
 **Settings and the RX patch do not survive a reboot.** `cfgflash.c` / `config.c`
 already persist a versioned, CRC'd blob in SPI flash — static IP, media-clock
@@ -666,8 +694,12 @@ and picocom cannot both hold `/dev/ttyACM0` — close picocom before flashing.
 ### Things that will bite you
 
 `build.sh` sets `PYTHONHASHSEED=0` and runs under `setarch -R` (ASLR off).
-**Both are required** for reproducible placement — without them the same
-`--seed` scatters Fmax across ~52–65 MHz run to run.
+**Both are required** for reproducible placement. They were never sufficient on
+their own: the 52–65 MHz scatter that survived them was the ident ROM's build
+timestamp re-rolling the netlist — fixed by `ident_version=False`, see the seed
+entry above. If scatter ever comes back, diff the generated `*.init` files
+between two builds before blaming the placer; that is the measurement that
+found it.
 
 Always `make clean && make` in `firmware/` after touching CSRs. A link failure
 otherwise leaves the *previous* `firmware.bin` in place against the *new* CSR
@@ -1063,15 +1095,55 @@ RFC 1112/2236 (IGMP), RFC 6762/6763 (mDNS/DNS-SD).
 
 Hard-won, each one cost real debugging time. Read before changing gateware.
 
-- **Inject clock constraints yourself.** openXC7 emits no `create_clock` for
-  PLL-derived clocks, so every CDC gets timed as a single-cycle path. `avb_soc.py`
-  injects `create_clock` + `set_clock_groups` onto the PLL output *nets*. Without
-  this you get CDC failures that present as audio corruption.
-- **Determinism needs both knobs.** `PYTHONHASHSEED=0` *and* ASLR off.
-- **Seed roulette is real, and Fmax does not predict USB quality.** A firmware
-  change alters ROM contents and re-rolls placement. A seed must be validated on
-  two independent axes: it places without a HeAP stall, *and* USB works on real
-  hardware. Phase 0.5 exists to remove this tax entirely.
+- **Inject clock constraints yourself, and know what binds.** openXC7 emits no
+  `create_clock` for PLL-derived clocks, so without help every CDC is timed as a
+  single-cycle path. `avb_soc.py` injects `create_clock` onto the PLL output
+  *nets* and that DOES bind. It also emits `set_clock_groups -asynchronous`, and
+  nextpnr-xilinx **ignores it** (`Info: ignoring unsupported XDC command`); so do
+  `set_false_path` and `set_multicycle_path`. Only `create_clock` and
+  `set_property` are supported. Consequence to plan around: **every
+  cross-domain path in this design is permanently timed and must close**, which
+  is why failing seeds fail on `usb`, `usb2` or `eth_rx` rather than on `sys`.
+  You cannot tell this tool about a CDC, so put a real synchroniser on it.
+- **Determinism needs both knobs AND a timestamp-free netlist.**
+  `PYTHONHASHSEED=0` *and* ASLR off *and* `ident_version=False`. The first two
+  were in place for months while the third silently re-rolled the netlist on
+  every build; see the seed entry above.
+- **Fmax does not predict USB quality.** A firmware change alters ROM contents
+  and genuinely does re-roll placement (that part was never the bug). A seed
+  must be validated on two independent axes: it places without a HeAP stall,
+  *and* USB works on real hardware. Phase 0.5 exists to remove this tax.
+- **Region constraints have a density ceiling, and HeAP will hang rather than
+  say so.** Measured 2026-11-03 on one netlist with 1386 constrained USB cells:
+  0.18 cells/tile places, 0.55 places, 1.02 and 1.23 both **stall at
+  `Running main analytical placer` and never complete an iteration**. So size a
+  box by cells-per-tile, not by eye, and treat a hang as "no legal solution"
+  (`PLACER=sa` names the cell, but on this design SA needs well over 7 minutes
+  to get there, so the density table is the faster instrument).
+  A region also **only pulls its own cells in; it never evicts others**. When a
+  boxed block starves a neighbour it is doing so by CONGESTION, which is why
+  capping the USB box to Y0..50 dropped `usb2` from 64 to 47 MHz: Main's cells
+  crowded Backup's own pad band (Y1-32), they were not forbidden from it.
+- **Two latent bugs in `floorplan_usb.py`, both found 2026-11-03.** The
+  pad-only mode (`NEXTPNR_USB_FP_CTRL=""`) did the OPPOSITE of what it
+  documented: `"" in s` is always True in Python, so the empty match inverted
+  the net filter and pulled every net (~3000 cells) instead of ~690 — a
+  guaranteed stall. And the eth-TX branch calls `constrainCellToRegion`
+  directly, bypassing `_constrainable()`, so it dragged the `storage_2` LUTRAM
+  into a box with too few SLICEM columns — that is the documented 90-minute
+  hang, and it was never the box geometry. Anything that constrains cells must
+  go through `_pull()`.
+- **`overrun_count` used to lie, and two counters must never be summed.** It
+  added a BENIGN event (`send_req` landing mid-traversal, which `pend[]`
+  re-serves, so nothing is lost) to an AUDIBLE one (a USB sample dropped on a
+  full ring = one stale channel slot = a click). On a healthy 96 kHz stream the
+  sum ran at 11k-28k/s and read as catastrophic sample loss. What proved it
+  benign: `packets` sat at exactly 24000/s (= 96000/4), `underrun` was 0, the
+  ring never came within 140 samples of its rail, and the rate DOUBLED under
+  unrelated CPU load while `packets` did not move. Since 2026-11-03 they are
+  separate CSRs -- `overrun_count` (benign, load-dependent) and
+  `write_drop_count` (**must be 0**, reported by `tools/usbsrc.py`). The general
+  rule: a counter that sums two causes cannot be read, only misread.
 - **No usable DSP48.** nextpnr-xilinx cannot route the inferred DSP48 cascade on
   this part, so two constant multiplies are hand-expanded into shift-add trees.
   Budget zero DSPs; design arithmetic to avoid them.

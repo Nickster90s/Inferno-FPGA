@@ -30,6 +30,17 @@ overrun 0/s             underrun 0.0/s        block_level 65 (target 64)
 ingress exactly nominal (18,432,000 B/s)
 ```
 
+> **The `overrun 0/s` above does not reproduce, and that is a counter problem,
+> not a regression.** On 2026-11-03, on a stream measured as healthy by every
+> other number, `overrun` ran at 11k-28k/s. `overrun_count` summed a BENIGN
+> event (`send_req` landing mid-traversal, which `pend[]` re-serves) with an
+> AUDIBLE one (a USB sample dropped on a full ring). It is now two CSRs:
+> `overrun_count` (benign, and load-dependent -- it doubled while builds ran on
+> the host and `packets` did not move) and `write_drop_count`, which is the one
+> that means lost audio and must read 0. Read it with `tools/usbsrc.py`.
+> Whether `write_drops` is genuinely 0 is **not yet proven** -- the bitstream
+> that separates them is the one being built now.
+
 Getting there took finding **five** constants that were tuned as absolutes on
 48 kHz and had to be relative: the NCO increment, the Dante timestamp
 arithmetic, the packetizer's subsecond wrap, the feedback clamp
@@ -171,7 +182,126 @@ gateware protecting the audio, not a fault. Start a stream to the standby
 first (`aplay -D hw:<Backup>,0 -c 48 -r 96000 -f S32_LE ...`) and check its
 ingress is at nominal before switching.
 
-### 5. The 3-hour wedge is still open
+**Three more things verified on hardware later the same day**, all of which had
+until then only been reasoned about:
+
+- **The forced handover works on a DEAD source.** With the Backup stream killed
+  and its ingress at 0, `/usb/backup` over OSC still moved the mux: `handovers
+  3, forced 1`. That is the behaviour that was asked for -- you do not switch
+  for fun, so when you say go, it goes, and the `forced` counter tells you
+  afterwards that the candidate offered no frame marker.
+- **OSC works under a live double stream.** Both PHYs at 48 ch / 96 kHz
+  (18.47 and 18.44 MB/s, 36.9 MB/s total on one controller, leak ~0) while
+  `/usb/backup` and `/usb/main` were sent on UDP 9000. Aligned, `forced 0`.
+- **The PHY hold fixes the enumeration-before-firmware race, provably.** The
+  gateware default is 48 kHz; the descriptor advertised `Rates: 96000` only.
+  That can only happen if the PHY left reset *after* firmware applied the rate
+  stored in `cfg.sample_rate`. Before the hold, the host read the 48 kHz
+  default and the rate change needed a replug.
+
+### 5. ~~Builds were a lottery~~ — SOLVED 2026-11-03, root cause found
+
+Every hard build session on this project ended in "try more seeds". The user's
+read was that something underneath was wrong rather than that the placer was
+moody, and that was correct.
+
+`SoCCore(ident_version=True)` makes LiteX append `build_time()` -- date **and
+time to the second** -- to the ident string and bake it into the `identifier`
+memory. That lands in `colorlight_i9plus_mem.init` and is pulled in by
+`$readmemh`, so yosys constant-folds it. Two builds started in different
+seconds get **different netlists**:
+
+| | hunt build | serial build |
+|---|---|---|
+| ident ROM tail | `...19:01:16` | `...19:27:51` |
+| cells | 20496 | 20443 |
+| names in common | | ~11500 of 20496 |
+
+Everything else was byte-identical: RTL, `.ys`, loader ROM, `csr.h`, the XDC
+periods. And yosys itself is deterministic -- run twice on identical input in
+the same directory it produced a **byte-identical 36 MB JSON**.
+
+So a seed only names a result for a given netlist. This is the single
+explanation for: the 52-65 MHz scatter on "one seed", sweeps that never
+predicted real builds, `build_seed8` being irreproducible, and
+`floorplan_usb.py` constraining 1419 / 1427 / 1436 cells on "the same" design
+(it matches on cell names, and the names moved).
+
+Fixed with `ident_version=False` (long comment at the call site). Verified: two
+generations two seconds apart now give byte-identical `.init` files and a `.v`
+differing only in its date comment.
+
+What this buys, beyond calm: a **P&R-only sweep from one fixed `.json` is a
+valid predictor again**. Copy `colorlight_i9plus.json` + `.xdc` into a scratch
+dir, vary only `--seed`, keep `--pre-place floorplan_usb.py --freq 125
+--timing-allow-fail`, and parse the LAST timing report per clock. That is
+minutes per seed instead of a full build, and it now agrees with the real build
+because the real build synthesises the same netlist.
+
+### 6. The left IO column is oversubscribed — fourteen P&R runs, no closure yet
+
+Read this before trying a floorplan change; it is the whole search space I
+covered on 2026-11-03 so nobody repeats it. All runs are P&R-only on ONE fixed
+netlist (valid now that the netlist is reproducible — see item 5), seed varied,
+`--freq 125`, last timing report per clock.
+
+Required: sys 50, usb 60, usb2 60, eth_rx 125, eth_tx 125 MHz.
+
+| config | seeds | eth_rx | eth_tx | usb | usb2 |
+|---|---|---|---|---|---|
+| USB box X0..48 Y0..156 (shipping default) | 1, 2 | 103.5 / 124.7 **FAIL** | 150 / 137 | 70 / 71 | 66 / 64 |
+| same | 3, 7, 8 | not finished in 30 min (3 = stall, 7/8 = slow) | | | |
+| USB box capped Y0..50, 1386 cells | 8, 2 | **140 / 161** | 144 / 138 | 58 **FAIL** / 65 | 47 / 48 **FAIL** |
+| USB box Y30..52 (Main's own pad band) | 8, 8w, 2 | genuine STALL, all three | | | |
+| capped Y0..50, pad-nets only (716 cells) | 2 | 159.6 | 138.7 | **34.3 FAIL** | 57.5 FAIL |
+| eth-RX box X50..75 Y50..95 (508 cells) | 8 | 121.5 FAIL | **95.8 FAIL** | **78.9** | **68.1** |
+| whole MAC box X2..45 Y52..110 (1487 cells) | 8, 2, 1 | genuine STALL, all three | | | |
+
+**What the numbers mean.** Three blocks compete for the same left IO column and
+whichever gets displaced is the clock that fails — which is exactly why one
+clock failed per build and a different one each time. The pads are fixed and
+measured: USB at X1 Y1-49 (Main Y23-49, Backup Y1-32), ethernet at X1 Y51-72
+(TX Y51-54, RX Y55-72).
+
+- eth_rx is **geometry, not seed luck**: 103-124 with USB holding the full
+  column, 140-161 the moment USB vacates Y51+. Its critical path is 1.1 ns
+  logic against 6.9 ns routing, through one net
+  (`liteethmaccrc32checker_fifo_out`, fan-out 48) whose users sat tens of tiles
+  from their driver — the same net on every failing seed.
+- usb/usb2 are the same story mirrored: 78.9 / 68.1, the widest margins
+  measured all day, as soon as the eth RX cells left their half.
+- RX and TX share the MAC core, so boxing RX alone **tears TX apart**
+  (140 -> 95.8). Box the MAC or neither.
+- The column below Y50 (X0..48 = 2499 tiles) holds about 1375 cells at the
+  density HeAP can legalise. Main needs all of that on its own (with fewer
+  cells `usb` collapses to 34.3), so Main and Backup **cannot both** live below
+  the eth pads. Measured three ways.
+- Density is necessary but not sufficient: the whole-MAC box at 0.57 cells/tile
+  stalled on all three seeds, so box SHAPE and the CARRY4 chains matter too.
+
+**Where to go next, in order of expected value.** (a) The MAC box at
+`X2..45 Y52..110` is the right idea at the wrong size — it is the only layout
+that matches the pad geometry, and it stalled on area. Try it WIDER in X
+(regions may overlap; cfgflash already spans X50..114 with 29 cells) rather
+than abandoning it, e.g. `NEXTPNR_ETH_RX_REGION=2,52,70,120`. (b) Shorten the
+path instead of the route: that fan-out-48 net is LiteEth's RX async-FIFO
+pointer compare folded into the CRC checker's stream gating, and pipelining it
+is the classic fix — see `LITEETH_PATCHES.md`, patching LiteEth is already
+normal here. (c) Only then hunt seeds, which is now a legitimate predictor.
+
+**Knobs, all OFF by default so the shipping build is unchanged:**
+`NEXTPNR_ETH_RX_REGION="x0,y0,x1,y1"`, `NEXTPNR_ETH_RX_SUBSTR="a,b,c"`,
+`NEXTPNR_USB_REGION`, `NEXTPNR_USB_FP_LIGHT_YMAX`, `NEXTPNR_USB_FP_CTRL`.
+
+**Method notes that cost time.** `rc=124` means two different things and they
+must be told apart: a run stuck AT `Running main analytical placer` with zero
+`type ALL: wirelen solved` lines has **no legal solution**, while one that is
+iterating is merely **slow** (seeds 7 and 8 iterate for over 30 min with the
+full box). `$SCRATCH/report.py` prints which. And P&R here is ~5-25 min
+depending on seed and box on a 4-core machine, so run at most 3 and never
+conclude from a timeout under contention.
+
+### 7. The 3-hour wedge is still open
 
 Deferred by the operator until dual USB worked. The mechanism was identified to
 0.3% (a 32-bit ring pointer wrapping at 2³²/384000 = 3.107 h) and fixed, and

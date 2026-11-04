@@ -26,10 +26,14 @@ BOARD=${BOARD:-169.254.9.200}
 # (USB ingress exact, audio to three receivers). build/colorlight_i9plus/ is
 # whatever was built last, which is not the same thing and may be a diagnostic.
 #
-# This matters more than it looks: sys Fmax scatters 52-65 MHz for one seed on
-# this flow, so "rebuild seed 8" does NOT reproduce the validated bitstream --
-# see the seed entry in README Open bugs. Prefer the validated artifact, say so
-# out loud, and warn if a newer one exists rather than silently choosing.
+# Until 2026-11-03 "rebuild seed 8" did NOT reproduce the validated bitstream:
+# LiteX baked a second-resolution build timestamp into the ident ROM, so every
+# build handed nextpnr a different netlist (README, seed entry). Fixed with
+# ident_version=False, so a rebuild of the same seed on the same source now
+# does reproduce. The preference below stays anyway -- the VALIDATED artifact is
+# the one that was listened to on hardware, and timing closure is not the same
+# claim as working audio. Prefer the validated artifact, say so out loud, and
+# warn if a newer one exists rather than silently choosing.
 BIT_VALIDATED=build_seed8/gateware/colorlight_i9plus.bit
 BIT_LATEST=build/colorlight_i9plus/gateware/colorlight_i9plus.bit
 BIT=""

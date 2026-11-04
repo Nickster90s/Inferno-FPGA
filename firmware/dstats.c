@@ -32,6 +32,12 @@ extern uint8_t  usb_fb_sweep_hold;
 #include "telem.h"
 #include <generated/csr.h>
 #include "config.h"   // g_fs, g_cfg, cfg_save(): de 'R'-opcode
+// dante_info_rate_apply() werd hier IMPLICIET gedeclareerd. Op RISC-V kwam dat
+// er door toeval mee weg (een uint32_t-arg in a0, return genegeerd), maar een
+// impliciete declaratie is precies wat op 2026-11-03 de OSC-handler met vier in
+// plaats van vijf parameters liet compileren en de CPU liet crashen. Includeer
+// de header.
+#include "dante_info.h"
 #include <stdio.h>
 
 #define STATS_PORT 7779
@@ -485,6 +491,21 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
 #else
         put32(pu, nu, 0);                                  nu += 4;
 #endif
+        // APPENDED: ring-vol write-drops, apart van overrun_count.
+        //
+        // Dit is het ENIGE getal in dit antwoord dat "er gaat audio verloren"
+        // betekent. overrun_count (het '?'-antwoord, woord 3) telde tot
+        // 2026-11-03 ook de benigne tak mee -- send_req die midden in een
+        // traversal landt, wat pend[] alsnog serveert -- en liep daardoor op een
+        // gezonde 96 kHz-stroom met 11k-28k/s terwijl er niets misging. Hier
+        // staat alleen de hoorbare tak: een USB-sample dat op een volle ring
+        // viel, dus een kanaalslot dat een oude waarde hield = een klik.
+        // MOET 0 blijven.
+#ifdef CSR_AAF_PKT_WRITE_DROP_COUNT_ADDR
+        put32(pu, nu, aaf_pkt_write_drop_count_read());    nu += 4;
+#else
+        put32(pu, nu, 0);                                  nu += 4;
+#endif
         net_udp_commit(src_ip, src_port, STATS_PORT, nu, NET_TOS_BEST_EFFORT);
 #else
         // Single-USB build (USB2 not set at build time). Answer rather than
@@ -658,6 +679,20 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         put32(p5, n5, rx_ts_resyncs);  n5 += 4;   // stale ts entries discarded
         put32(p5, n5, rx_pops);        n5 += 4;   // pops issued, for the ratio
         put32(p5, n5, g_lvl_pre);      n5 += 4;   // ring level seen at drain
+#endif
+        // THE AUDIBLE ONE, SEPARATED FROM THE BENIGN ONE.
+        //
+        // overrun_count (word 3 above) used to be overruns + write_drops summed.
+        // On 2026-11-03 that sum read 11k-28k/s on a HEALTHY 96 kHz stream --
+        // `packets` exactly 24000/s, underrun 0, ring never within 140 samples of
+        // its rail -- and it cost a debug session to establish that the whole
+        // rate was the benign branch (send_req landing mid-traversal, which
+        // pend[] re-serves). write_drop_count is the branch that is actually
+        // audible: a USB sample dropped on a full ring leaves one channel slot
+        // stale = a per-channel click. It MUST read 0. Own guard so one firmware
+        // source still builds against a bitstream without the CSR.
+#ifdef CSR_AAF_PKT_WRITE_DROP_COUNT_ADDR
+        put32(p5, n5, aaf_pkt_write_drop_count_read()); n5 += 4;
 #endif
         net_udp_commit(src_ip, src_port, STATS_PORT, n5, NET_TOS_BEST_EFFORT);
         return;

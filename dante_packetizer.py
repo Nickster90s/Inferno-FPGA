@@ -298,7 +298,23 @@ class DantePacketizer(LiteXModule):
         # ---- CSRs: status (read-only diagnostics) ----
         self.packet_count   = CSRStatus(32, description="AAF frames transmitted.")
         self.underrun_count = CSRStatus(32, description="Media-clock ticks where block_fifo was empty (silence inserted).")
-        self.overrun_count  = CSRStatus(32, description="send_req arriving while builder busy (packet skipped — should stay 0).")
+        # TWO DIFFERENT FAILURES, TWO COUNTERS. These used to be SUMMED into
+        # overrun_count, which made the sum undiagnosable from the host and cost
+        # a full debug session on 2026-11-03: the sum ran at 11k-28k/s on a
+        # healthy 96 kHz stream and read as catastrophic sample loss, while
+        # `packets` sat at exactly 24000/s and the ring never came near its rail.
+        #   overrun_count    = send_req while the builder is mid-traversal. BENIGN
+        #                      since the pend-bit redesign (see ~line 936): the
+        #                      due survives in pend[] and is served on the next
+        #                      traversal, so NOTHING is dropped. It is a load- and
+        #                      jitter-dependent rate, not an error rate.
+        #   write_drop_count = a USB sample arrived with the ring full, so the
+        #                      channel-addressed write was SUPPRESSED and one
+        #                      channel slot kept a stale value. THIS one is
+        #                      audible (a per-channel click) and must stay 0.
+        # Never fold them back together.
+        self.overrun_count  = CSRStatus(32, description="send_req arriving while builder mid-traversal (benign; pend[] re-serves it).")
+        self.write_drop_count = CSRStatus(32, description="USB samples dropped on a FULL ring — audible per-channel click. MUST stay 0.")
         self.fifo_level     = CSRStatus(blk_bits + 8, description="block_fifo occupancy (blocks).")
         # Timestamp instrument: the ACTUAL emitted avtp_timestamp (pres) and the
         # live gPTP-ns(low32) latched at the SAME packet emit. effective offset =
@@ -1153,15 +1169,16 @@ class DantePacketizer(LiteXModule):
         overruns  = Signal(32)
         # Ring-full write-drops: a USB sample arrives while ~have_space, so the
         # channel-addressed write is SUPPRESSED (line ~358) -> ONE stale channel
-        # slot = an audible per-channel click. This was UNCOUNTED — overrun_count
-        # only caught builder-busy skips, so a ring hitting the full rail was
-        # invisible. Count it and fold into overrun_count.
+        # slot = an audible per-channel click. This was UNCOUNTED, then folded
+        # INTO overrun_count, which hid it again behind a benign counter. It now
+        # has its own CSR (write_drop_count) and must read 0.
         write_drops = Signal(32)
         self.sync += If(en & samp_vld & (started | first) & ~have_space,
                         write_drops.eq(write_drops + 1))
         self.comb += [
             self.packet_count.status.eq(pkt_count),
-            self.overrun_count.status.eq(overruns + write_drops),
+            self.overrun_count.status.eq(overruns),
+            self.write_drop_count.status.eq(write_drops),
         ]
 
         # Current byte: header (idx<42), else the current sample's bytes (big-endian,

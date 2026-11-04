@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """Read the board's runtime counters over UDP (the UART belongs to picocom)."""
 import socket, struct, sys, time
-NAMES = ["talker","packets","underrun","overrun","fifo_level","last_sec","last_ts",
+# "sendreq_busy" HEETTE "overrun". Het is send_req dat midden in een traversal
+# landt, wat pend[] alsnog serveert: BENIGNE, en op een gezonde 96 kHz-stroom
+# loopt het met 11k-28k/s. Onder de oude naam las dat als massale sample-loss en
+# dat heeft op 2026-11-03 een halve sessie gekost. De teller die wel audio-verlies
+# betekent is write_drops, en die staat in tools/usbsrc.py (U-antwoord).
+NAMES = ["talker","packets","underrun","sendreq_busy","fifo_level","last_sec","last_ts",
          "anchors","enables","disables","ptp_locked","offset_ns","path_delay_ns",
          "mac_writer_err","rx_crc_err",
          "ptp_now_sec","ptp_now_sub",

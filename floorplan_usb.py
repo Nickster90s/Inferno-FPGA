@@ -414,6 +414,14 @@ _light = os.environ.get("NEXTPNR_USB_FP_LIGHT", "") == "1"
 # alleen op seed 7); "" laat het control endpoint helemaal vrij (~690 cellen,
 # plaatst overal maar usb blijft op ~62 MHz).
 _ctrl_match = os.environ.get("NEXTPNR_USB_FP_CTRL", "get_descriptor").lower()
+# LET OP: "" MOET apart worden afgevangen. `"" in s` is in Python ALTIJD True,
+# dus een leeg _ctrl_match rechtstreeks in de filter hieronder KEERT de test om:
+# `("ulpi" not in _n) and ("" not in _n)` is altijd False, de `continue` vuurt
+# nooit, en dan wordt ELK net getrokken -- ~3000 cellen in plaats van de ~690
+# die de knop belooft, en daarmee een gegarandeerde HeAP-stall. De
+# pad-only-modus heeft dus nooit gedaan wat erboven staat. Gevonden 2026-11-03
+# bij het zoeken naar een doos waarin BEIDE PHY's bij hun pads passen.
+_ctrl_on = _ctrl_match != ""
 
 # ---- IN DE LICHTE MODUS IS DE DOOS OOK IN Y BEGRENSD ------------------------
 # Y 0..156 (de volle kolom) bedekt ook de ETH-pad-rijen -- zie de kop van dit
@@ -462,7 +470,7 @@ for nname, net in ctx.nets:
         # De build-log noemt het kritieke pad exact:
         #   StandardRequestHandler.get_descriptor.bytes_sent[2] -> CARRY4
         # dus trek dat, en niet zijn hele ouder.
-        if ("ulpi" not in _n) and (_ctrl_match not in _n):
+        if ("ulpi" not in _n) and not (_ctrl_on and _ctrl_match in _n):
             continue
     elif USB_PREFIX not in nname or USB2_PREFIX in nname:  # USB1 only (excl USB2)
         continue
@@ -511,6 +519,70 @@ for cname, cell in ctx.cells:
         ncf += _pull(cell, CFG_REGION)       # net-DRIVERS too dragged long-net cells
                                              # and thrashed the placer; named is local.
 print("[floorplan_usb] cfgflash: %d cells -> %s (X %d..114)" % (ncf, CFG_REGION, _cf_x0))
+
+# ---- ethernet RX datapath: compacte doos ----------------------------------
+# GEMETEN 2026-11-03, niet geraden. Het kritieke pad van eth_rx_clk is
+#   MultiReg regs1[5] -> rx_cdc graycounter CE -> crc32checker fifo_out -> CE
+# en dat is 1,1 ns LOGICA tegen 6,9 ns ROUTING, met twee sprongen van 1,9 ns:
+# (52,21) -> (65,55) -> (52,28). Eén net, main_..._liteethmaccrc32checker_
+# fifo_out, heeft FAN-OUT 48 en zijn afnemers stonden tientallen tiles van hun
+# driver. Zelfde net op elke falende seed. eth_rx is dus nooit een
+# seed-eigenschap geweest maar verstrooiing -- precies waarvoor de AAF- en
+# CPU-dozen hierboven al bestaan.
+#
+# WAAROM NIET DE USB-DOOS AFTOPPEN. Dat werkt voor eth_rx (140-161 MHz) maar
+# verplaatst de schade: onder Y50 liggen in X 0..48 maar 2499 tiles, HeAP
+# plaatst tot ~0,55 cellen/tile en stalt bij 1,0, dus daar past ~1375 cellen =
+# precies één licht USB-subsysteem. Main heeft die alleen al nodig (met minder
+# zakt usb naar 34,3 MHz), en Backup wordt er dan uit gedrukt -- regions
+# VERBIEDEN niets, ze trekken alleen, dus het is congestie. Drie keer gemeten.
+#
+# WAAROM GEEN LUTRAM. De oudere eth-TX-doos hierboven staat uit omdat hij de
+# plaatser 90 minuten liet hangen: die tak roept constrainCellToRegion DIRECT
+# aan, buiten _constrainable() om, en sleepte zo de storage_2-LUTRAM mee naar
+# een doos met te weinig SLICEM-kolommen. Hier gaat alles door _pull() (die
+# filtert op SLICE_LUTX/FFX/CARRY4/SELMUX2) EN worden RAM-namen expliciet
+# overgeslagen. De asyncfifo-opslag hoort niet in deze doos; de besturing wel.
+ETHRX_REGION = "eth_rx_fp"
+ETHRX_SUBSTR = ("core_rx", "crc32checker", "preamble", "rx_cdc")
+# Welke substrings meegaan is instelbaar, want RX alleen is GEMETEN niet genoeg:
+# met de doos op X50..75 ging usb naar 78,9 en usb2 naar 68,1 (de ruimste marges
+# van 2026-11-03) maar eth_tx zakte van ~140 naar 95,8 -- RX en TX delen de
+# MAC-kern, dus RX eruit trekken scheurt TX kapot. De hele MAC pakken EN de doos
+# bij zijn EIGEN pads leggen (X1, Y51-72; USB's pads zitten op Y1-49) is de
+# indeling die bij de meting past: USB onderin de linkerkolom, ethernet erboven.
+_sub = os.environ.get("NEXTPNR_ETH_RX_SUBSTR", "").strip()
+if _sub:
+    ETHRX_SUBSTR = tuple(t.strip().lower() for t in _sub.split(",") if t.strip())
+ERX0, ERY0, ERX1, ERY1 = 50, 50, 75, 95
+_erx = os.environ.get("NEXTPNR_ETH_RX_REGION", "").strip()
+if _erx:
+    ERX0, ERY0, ERX1, ERY1 = (int(v) for v in _erx.split(","))
+_erx_on = _erx != ""
+
+def _is_ram_name(nm):
+    n = nm.lower()
+    return ("storage" in n) or ("asyncfifo_din" in n) or ("asyncfifo_dout" in n)
+
+if _erx_on:
+    ctx.createRectangularRegion(ETHRX_REGION, ERX0, ERY0, ERX1, ERY1)
+    nerx = 0
+    for cname, cell in ctx.cells:
+        if _is_ram_name(cname):
+            continue
+        if any(t in cname for t in ETHRX_SUBSTR):
+            nerx += _pull(cell, ETHRX_REGION)
+    for nname, net in ctx.nets:
+        _n = nname.lower()
+        if _is_ram_name(_n) or not any(t in _n for t in ETHRX_SUBSTR):
+            continue
+        drv = getattr(net, "driver", None)
+        if drv is not None:
+            nerx += _pull(getattr(drv, "cell", None), ETHRX_REGION)
+        for u in getattr(net, "users", []):
+            nerx += _pull(getattr(u, "cell", None), ETHRX_REGION)
+    print("[floorplan_usb] ETH-RX: %d cells -> %s (X %d..%d, Y %d..%d)"
+          % (nerx, ETHRX_REGION, ERX0, ERX1, ERY0, ERY1))
 
 # ---- AAF packetizer: compact box in the clear right-center -----------------
 # The sys-domain critical paths (pres-time t_next_value adder, ring rd/level,
