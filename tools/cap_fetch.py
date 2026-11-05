@@ -75,6 +75,36 @@ def main():
     for i in sorted(entries):
         t_ms, d, ln, raw = entries[i]
         ihl = (raw[14] & 0x0F) * 4
+        # DECODEER OP PROTOCOL, NIET BLIND ALS UDP.
+        # Dit leesde de eerste 4 bytes na de IP-header ALTIJD als src/dst poort.
+        # Bij ICMP zijn dat type, code en checksum, en dan krijg je een
+        # verzonnen "poort 771 -> 46077" die er volstrekt echt uitziet. Op
+        # 2026-11-05 heeft dat tot de conclusie geleid dat een DAC8 ons met
+        # 5000 UDP-pakketten/s bombardeerde, terwijl het ICMP type 3 code 3
+        # (port unreachable) was -- 0x0303 = 771 en de checksum 0xb3fd = 46077.
+        # De werkelijke oorzaak was omgekeerd: WIJ bleven 17 uur naar een dode
+        # flow zenden en kregen op elk pakket een foutmelding terug.
+        proto = raw[23] if len(raw) > 23 else 0
+        PNAME = {1: "ICMP", 2: "IGMP", 6: "TCP", 17: "UDP"}
+        if proto != 17:
+            u0 = 14 + ihl
+            src = ".".join(str(x) for x in raw[26:30])
+            dst = ".".join(str(x) for x in raw[30:34])
+            extra = ""
+            if proto == 1 and len(raw) >= u0 + 8:
+                t, c = raw[u0], raw[u0 + 1]
+                extra = " type=%d code=%d" % (t, c)
+                inner = raw[u0 + 8:]
+                if len(inner) >= 28:
+                    iihl = (inner[0] & 0x0F) * 4
+                    isrc = ".".join(str(x) for x in inner[12:16])
+                    idst = ".".join(str(x) for x in inner[16:20])
+                    isp, idp = struct.unpack(">HH", inner[iihl:iihl + 4])
+                    extra += "  [afgewezen: %s:%d -> %s:%d]" % (isrc, isp, idst, idp)
+            print("[%d ms] %s %-9s %s -> %s len=%d%s"
+                  % (t_ms, "TX" if d else "RX", PNAME.get(proto, "proto%d" % proto),
+                     src, dst, ln, extra))
+            continue
         u = 14 + ihl
         sp, dp = struct.unpack(">HH", raw[u:u + 4])
         src = ".".join(str(x) for x in raw[26:30])
