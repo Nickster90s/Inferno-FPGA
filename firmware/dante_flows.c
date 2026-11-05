@@ -35,6 +35,19 @@
 dante_flows_stats_t g_flows_stats;
 
 #define OP_REQUEST_FLOW   0x0100
+// 0x0101 TEAR DOWN. A receiver sends this when it drops a subscription, with
+// the 6-byte handle we returned on the 0x0100 as its content. Until now it fell
+// into the unhandled branch below, got 0x0103 back, and the flow kept running:
+// with time-based expiry disabled (dante_tx.c:dante_tx_expire) a context was
+// then only ever reclaimed when some other receiver needed the slot, which is
+// how flows to a device that had long since unsubscribed stayed on the wire for
+// hours. A DAC8 on this bench was reported to send a stop on every patch
+// change, so this was the normal case failing, not an edge case.
+//
+// 0x0102 (update) is deliberately NOT handled yet: no device here has been
+// observed sending one, and answering an opcode we have never seen would be
+// guessing at its content.
+#define OP_STOP_FLOW      0x0101
 
 static uint16_t rd16(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]); }
 static uint32_t rd32(const uint8_t *p)
@@ -163,10 +176,40 @@ static void flows_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
                 // keepalives arriving every 20-30 MINUTES here against ~5 s
                 // while we were still rejecting requests -- and for
                 // subscriptions going stale until manually re-made.
-                static uint16_t cookie;
-                cookie++;
+                // The cookie lives WITH THE FLOW (dante_tx.c), not here. It
+                // used to be a local static that incremented on every reply
+                // and was stored nowhere, so the handle we handed out could not
+                // be checked when it came back in a 0x0101 -- and the index on
+                // its own is reused between bindings.
                 dante_msg_u32(&m, (uint32_t)f);
-                dante_msg_u16(&m, cookie);
+                dante_msg_u16(&m, dante_tx_flow_cookie((unsigned)f));
+            }
+        }
+    } else if (op1 == OP_STOP_FLOW) {
+        // Content is the handle from the 0x0100 reply: flow index u32 BE then
+        // the u16 cookie. Both are checked -- see dante_tx_release_handle.
+        if (clen < 6) {
+            printf("[flow] stop with %lu content bytes, need 6\n",
+                   (unsigned long)clen);
+            code = 0x0103;
+            g_flows_stats.unknown++;
+        } else {
+            uint32_t idx = rd32(c);
+            uint16_t ck  = rd16(c + 4);
+            if (dante_tx_release_handle(idx, ck) == 0) {
+                printf("[flow] stop from %u.%u.%u.%u: released flow %lu\n",
+                       src_ip[0], src_ip[1], src_ip[2], src_ip[3],
+                       (unsigned long)idx);
+                g_flows_stats.stopped++;
+            } else {
+                // 0x0103 is the right code here and not a failure on our part:
+                // flows_control.rs calls it "flow not found / expired", which
+                // is exactly what an already-released or mismatched handle is.
+                printf("[flow] stop from %u.%u.%u.%u: no flow %lu/%u\n",
+                       src_ip[0], src_ip[1], src_ip[2], src_ip[3],
+                       (unsigned long)idx, ck);
+                code = 0x0103;
+                g_flows_stats.unknown++;
             }
         }
     } else {

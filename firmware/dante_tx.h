@@ -154,6 +154,22 @@ typedef struct {
     uint32_t anchors;     // media-clock loads from PTP
     int32_t  trim_ppb;    // media clock rate trim, ppb
     int32_t  drift;       // last measured emitted-vs-PTP error, samples
+    // WAAROM de talker uitging, en WAAROM een flow verdween.
+    //
+    // 2026-11-05: twee ontvangers verloren elke 3-5 minuten SAMEN de audio
+    // voor ~10 s, en beide bindings verspringen daarna. `disables` zei dat de
+    // talker 36x uit was gegaan, maar niet door welke van de drie termen in
+    // `want` -- en `rebinds` zei dat een flow opnieuw gebonden was, maar niet
+    // wie hem had vrijgegeven. Met een dode console is een teller per oorzaak
+    // het enige dat dat onderscheidt. Append-only: deze struct wordt per veld
+    // geserialiseerd in dstats.c, dus achteraan toevoegen is veilig.
+    uint32_t off_unlock;  // want==0 doordat PTP niet (meer) settled was
+    uint32_t off_noflow;  // want==0 doordat er geen flow meer bond
+    uint32_t off_rate;    // want==0 doordat mcr_dante nog niet op rate was
+    uint32_t ub_arc;      // unbind via ARC 0x2202 / onbekende weg
+    uint32_t ub_stop;     // unbind doordat de ontvanger 0x0101 stuurde
+    uint32_t ub_expire;   // unbind doordat de keepalives stopten
+    uint32_t ub_drop;     // unbind via dante_tx_drop_all (latency/rate change)
 } dante_tx_stats_t;
 extern dante_tx_stats_t g_tx_stats;
 
@@ -223,6 +239,9 @@ typedef struct {
     uint8_t  fpp;
     uint8_t  mcast;
     uint32_t age_ms;
+    uint16_t cookie;          // second half of the handle the receiver holds
+    uint32_t ka_rx;           // datagrams this peer sent to our media port 4321
+    uint32_t ka_age_ms;       // since the last one; 0xFFFFFFFF = never seen
     uint16_t chans[8];
 } dante_tx_flow_detail_t;
 int dante_tx_flow_detail(unsigned f, dante_tx_flow_detail_t *out);
@@ -231,6 +250,19 @@ int  dante_tx_chan_bundle(uint16_t ch1, uint16_t *id, uint8_t *pos);
 int  dante_tx_mcast_by_id(uint16_t id, uint8_t ip[4], uint8_t *nslots);
 int  dante_tx_mcast_enum(unsigned n, uint16_t *id);
 int  dante_tx_unbind(unsigned f);
+
+// Unbind, recording WHY. dante_tx_unbind() is this with DTX_UB_ARC, so the
+// ARC path and any caller that does not say keep their old meaning.
+#define DTX_UB_ARC     0
+#define DTX_UB_STOP    1
+#define DTX_UB_EXPIRE  2
+#define DTX_UB_DROP    3
+int  dante_tx_unbind_why(unsigned f, uint8_t why);
+
+// The handle dante_flows.c hands back on a 0x0100, and the teardown that
+// handle authorises. Both halves must match for a release; see dante_tx.c.
+uint16_t dante_tx_flow_cookie(unsigned f);
+int  dante_tx_release_handle(uint32_t idx, uint16_t cookie);
 void dante_tx_expire(void);
 void dante_tx_drop_all(void);   // force receivers to renegotiate now
 

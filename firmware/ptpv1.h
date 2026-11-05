@@ -57,6 +57,13 @@ typedef struct {
     // is out of sync from the moment the stream starts, with every counter
     // healthy. dante_tx watches step_count and re-anchors when it moves.
     uint32_t step_count;        // bumped on every absolute step or phase adjust
+    // HOE VAAK DE LOCK IS WEGGEVALLEN. `locked` is een momentopname, en een
+    // unlock die 4 s duurt is met een 2 Hz-poll onzichtbaar -- terwijl hij de
+    // talker uitzet en dus ELKE ontvanger stil maakt. Gemeten 2026-11-05: een
+    // excursie van -15892 ns gefilterd, 3x de unlock-drempel, drie samples
+    // achter elkaar bij UNLOCK_STREAK 4. Eén sample van een echte unlock af,
+    // en niets telde hoe vaak dat al wel gebeurd was.
+    uint32_t unlocks;           // lock -> unlock overgangen sinds boot
     uint8_t  phase_settled;     // 1 once the post-path-delay residual step is done
 } ptpv1_state_t;
 extern ptpv1_state_t g_ptpv1;

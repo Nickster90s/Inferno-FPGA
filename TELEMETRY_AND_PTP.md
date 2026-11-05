@@ -286,3 +286,95 @@ tracks network noise (60.9 ppb in that window vs 6.4 ppb in the matrix). That
 is 0.06 ppm -- 8x smaller than the phase servo that was audibly bad -- and
 underruns stayed at 0, but it is the price of closing the loop and is worth a
 listen under load.
+
+# UNLOCK POLICY (2026-11-05) — a 16 us excursion cost 13 seconds of audio
+
+Two receivers lost audio together for ~10 s every 3-5 minutes, and both
+bindings jumped afterwards. Reported from the DAC8 side as "what frees those
+two contexts?"; the answer was that nothing did.
+
+## The full sequence, from the event ring
+
+```
+t=9013131  FollowUp lost (raw reads 37556 ns, path delay 0)
+t=9013382  raw -17293  }
+t=9013633  raw -17101  }  six consecutive samples at -14 to -17 us;
+t=9013883  raw -15892  }  the median filter follows them to -15892
+t=9014133  raw -16186  }
+t=9014383  raw -15409  }
+t=9014634  raw -14286  }
+t=9014884  ptp_unlock   filtered -15892, streak 4
+t=9014885  talker_off                       <- 1 ms later. Every receiver silent.
+t=9019944  flow_unbind f1                   <- 5 s later: consequence
+t=9020218  flow_unbind f0
+t=9023643  ptp_lock     filtered 1202       <- 8.8 s unlocked
+t=9027675  talker_on                        <- EXACTLY 4.000 s after relock
+t=9027672  anchor }  anchors 74 -> 76, which is what the DAC8 saw as 58 -> 60
+t=9027778  anchor }
+```
+
+Packet rate was 0 for 13 s. 8.8 s of that was the unlock; **4.000 s was
+`PTP_SETTLE_MS` holding the talker off after a relock that had already
+succeeded.**
+
+## Why this was disproportionate
+
+16 us is 1.5 samples at 96 kHz. `DANTE_TX_REANCHOR_SAMPLES` is 16 samples
+(167 us at 96 kHz) — this firmware's own threshold for an error worth
+correcting — and the tightest receiver on the bench (A16R) budgets 250 us. So
+the lock logic muted every receiver for 13 s over an error 11x smaller than the
+one the phase guard does not bother to act on.
+
+And muting protected nothing. The media clock is a free-running counter
+anchored once to PTP; a PTP *offset* excursion does not move our timestamps.
+What matters is that counter's phase, which is already measured and guarded
+twice: finely at 16 samples, coarsely at +-24000 samples (0.5 s).
+
+## What the reference does
+
+`github.com/Nickster90s/Inferno-ESP32-P4` (same author, the N-Series DAC8 on
+this network) gates audio on lock NOWHERE. `media_clock.c`:
+
+```c
+if (!g_ptpv1.locked) {
+    // PTP is the timeline. Without it the error term is meaningless, so
+    // hold the last rate rather than servoing on noise.
+    return;
+}
+```
+
+The servo freezes; the DAC keeps clocking out its ring. There is no hold-off
+after a relock, nor at cold boot. Its constants are `PS_LOCK_NS 3000`,
+`PS_UNLOCK_NS 10000`, `PS_LOCK_STREAK 8`, `PS_UNLOCK_STREAK 8`, and a >8 us
+jump held for 8 Syncs takes one small phase step while KEEPING lock.
+
+## Adopted
+
+1. **Once the talker runs it is no longer gated on lock.** `want` requires
+   `settled && rate_ready` only for the FIRST start — that gate exists so we
+   never anchor wrong, and anchoring wrong is what a receiver cannot recover
+   from, while streaming through an unlock is recoverable. A running talker now
+   stops only when the last flow goes away.
+2. **`UNLOCK_STREAK` 4 -> 8.** The excursion was six samples; eight rides it
+   out. `LOCK_STREAK` was already 8, so unlock at 4 made falling over twice as
+   easy as getting back up — and the reference uses 8 both ways.
+
+`LOCK_THRESHOLD_NS`/`UNLOCK_THRESHOLD_NS` stay at 2000/5000. The comment there
+forbids widening them without checking `rx_gate` first; `rx_gate` is armed
+(396914 match, dropping only `91:e0:f0:01:00:00`, which is AVTP) and the steady
+state is sub-microsecond, so that warning's reasoning still holds. The problem
+was a burst, not a noise floor.
+
+## Not explained
+
+Where the 16 us burst comes from. It began one sample after a lost FollowUp,
+and the magnitude matches a one-entry slip in the RX timestamp ring (the error
+would be the gap between two frames, and Sync->FollowUp is ~17 us) — but
+`rx_ts_resyncs` reads 7 after boot and does not climb, so that hypothesis has
+no support. 26 lost FollowUps and 1 mispair in 5 minutes say the control-frame
+path does lose frames; the mechanism from there to a 16 us offset is open.
+
+New counters for it, in the `tools/flows.py` `FLW3` trailer: `off_unlock`
+(must stay 0 — it is now a tripwire), `off_noflow`, `off_rate`, `ub_arc`,
+`ub_stop`, `ub_expire`, `ub_drop`, `ptp_unlocks`, `ptp_steps`,
+`rx_ts_resyncs`, `rx_pops`.

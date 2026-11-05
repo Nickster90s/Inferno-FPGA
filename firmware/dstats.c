@@ -17,7 +17,7 @@ extern uint32_t usb_fb_manual;
 // PTP offset noise points at: if the ts ring falls out of lock-step with slot
 // consumption, frames are paired with the PREVIOUS frame's timestamp, which
 // injects microseconds into every offset without losing a single packet.
-extern uint32_t rx_ts_resyncs, rx_pops, g_lvl_pre, g_lvl_post;
+extern uint32_t rx_ts_resyncs, rx_pops, g_lvl_pre, g_lvl_post;   // main.c
 extern uint16_t g_mcast_fpp;
 extern uint32_t g_phase_adj;
 extern uint8_t  usb_fb_sweep_hold;
@@ -209,7 +209,11 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     if (len >= 1 && req[0] == 'f') {
         uint8_t *p = net_udp_payload_buf();
         uint32_t n = 0;
-        put32(p, n, 0x464C5731u); n += 4;          // 'FLW1'
+        // 'FLW3', not 'FLW2'. A seven-word trailer was appended after the
+        // flow array (why the talker went off, why flows were unbound), which
+        // an FLW2 reader would read as a seventh flow, so the tag moves with
+        // the layout rather than letting an old reader silently misalign.
+        put32(p, n, 0x464C5733u); n += 4;          // 'FLW3'
         put32(p, n, 6);           n += 4;          // N_FLOWS
         for (unsigned f = 0; f < 6; f++) {
             dante_tx_flow_detail_t d;
@@ -220,9 +224,37 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
                         ((uint32_t)d.dst[2] << 8) | d.dst[3]);        n += 4;
             put32(p, n, d.dport);                                     n += 4;
             put32(p, n, d.age_ms);                                    n += 4;
+            put32(p, n, d.cookie);                                    n += 4;
+            put32(p, n, d.ka_rx);                                     n += 4;
+            put32(p, n, d.ka_age_ms);                                 n += 4;
             for (unsigned i = 0; i < 8; i += 2)
                 { put32(p, n, ((uint32_t)d.chans[i] << 16) | d.chans[i+1]); n += 4; }
         }
+        // TRAILER: waarom de talker uitging en waarom flows verdwenen.
+        // `disables` en `rebinds` zeggen hoeveel, niet waardoor; met een dode
+        // console is dit het enige onderscheid tussen "PTP viel weg" (beide
+        // ontvangers stil, want de talker gaat uit) en "een ontvanger stopte"
+        // (alleen die flow weg). Zie dante_tx.h.
+        put32(p, n, g_tx_stats.off_unlock); n += 4;
+        put32(p, n, g_tx_stats.off_noflow); n += 4;
+        put32(p, n, g_tx_stats.off_rate);   n += 4;
+        put32(p, n, g_tx_stats.ub_arc);     n += 4;
+        put32(p, n, g_tx_stats.ub_stop);    n += 4;
+        put32(p, n, g_tx_stats.ub_expire);  n += 4;
+        put32(p, n, g_tx_stats.ub_drop);    n += 4;
+        // En de twee PTP-tellers die hier de oorzaak van off_unlock zijn.
+        // step_count stond nergens in een antwoord, dus een re-anchor door een
+        // klokstap was alleen uit `anchors` te raden.
+        put32(p, n, g_ptpv1.unlocks);       n += 4;
+        put32(p, n, g_ptpv1.step_count);    n += 4;
+        // En de RX-timestamp-ring. Hij staat al in het 'u'-antwoord, maar dat
+        // heeft voorwaardelijke velden en dus geen vaste offset -- precies de
+        // fout waar never-sum/stale-offset-notities over gaan. Hier staat hij
+        // naast de unlock-teller, want een resync verschuift de ring een
+        // entry en dan hoort een timestamp bij een ANDER frame: de fout is dan
+        // het gat tussen twee frames, en Sync->FollowUp is ~17 us.
+        put32(p, n, rx_ts_resyncs);         n += 4;
+        put32(p, n, rx_pops);               n += 4;
         net_udp_commit(src_ip, src_port, STATS_PORT, n, NET_TOS_BEST_EFFORT);
         return;
     }
@@ -392,13 +424,16 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     }
 
     if (len >= 2 && req[0] == 'Y') {
-        g_fpp_adv_max = req[1] ? req[1] : 8;
+        // 0 now means AUTO (scale with the sample rate), not 8. Advertising a
+        // rate-independent constant is the bug this replaced.
+        g_fpp_adv_max = req[1];
         mdns_announce();
-        printf("[flow] advertised fpp max = %u\n", g_fpp_adv_max);
+        printf("[flow] advertised fpp max = %u%s\n", dante_fpp_adv_max(),
+               g_fpp_adv_max ? " (override)" : " (auto, scaled to rate)");
         uint8_t *py = net_udp_payload_buf();
         uint32_t ny = 0;
         put32(py, ny, 0x46505941u); ny += 4;               // 'FPYA'
-        py[ny++] = g_fpp_adv_max;
+        py[ny++] = dante_fpp_adv_max();                    // effective, not raw
         net_udp_commit(src_ip, src_port, STATS_PORT, ny, NET_TOS_BEST_EFFORT);
         return;
     }

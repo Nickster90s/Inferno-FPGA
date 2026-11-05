@@ -203,6 +203,11 @@ static void bind_flow(unsigned f)
            dmac[0], dmac[1], dmac[2], dmac[3], dmac[4], dmac[5], csum);
 }
 
+// Defined after flows[]; bound in dante_tx_init so the observation starts at
+// boot rather than at the first subscription.
+static void media_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
+                     uint16_t src_port, const uint8_t *p, uint32_t len);
+
 void dante_tx_init(void)
 {
     // One group per bundle, keyed off our MAC so two boards do not collide.
@@ -247,6 +252,19 @@ void dante_tx_init(void)
     // The audio path below is complete and testable without it -- the packets
     // are on the wire and tools/dante_decode.py can verify them -- but end-to-end
     // subscription needs those records. Tracked as its own task.
+
+    // LISTEN ON OUR OWN MEDIA PORT. We are a transmitter, so nothing sends us
+    // audio -- but a receiver is reported to send a keepalive to 4321, and with
+    // no binding here those datagrams were discarded by the UDP demux without
+    // even a counter. Binding it is how the claim gets measured.
+    //
+    // Cost is bounded by main.c's MAC-level early drop: flooded multicast audio
+    // for other devices' groups never reaches IP parsing, and the handler drops
+    // any multicast destination on its first line, so this only ever sees
+    // unicast addressed to us.
+    if (net_udp_bind(DANTE_PORT_MEDIA, media_rx) != 0)
+        printf("[dtx] BIND FAILED on %u -- udp table full, keepalives unobservable\n",
+               DANTE_PORT_MEDIA);
 
     talker_on = 0;
     printf("[dtx] %u flows x 8 ch, fpp=%u, 24-bit, %u pps/flow (talker held off)\n",
@@ -435,7 +453,44 @@ void dante_tx_poll(void)
     // mcr_dante is still slewing means the first ~43 s go out on a rate that is
     // both wrong and moving -- the "bad audio for a while after boot" symptom.
     // With the NV warm start this is normally satisfied immediately.
-    uint8_t want = settled && (dante_tx_active() > 0) && mcr_dante_rate_ready();
+    // *** ZODRA DE TALKER LOOPT, STOPT HIJ NIET MEER OP EEN PTP-UNLOCK. ***
+    //
+    // Gemeten 2026-11-05: een excursie van 16 us, zes samples lang, zette de
+    // talker uit en kostte 13 SECONDEN stilte bij ELKE ontvanger -- 8,8 s
+    // unlock plus exact 4,000 s PTP_SETTLE_MS na de relock. De flows van
+    // beide ontvangers vielen 5 s NA het uitzetten weg: gevolg, geen oorzaak.
+    //
+    // Uitzetten beschermt niets. De mediaklok is een vrijlopende teller die
+    // EEN keer aan PTP wordt geankerd, dus een offset-excursie in PTP
+    // verschuift onze timestamps niet. Wat wel telt is de fase van die
+    // mediaklok, en die wordt hierboven al gemeten en bewaakt: fijn op
+    // DANTE_TX_REANCHOR_SAMPLES (16 samples = 167 us bij 96 kHz) en grof op
+    // +-24000 samples (0,5 s). Die twee vangen een echte klokbreuk; de
+    // lock-vlag voegde daar alleen een mute van 13 s aan toe.
+    //
+    // REFERENTIE, niet zelf verzonnen: Inferno-ESP32-P4 (dezelfde auteur, de
+    // N-Series DAC8 op dit netwerk) gate de audio NERGENS op lock. In
+    // media_clock.c doet een unlock precies een ding:
+    //
+    //     if (!g_ptpv1.locked) {
+    //         // PTP is the timeline. Without it the error term is
+    //         // meaningless, so hold the last rate rather than servoing
+    //         // on noise.
+    //         return;
+    //     }
+    //
+    // De servo bevriest, de audio loopt door. Daar is ook geen wachttijd na
+    // een relock -- niet na een relock en niet bij koud opstarten.
+    //
+    // Wat BLIJFT: de eerste start wacht nog wel op settled + rate_ready. Daar
+    // is de hele reden van PTP_SETTLE_MS en phase_settled dat je niet verkeerd
+    // geankerd begint (zie de commentaren hierboven: 227 ms in de toekomst,
+    // elke pakket weggegooid, elke teller gezond). Fout beginnen is niet
+    // herstelbaar voor een ontvanger die ons al heeft afgeschreven; doorgaan
+    // door een unlock heen is dat wel.
+    uint8_t have_flow = (dante_tx_active() > 0);
+    uint8_t want = talker_on ? have_flow
+                             : (settled && have_flow && mcr_dante_rate_ready());
 
     // ---- MEDIA CLOCK RATE SERVO -------------------------------------------
     //
@@ -655,11 +710,29 @@ void dante_tx_poll(void)
         telem_event(TELEM_E_TALKER_ON, (int32_t)dante_tx_active(), 0);
         printf("[dtx] clock locked -- talker ENABLED\n");
     } else {
+        // WELKE van de drie termen in `want` viel weg? "clock unlocked" stond
+        // hier als vaste tekst, maar `want` heeft drie oorzaken en twee ervan
+        // hebben niets met de klok te maken. Bij een dode console is dit de
+        // enige manier om een dropout van 10 s toe te wijzen.
+        // EEN TELLER, EEN OORZAAK. Onder het beleid hierboven kan een
+        // lopende talker alleen nog uitgaan doordat de laatste flow weg is,
+        // dus dat wordt eerst getest. off_unlock en off_rate zijn daarmee
+        // tripwires: als die oplopen is het beleid ergens omzeild, en dat is
+        // iets anders dan "er was toevallig ook geen lock".
+        uint8_t why = 0;
+        if (!have_flow) { why |= 2; g_tx_stats.off_noflow++; }
+        else {
+            if (!settled)                { why |= 1; g_tx_stats.off_unlock++; }
+            if (!mcr_dante_rate_ready()) { why |= 4; g_tx_stats.off_rate++;   }
+        }
         aaf_pkt_enable_write(0);
         talker_on = 0;
-        telem_event(TELEM_E_TALKER_OFF, 0, 0);
+        telem_event(TELEM_E_TALKER_OFF, (int32_t)why, (int32_t)dante_tx_active());
         g_tx_stats.disables++;
-        printf("[dtx] clock unlocked -- talker OFF\n");
+        printf("[dtx] talker OFF (why=%u: %s%s%s)\n", why,
+               (why & 1) ? "ptp-unsettled " : "",
+               (why & 2) ? "no-flow " : "",
+               (why & 4) ? "rate-not-ready" : "");
     }
 }
 
@@ -716,6 +789,30 @@ typedef struct {
     uint16_t ext_id;       // flow id Dante Controller uses for this flow
     uint16_t chans[8];     // slot -> tx channel, 1-based, 0 = silent slot
     uint8_t  dmac[6];      // what we actually bound as the destination MAC
+    // THE HANDLE WE GAVE THE RECEIVER. dante_flows.c answers a 0x0100 with
+    // (flow index u32, cookie u16) because inferno does (flows_tx.rs:631-633).
+    // The cookie was a local `static` that incremented per reply and was never
+    // stored, so a 0x0101 stop could only be matched on the index -- and the
+    // index is REUSED, so a stale handle from a previous binding of the same
+    // slot would have torn down whatever is in it now. Keeping it per flow is
+    // what makes the handle mean one specific binding.
+    //
+    // Assigned on a FRESH bind only, and deliberately kept across a refresh:
+    // the receiver holds the handle it was first given, and a refresh must not
+    // invalidate it.
+    uint16_t cookie;
+    // OBSERVATION ONLY -- nothing acts on these. The question they exist to
+    // answer is whether a receiver sends anything to our media port (4321), as
+    // a DAC8 is reported to do, because that would be the keepalive signal the
+    // 4455 path never gave us: measured here, our one flow's age_ms climbed
+    // monotonically through 19 minutes with zero refreshes and `tcpdump -i ens5
+    // 'udp port 4455'` saw 0 packets in 20 s.
+    //
+    // They are NOT wired to expiry. Every timer-based expiry in this file has
+    // silenced a live flow (see dante_tx_expire), so the number comes first and
+    // the policy only after it is known which devices actually send this.
+    uint32_t ka_rx;        // datagrams seen from this peer on port 4321
+    uint32_t ka_ms;        // uptime of the most recent one, 0 = never
 } flow_slot_t;
 static flow_slot_t flows[N_FLOWS];
 
@@ -745,7 +842,11 @@ static flow_slot_t flows[N_FLOWS];
 // "erring short costs audio" failure recorded above. Slot pressure is handled
 // by eviction-on-demand in the bind paths, which reclaims only when a slot is
 // genuinely needed, so the timer can afford to be purely a backstop.
-#define FLOW_TIMEOUT_MS  600000
+// NO LONGER USED, and deliberately left here unreferenced so the next person
+// to reach for a 4455-age timeout reads the comment above first. dante_tx_expire
+// now keys on the keepalives the receivers actually send, to our MEDIA port --
+// see the measurements in that function. Do not resurrect this.
+#define FLOW_TIMEOUT_MS_UNUSED  600000
 
 
 
@@ -944,6 +1045,13 @@ int dante_tx_bind_unicast(const uint8_t peer_ip[4], const uint8_t dst_ip[4],
     if (!flows[f].in_use) {
         flows[f].in_use = 1;
         flows[f].rebinds++;
+        // Never 0: a receiver that sends a zeroed handle is sending nothing
+        // meaningful, and that must not match a live flow.
+        static uint16_t cookie_seq;
+        if (++cookie_seq == 0) cookie_seq = 1;
+        flows[f].cookie = cookie_seq;
+        flows[f].ka_rx = 0;
+        flows[f].ka_ms = 0;
         for (int i = 0; i < 4; i++) flows[f].peer[i] = peer_ip[i];
         telem_event(TELEM_E_FLOW_BIND, (int32_t)((f << 24) | (nslots << 8) | fpp),
                     (int32_t)dst_port);
@@ -977,78 +1085,99 @@ void dante_tx_set_ts_offset(int32_t v)
 
 void dante_tx_expire(void)
 {
-    // DISABLED. Time-based expiry has now silenced a LIVE flow twice with two
-    // different timeouts: 300 s, then 600 s, both chosen from observed
-    // keepalive intervals that turned out not to bound anything. Measured on
-    // the bench:
+    // RELEASE A FLOW WHOSE RECEIVER HAS STOPPED SENDING KEEPALIVES -- where
+    // "keepalive" is what was MEASURED on the wire, not what the flow-control
+    // port was assumed to do.
+    //
+    // THE HISTORY THIS REPLACES. Two earlier versions keyed on the age of the
+    // last 4455 flow request and both silenced a LIVE flow, at 300 s and then
+    // at 600 s:
     //
     //   [dtx] flow 4 stale (600 s, 169.254.61.114:14405) -- releasing
     //
     // an AM2 whose subscription was live and whose audio stopped when we
-    // released its context. Earlier the same device was seen refreshing at
-    // 229 s, so there is no interval here that is both long enough to be safe
-    // and short enough to be useful.
+    // released its context. The mistake was not the number. It was that 4455
+    // requests are not a heartbeat at all: UNICAST_FLOWS.md measured receivers
+    // "repeating every ~5 s" while they were being REJECTED, and once we
+    // started accepting, refreshes stopped entirely. Measured 2026-11-05 on
+    // this bench, with both flows playing audio:
     //
-    // The only problem expiry existed to solve is a receiver that MOVES PORTS
-    // stranding its old context (see the history below). Eviction-on-demand in
-    // dante_tx_bind_unicast/_bind_multicast solves that strictly better: it
-    // reclaims only when a context is actually needed, prefers unicast victims,
-    // and picks the oldest among them -- so it cannot fire against a flow
-    // nobody is competing for.
-    return;
+    //   flow 0 -> 169.254.127.2:14337   age 105.5 -> 165.5 s, +10 s per 10 s
+    //   flow 1 -> 169.254.145.57:14337  age  86.4 s and climbing
+    //
+    // monotonic, zero refreshes, and `tcpdump 'udp port 4455'` saw 0 packets in
+    // 20 s. No timeout on that signal can be both safe and useful.
+    //
+    // WHAT THE RECEIVERS ACTUALLY SEND. They talk back on OUR media port 4321,
+    // from the same socket they receive the flow on. Captured off the board's
+    // own ring (the host cannot see it -- unicast, unmanaged switch):
+    //
+    //   169.254.145.57  Leine Prodigy, server_vers 4.2.0, a REAL Dante device:
+    //                   02 00 00 00 <u32 LE counter>, every 250 ms exactly,
+    //                   counter incrementing once per second
+    //   169.254.127.2   N-Series DAC8: 13 37 00.., constant, every ~104 ms
+    //
+    // So this is read off the wire from a shipping Dante receiver, not invented
+    // and not a private contract with one device. media_rx() counts them.
+    //
+    // NO TIMESTAMP ARITHMETIC. The decision is "did the counter move since the
+    // previous poll", never "how long ago was the last one". gptp_uptime_ms()
+    // is PTP-derived and a clock STEP is exactly what defeated every previous
+    // attempt here -- it makes every age enormous at once and expires the lot.
+    // A step can now only delay a poll; it cannot produce a teardown.
+    //
+    // A FLOW IS ONLY EVER EXPIRED IF IT HAS SENT AT LEAST ONE. A RedNet A16R
+    // and an AM2 were on this bench and are not now, so whether they use this
+    // port is UNMEASURED. Until it is, they behave exactly as before: their
+    // contexts are reclaimed by an explicit 0x0101 stop or by eviction on
+    // demand, never by this.
+    //
+    // 5 consecutive silent seconds. The Prodigy sends 4/s and the DAC8 ~10/s,
+    // so one silent poll already means 4 to 10 missed in a row; five of them is
+    // a margin of more than an order of magnitude over the observed cadence.
+    enum { KA_MISS_LIMIT = 5 };
 
-    // RE-ENABLED 2026-08-05, because the flow key changed underneath it.
-    //
-    // This used to do nothing, and the justification was sound at the time:
-    // "a context is reclaimed by peer IP when the same receiver refreshes".
-    // That held while the reuse key was the PEER, so a renegotiating receiver
-    // overwrote its own context. Keying on (peer, dst_ip, dst_port) fixed the
-    // 8-channel cap but made a receiver that MOVES PORTS strand its old context
-    // permanently.
-    //
-    // Observed: advertising fpp=16,2 made a RedNet A16R renegotiate from port
-    // 14351 onto 14361/63/65/67. Its old fpp=8 context stayed bound and kept
-    // transmitting -- 6000 pps to a socket nobody was listening on -- and with
-    // all six slots occupied there was no room left to create a multicast flow.
-    //
-    // TIMEOUT IS DELIBERATELY LONG. dante_tx.c's own history records keepalives
-    // measured at 16-38 s and a 45 s timeout still expiring flows mid-stream,
-    // which silences a context (nslots = 0) until the next refresh and is
-    // audible. Live flows here refresh every 28-33 s; the stale ones sat at
-    // 128 s. 300 s separates those by a wide margin and only ever reclaims a
-    // context a receiver has genuinely abandoned.
+    static uint32_t next_ms;
+    static uint32_t seen[N_FLOWS];
+    static uint8_t  miss[N_FLOWS];
+
     uint32_t now = gptp_uptime_ms();
+    if (next_ms == 0) { next_ms = now + 1000u; return; }      // arm on first call
+    int32_t due = (int32_t)(now - next_ms);
+    if (due < 0) {
+        // Clock stepped BACKWARDS far enough that we would stall. Re-arm rather
+        // than wait it out, but decide nothing this time round.
+        if (due < -10000) next_ms = now + 1000u;
+        return;
+    }
+    if (due > 10000) {                  // stepped forward: re-arm, decide nothing
+        next_ms = now + 1000u;
+        return;
+    }
+    next_ms = now + 1000u;
+
     for (unsigned f = 0; f < N_FLOWS; f++) {
-        if (!flows[f].in_use)
-            continue;
-        // MULTICAST HAS NO KEEPALIVE. A multicast flow is created once by ARC
-        // 2201 and is never refreshed -- there is no subscriber sending flow
-        // control for it, so last_ms is frozen at creation and its age climbs
-        // forever. Ageing it out therefore does not reclaim an abandoned
-        // context, it silently kills a stream that is working: measured here at
-        // 391 s and still transmitting real audio at -6 dBFS.
-        //
-        // This was a regression from re-enabling expiry at all. Slot pressure
-        // is handled by eviction-on-demand in the bind paths, which is age-
-        // ordered and so will still reclaim a genuinely idle multicast context
-        // when something actually needs the slot.
-        if (flows[f].mcast)
-            continue;
-        uint32_t age = now - flows[f].last_ms;
-        // SANITY GUARD. gptp_uptime_ms is PTP-derived (bias-compensated, but
-        // still). Every previous timer-based version of this was defeated by a
-        // clock step making every age enormous at once and expiring the lot.
-        // An age beyond an hour is not a stale flow, it is a moved clock --
-        // ignore it and let the next poll decide on sane numbers.
-        if (age > 3600000u)
-            continue;
-        if (age > FLOW_TIMEOUT_MS) {
-            printf("[dtx] flow %u stale (%lu s, %u.%u.%u.%u:%u) -- releasing\n",
-                   f, (unsigned long)(age / 1000),
-                   flows[f].dst[0], flows[f].dst[1], flows[f].dst[2],
-                   flows[f].dst[3], flows[f].dport);
-            dante_tx_unbind(f);
-        }
+        // MULTICAST HAS NO SUBSCRIBER. A multicast flow is created once by ARC
+        // 0x2201 and nothing refreshes it or talks back to us about it, so
+        // there is no keepalive to miss. Ageing one out does not reclaim an
+        // abandoned context, it kills a stream that works -- measured here at
+        // 391 s and still carrying real audio at -6 dBFS.
+        if (!flows[f].in_use || flows[f].mcast) { miss[f] = 0; continue; }
+
+        uint32_t ka = flows[f].ka_rx;
+        if (ka == 0) { miss[f] = 0; continue; }   // never spoke to 4321: not ours to judge
+        if (ka != seen[f]) { seen[f] = ka; miss[f] = 0; continue; }
+
+        if (++miss[f] < KA_MISS_LIMIT) continue;
+
+        printf("[dtx] flow %u keepalives stopped (%u s silent after %lu, "
+               "%u.%u.%u.%u:%u) -- releasing\n",
+               f, miss[f], (unsigned long)ka,
+               flows[f].dst[0], flows[f].dst[1], flows[f].dst[2],
+               flows[f].dst[3], flows[f].dport);
+        miss[f] = 0;
+        seen[f] = 0;
+        dante_tx_unbind_why(f, DTX_UB_EXPIRE);
     }
 }
 
@@ -1238,7 +1367,7 @@ void dante_tx_drop_all(void)
 {
     unsigned n = 0;
     for (unsigned f = 0; f < N_FLOWS; f++)
-        if (flows[f].in_use && dante_tx_unbind(f) == 0) n++;
+        if (flows[f].in_use && dante_tx_unbind_why(f, DTX_UB_DROP) == 0) n++;
     printf("[dtx] dropped %u flow(s) to force renegotiation\n", n);
 }
 
@@ -1246,13 +1375,84 @@ void dante_tx_drop_all(void)
 // the context entirely.
 int dante_tx_unbind(unsigned f)
 {
+    return dante_tx_unbind_why(f, DTX_UB_ARC);
+}
+
+int dante_tx_unbind_why(unsigned f, uint8_t why)
+{
     if (f >= N_FLOWS || !flows[f].in_use) return -1;
     flows[f].in_use = 0;
     aaf_pkt_ctx_select_write(f);
     aaf_pkt_flow_cfg_write(0);
-    telem_event(TELEM_E_FLOW_UNBIND, (int32_t)f, 0);
-    printf("[dtx] flow %u deleted\n", f);
+    switch (why) {
+    case DTX_UB_STOP:   g_tx_stats.ub_stop++;   break;
+    case DTX_UB_EXPIRE: g_tx_stats.ub_expire++; break;
+    case DTX_UB_DROP:   g_tx_stats.ub_drop++;   break;
+    default:            g_tx_stats.ub_arc++;    break;
+    }
+    // De reden gaat MEE in het event, niet alleen in een teller: de tellers
+    // zeggen hoeveel, de events zeggen in welke volgorde -- en de vraag hier
+    // was juist of de unbind voor of na het uitzetten van de talker kwam.
+    telem_event(TELEM_E_FLOW_UNBIND, (int32_t)f, (int32_t)why);
+    printf("[dtx] flow %u deleted (why=%u)\n", f, why);
     return 0;
+}
+
+uint16_t dante_tx_flow_cookie(unsigned f)
+{
+    return (f < N_FLOWS) ? flows[f].cookie : 0;
+}
+
+// Release a flow the receiver asked us to stop (flow control 0x0101).
+//
+// WHY THIS IS NOT THE EXPIRY TIMER AGAIN. Every timeout tried in this file
+// guessed that silence meant death and was wrong -- 300 s and 600 s each
+// silenced a flow that was still playing. This is the opposite kind of signal:
+// the receiver states that it is finished with a flow it can name. There is no
+// interval to tune and nothing to be wrong about, which is why it is safe where
+// a timer was not.
+//
+// Both halves of the handle must match. The index alone is not enough: indices
+// are reused, so a stale handle naming slot 2 would otherwise tear down
+// whatever was bound into slot 2 afterwards.
+int dante_tx_release_handle(uint32_t idx, uint16_t cookie)
+{
+    if (idx >= N_FLOWS) return -1;
+    if (!flows[idx].in_use) return -1;
+    if (flows[idx].cookie != cookie) return -1;
+    if (flows[idx].mcast) return -1;      // multicast is torn down by ARC 0x2202
+    return dante_tx_unbind_why((unsigned)idx, DTX_UB_STOP);
+}
+
+// Count datagrams a receiver sends to our media port. OBSERVATION ONLY.
+static void media_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
+                     uint16_t src_port, const uint8_t *p, uint32_t len)
+{
+    // Multicast on 4321 is audio between other devices, flooded to us by the
+    // switch. Drop it on the first line: this handler sits in the path of the
+    // highest-rate traffic on the segment.
+    if (dst_ip[0] >= 224) return;
+
+    uint32_t now = gptp_uptime_ms();
+    int hit = -1;
+    for (unsigned f = 0; f < N_FLOWS; f++)
+        if (flows[f].in_use && !flows[f].mcast && ip4_eq(flows[f].peer, src_ip)) {
+            hit = (int)f; break;
+        }
+    if (hit >= 0) { flows[hit].ka_rx++; flows[hit].ka_ms = now; }
+
+    // Print the first few in full and then at most one every 10 s. The payload
+    // bytes matter: a keepalive reported as "13 37" needs to be read, not
+    // assumed, before anything keys off it.
+    static uint32_t shown, last_ms;
+    if (shown < 8u || (uint32_t)(now - last_ms) > 10000u) {
+        shown++; last_ms = now;
+        printf("[dtx] 4321 rx %u.%u.%u.%u:%u len %lu flow %d:",
+               src_ip[0], src_ip[1], src_ip[2], src_ip[3], src_port,
+               (unsigned long)len, hit);
+        for (uint32_t i = 0; i < len && i < 16u; i++) printf(" %02x", p[i]);
+        printf("\n");
+    }
 }
 
 // The actual slot map, so 0x2200 reports what a flow really carries. It used to
@@ -1462,6 +1662,9 @@ int dante_tx_flow_detail(unsigned f, dante_tx_flow_detail_t *out)
     out->fpp    = s->fpp;
     out->mcast  = s->mcast;
     out->age_ms = gptp_uptime_ms() - s->last_ms;
+    out->cookie = s->cookie;
+    out->ka_rx  = s->ka_rx;
+    out->ka_age_ms = s->ka_ms ? (gptp_uptime_ms() - s->ka_ms) : 0xFFFFFFFFu;
     for (int i = 0; i < 8; i++) out->chans[i] = s->chans[i];
     return s->in_use;
 }

@@ -30,7 +30,14 @@ ARC_OPCODES = {
     0x3300: "clock domain",        0x4100: "?",
 }
 PORTNAMES = {4440: "ARC", 8800: "CMC", 8700: "INFO", 4455: "FLOW",
-             319: "PTP-EVT", 320: "PTP-GEN", 8702: "DEVINFO", 8708: "HEARTBEAT"}
+             319: "PTP-EVT", 320: "PTP-GEN", 8702: "DEVINFO", 8708: "HEARTBEAT",
+             # 4321 is the MEDIA port. Inbound unicast there is not audio -- we
+             # are a transmitter -- it is a receiver talking back on the same
+             # socket pair it receives our flow on. Measured 2026-11-05: a DAC8
+             # at 169.254.127.2 sends one of these every ~103 ms from its own
+             # flow port 14337, while refreshing the 4455 flow control never.
+             # The payload is dumped below because that is the whole point.
+             4321: "MEDIA"}
 
 
 def main():
@@ -120,6 +127,8 @@ def main():
                 name = ARC_OPCODES.get(o1, "")
                 st = "OK" if o2 == 1 else ("req" if o2 == 0 else f"code=0x{o2:04x}")
                 note = f"  op=0x{o1:04x} {name:<22s} {st} seq={seq}"
+        elif sp == 4321 or dp == 4321:
+            note = "  (media-port return traffic)"
         elif sp == 8700 or dp == 8700:
             if len(pay) >= 32:
                 note = f"  query=0x{pay[27]:02x} op={pay[24:32].hex()}"

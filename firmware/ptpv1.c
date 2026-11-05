@@ -166,7 +166,30 @@
 #define UNLOCK_THRESHOLD_NS 5000
 #define LOCK_STREAK         8
 // Consecutive out-of-band samples required before declaring loss of lock.
-#define UNLOCK_STREAK       4
+//
+// 4 -> 8, GEMETEN, NIET GERAADEN. De drempels hierboven blijven staan: het
+// verbod daarop gaat over ruis, en rx_gate IS armed (396914 match) met een
+// steady state onder 1 us, dus die redenering klopt nog.
+//
+// Wat hier misging is geen ruisvloer maar een BURST. 2026-11-05, 16:24:53:
+//
+//   t=9013131  FollowUp kwijt (raw leest 37556 ns, path delay 0)
+//   t=9013382  raw -17293   <- zes samples op rij tussen -14 en -17 us,
+//   ...                        de filter volgt ze naar -15892
+//   t=9014634  raw -14286
+//   t=9014884  unlock, filtered -15892, streak 4 -> talker 1 ms later UIT
+//
+// Zes samples. Met streak 8 was deze excursie uitgereden zonder unlock. Dat
+// is ook wat de referentie doet: Inferno-ESP32-P4 (ptp_servo.h) gebruikt
+// PS_UNLOCK_STREAK 8 EN PS_LOCK_STREAK 8, met 10 us als drempel -- en die
+// loopt op dit zelfde netwerk. LOCK_STREAK hier was al 8; dat unlock op 4
+// stond maakte wegvallen twee keer makkelijker dan terugkomen.
+//
+// 16 us is 1,5 sample op 96 kHz. De re-anchor-band van dit project is 16
+// samples (167 us): onze eigen code vindt die fout dus 11x te klein om te
+// corrigeren, terwijl de lock-logica hem groot genoeg vond om 13 seconden
+// audio voor te weggooien.
+#define UNLOCK_STREAK       8
 
 // Median filter. Widened from gPTP's 5 because each sample is ~4x more
 // expensive to acquire at this Sync rate.
@@ -620,6 +643,7 @@ static void servo_update(int64_t offset_ns)
         if (++unlock_streak >= UNLOCK_STREAK) {
             if (g_ptpv1.locked) {
                 g_ptpv1.locked = 0;
+                g_ptpv1.unlocks++;
                 telem_event(TELEM_E_PTP_UNLOCK, (int32_t)filtered, unlock_streak);
                 printf("[ptpv1] unlocked, offset %lld ns (%d consecutive)\n",
                        (long long)filtered, unlock_streak);
