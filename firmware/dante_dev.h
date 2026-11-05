@@ -102,7 +102,12 @@ extern uint32_t g_latency_ns;
 extern uint8_t g_fpp_max_accept;
 
 // fpp maximum we ADVERTISE in the channel record. An A16R advertises 4.
-extern uint8_t g_fpp_adv_max;
+extern uint8_t g_fpp_adv_max;      // 0 = auto; see dante_fpp_adv_max()
+
+// The advertised fpp maximum, scaled with the sample rate unless overridden.
+// Use this, never g_fpp_adv_max directly: the raw global is 0 in the normal
+// case and advertising "fpp=0,2" tells a receiver nothing it can use.
+uint8_t dante_fpp_adv_max(void);
 
 // Raise the advertised latency to cover the largest bound fpp window.
 extern uint8_t g_latency_autoraise;

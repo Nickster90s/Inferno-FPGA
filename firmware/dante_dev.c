@@ -26,7 +26,43 @@ dante_dev_t g_dante;
 // (ARC 0x1101), or tools/stats.py opcode 'L' can, with no rebuild.
 uint32_t g_latency_ns = 1000000;
 uint8_t  g_fpp_max_accept = 60;  // accept anything; clamping cost more than it gained
-uint8_t  g_fpp_adv_max    = 4;   // what a RedNet A16R advertises
+// 0 = AUTO, scale with the sample rate. A nonzero value is an explicit
+// override from the 'Y' opcode and is used as-is.
+uint8_t  g_fpp_adv_max    = 0;
+
+// WHAT WE ADVERTISE AS THE MAXIMUM FRAMES PER PACKET.
+//
+// fpp is a count of SAMPLES, so the packetization window it buys is fpp/rate --
+// a time, which is what a receiver's latency budget is actually made of. The
+// value here was the constant 4, taken from a RedNet A16R, and 4/48000 = 83 us
+// is the number the reasoning in mdns.c is built on. At 96 kHz the same 4 is
+// 42 us, so we were asking every receiver for TWICE the packet rate for the
+// same audio: 24000 pps for ONE mono channel, measured.
+//
+// That cost real audio. With our fpp=4 flow present, a Prodigy->DAC8 flow was
+// measured dropping every ~10 s; with our flow removed, zero drops in three
+// minutes. Same class of bug as the 48 kHz ns->samples constants in
+// dante_tx.c: a rate-dependent quantity frozen at its 48 kHz value.
+//
+// Scaling the MAX and leaving the MIN at 2 is what real devices do on this
+// network at 96 kHz, read off their mDNS TXT records rather than reasoned out:
+//
+//   03-Prodigy65-96 (Leine)   fpp=8,2    rate=96000
+//   UBox-Nick-DVS             fpp=32,2   rate=96000
+//   us, before this change    fpp=4,2    rate=96000
+//
+// So the min is 2 everywhere and only the max carries the device's limit.
+uint8_t dante_fpp_adv_max(void)
+{
+    if (g_fpp_adv_max) return g_fpp_adv_max;      // explicit override
+    uint32_t v = 4u * (g_fs ? g_fs : 48000u) / 48000u;
+    // Must be a value the packetizer can actually pace; k_fpp_table holds
+    // 2,4,8,16,24,32,48,60. 4 and 8 are the only ones this can produce for the
+    // rates we support, but clamp rather than advertise something unservable.
+    if (v < 2) v = 2;
+    if (v > 32) v = 32;
+    return (uint8_t)v;
+}
 uint8_t  g_latency_autoraise = 0;
 uint8_t  g_fpp_clamp = 0;        // OFF: see the 10-minute result in dante_dev.h  // off: it papered over an fpp problem   // 60 = accept anything; see dante_dev.h
 

@@ -545,7 +545,12 @@ static uint32_t build_txt_chan(uint8_t *p, unsigned ch1)
     // window -- and one such flow drags the whole device up to 2 ms.
     {
         char fb[16];
-        unsigned v = g_fpp_adv_max, i = 0;
+        // SCALES WITH THE RATE. The 83 us window argued for above is
+        // fpp/rate, so the constant 4 only held at 48 kHz; at 96 kHz it asked
+        // for 42 us and twice the packet rate. dante_fpp_adv_max() carries the
+        // measurement that drove this. The MIN stays 2 because that is what
+        // every real device on this network advertises at 96 kHz.
+        unsigned v = dante_fpp_adv_max(), i = 0;
         fb[i++] = 'f'; fb[i++] = 'p'; fb[i++] = 'p'; fb[i++] = '=';
         if (v >= 10) fb[i++] = (char)('0' + v / 10);
         fb[i++] = (char)('0' + v % 10);
