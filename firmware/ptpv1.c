@@ -164,6 +164,13 @@
 // rx_gate is armed first.
 #define LOCK_THRESHOLD_NS   2000
 #define UNLOCK_THRESHOLD_NS 5000
+
+// Grens waarboven een sample de RATE niet meer mag sturen zolang we locked
+// zijn. LOSSTAAND van de unlock-drempel: zie de motivering op de poort zelf.
+#define OUTLIER_REJECT_NS   10000
+// Hoeveel afgewezen samples op rij de lock mogen kosten. Zie de nooduitgang
+// bij de poort zelf: dit is wat een echte klokstap van gemeten vuil scheidt.
+#define OUTLIER_REJECT_STREAK 20
 #define LOCK_STREAK         8
 // Consecutive out-of-band samples required before declaring loss of lock.
 //
@@ -554,9 +561,77 @@ static void servo_update(int64_t offset_ns)
     // sub-microsecond; anything an order of magnitude beyond the unlock
     // threshold is a corrupt pairing, and integrating it corrupts the clock
     // that every downstream receiver follows.
+    //
+    // DE POORT STOND PRECIES BOVEN HET VUIL. Hij was UNLOCK_THRESHOLD_NS * 4
+    // = 20000 ns, en de corrupte populatie is gemeten op 2026-11-05 over 20
+    // minuten: 374 samples, ALLE NEGATIEF, in een band van -11 tot -19,6 us
+    // met de top op -17 us (193x) en -16 us (106x). Ruis is symmetrisch; dit
+    // is structureel. Grootste exemplaar -19582 ns, tegen een poort van
+    // 20000 ns -- er werd dus niets van tegengehouden, terwijl de legitieme
+    // ruis +-300 ns is.
+    //
+    // WAT HET KOSTTE: vier van die samples op rij slepen de 7-mediaan mee,
+    // de servo integreert -16 us en draait +83 ppb in de klok (rate_ppb 2460
+    // -> 2543), de klok gaat daardoor ECHT naar +6,7 us en zakt er 4 s over
+    // terug. Die vier seconden houden de gefilterde waarde acht samples boven
+    // de unlock-drempel, en dat is wat de unlock verklaarde -- elke ~257 s een
+    // unlock, en voor 2026-11-05 betekende elke unlock 13 s stilte bij elke
+    // ontvanger. De verstoring van buiten duurde drie samples; de rest was
+    // onze eigen correctie.
+    //
+    // 10000 ns laat de legitieme ruis 33x ruimte en wijst de hele gemeten
+    // corrupte populatie af. Los van UNLOCK_THRESHOLD_NS, want die twee horen
+    // niet bij elkaar: de unlock-drempel verhogen schoof deze poort stilletjes
+    // naar 40 us mee.
+    //
+    // WAAR DIE -17 us VANDAAN KOMT IS NIET OPGELOST. Wel gemeten: op de draad
+    // is er niets aan de hand (host-capture van 5,5 min op 224.0.1.129: Sync
+    // elke 250,0 ms, 0 seq-gaten, 0 ontbrekende FollowUps van 1318, master
+    // 169.254.143.65 stabiel, geen tweede master), terwijl deze firmware in
+    // dezelfde periode ~6 FollowUps per minuut als verloren telt. Het verlies
+    // zit dus BINNEN het bord, in het RX-pad -- hetzelfde pad als de bekende
+    // frame-loss en mac_writer_err. Een slip van een entry in de
+    // RX-timestamp-ring zou de afstand tot het buurframe als fout geven, maar
+    // Sync->FollowUp is 114 us (p50) en rx_ts_resyncs blijft op 7 staan, dus
+    // die verklaring past niet op -17 us. Open.
+    // EN EEN NOODUITGANG, WANT DEZE return SLAAT DE LOCK-BESLISSING OVER.
+    //
+    // Er zit geen functiegrens tussen deze poort en de lock/unlock-logica
+    // verderop, dus een sample dat hier wordt afgewezen bereikt
+    // unlock_streak niet. Dat is precies wat we willen voor het gemeten vuil
+    // (clusters van 12-14 samples op -17 us): die kunnen de lock niet meer
+    // wegtrekken. Maar zonder uitweg geldt het ook voor een ECHTE stap: bij
+    // een grandmaster-wisseling wordt elk sample afgewezen en blijft de
+    // lock-vlag staan, voor altijd, op een dode tijdlijn. Dat is dezelfde
+    // klasse als de "+227 ms in de toekomst en elke teller gezond" van
+    // 2026-08-04, en die heeft dagen gekost.
+    //
+    // De twee zijn te scheiden op DUUR. Het gemeten vuil komt in series van
+    // maximaal 14 samples (negen clusters, 2026-11-05: 11, 3, 7, 13, 14, 3,
+    // 14, 14, 13). Een echte stap wijst ELK volgend sample af, onbeperkt. 20
+    // ligt daar ruim tussen: 5 seconden op 4 Sync/s, en 6 samples marge op het
+    // grootste gemeten cluster. Bij 20 geven we de lock op, zodat het normale
+    // acquisitiepad het overneemt -- dat pad heeft de poort niet (hij staat
+    // onder `if (g_ptpv1.locked)`), dus het kan altijd opnieuw inhaken.
+    static uint32_t gate_rejects;
     if (g_ptpv1.locked) {
         int64_t mag = filtered < 0 ? -filtered : filtered;
-        if (mag > (int64_t)UNLOCK_THRESHOLD_NS * 4) return;
+        if (mag > (int64_t)OUTLIER_REJECT_NS) {
+            if (++gate_rejects >= OUTLIER_REJECT_STREAK) {
+                gate_rejects    = 0;
+                g_ptpv1.locked  = 0;
+                g_ptpv1.unlocks++;
+                // b = -1 onderscheidt deze van een unlock op de drempel.
+                telem_event(TELEM_E_PTP_UNLOCK, (int32_t)filtered, -1);
+                printf("[ptpv1] %d samples op rij buiten de outlier-poort "
+                       "(laatste %lld ns) -- lock opgegeven, opnieuw acquireren\n",
+                       OUTLIER_REJECT_STREAK, (long long)filtered);
+            }
+            return;
+        }
+        gate_rejects = 0;
+    } else {
+        gate_rejects = 0;
     }
 
     int64_t adj = p + freq_integral;
