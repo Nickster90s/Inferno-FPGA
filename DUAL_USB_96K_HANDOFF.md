@@ -308,6 +308,22 @@ Deferred by the operator until dual USB worked. The mechanism was identified to
 the wedge **recurred with the fix in the running bitstream**. A full audit found
 no remaining 2³² hazard. Unexplained.
 
+**2026-11-06, one measured run: 16 h 8 min without a wedge.** The build with
+the PTP outlier gate and the ungated talker (commit `7008268`) ran from
+17:37:25 on 2026-11-05 to 09:45 the next morning with audio to two receivers
+throughout -- 5.2x the 3.107 h mark, 1.39e9 packets, `disables 0`, `underrun`
+frozen at 129, both flows still on the handles they were given at boot
+(`0/1`, `1/16`, age 58089 s). `anchors` went 2 -> 4 overnight and cost nothing,
+which is the point of the new policy: a re-anchor no longer mutes.
+
+This is evidence, not a fix. The wedge recurred once before with its own fix in
+the bitstream, so a single long run says only that the failure is not
+deterministic at 3.107 h in this build. Nothing in the clock-excursion work
+touches pointer arithmetic, so if the wedge is gone it is gone for a reason we
+have not identified. The honest reading: the re-anchor rate dropped from ~74 in
+an afternoon to 2 in sixteen hours, and whatever the wedge needs, it now gets
+far fewer chances to be set up.
+
 Corroboration from the sibling receiver project (`Inferno-ESP32-P4`), which
 lists our bug among its lessons: *"64-bit sample indices everywhere; the FPGA's
 32-bit ring pointer wrapped after 3.1 hours."* Their fix is structural — 64-bit

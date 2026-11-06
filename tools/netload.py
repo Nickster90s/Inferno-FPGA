@@ -95,8 +95,20 @@ def main():
     if len(image) > CODERAM_SIZE:
         sys.exit("image is {} bytes, coderam is {}".format(len(image), CODERAM_SIZE))
 
-    crc = binascii.crc32(image) & 0xFFFFFFFF
-    print("image {}: {} bytes, crc32 {:#010x}".format(args.image, len(image), crc))
+    # THE CRC OF THE WHOLE IMAGE IS A CONSTANT, SO IT CANNOT IDENTIFY A BUILD.
+    # firmware/Makefile runs litex.soc.software.crcfbigen, which APPENDS
+    # crc32(body) to the image; crc32 over a message with its own CRC appended
+    # always lands on the same residue, 0x2144DF1C. Two completely different
+    # builds therefore printed an identical line, and on 2026-11-05 that was
+    # read as "same crc, so the build did not change" -- wrong, and it took an
+    # objdump of the linked image to undo. The number that identifies a build
+    # is the crc of the BODY (which is also the trailer, little-endian).
+    crc = binascii.crc32(image) & 0xFFFFFFFF          # what the loader verifies
+    body_crc = binascii.crc32(image[:-4]) & 0xFFFFFFFF
+    print("image {}: {} bytes, build crc32 {:#010x} (residue {:#010x}{})".format(
+        args.image, len(image), body_crc, crc,
+        "" if crc == 0x2144DF1C
+        else " -- NOT THE EXPECTED RESIDUE, image may be corrupt"))
 
     try:
         sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETHERTYPE))
