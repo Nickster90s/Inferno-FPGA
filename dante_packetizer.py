@@ -316,6 +316,10 @@ class DantePacketizer(LiteXModule):
         self.overrun_count  = CSRStatus(32, description="send_req arriving while builder mid-traversal (benign; pend[] re-serves it).")
         self.write_drop_count = CSRStatus(32, description="USB samples dropped on a FULL ring — audible per-channel click. MUST stay 0. A value equal to the sample rate (~4.608M/s at 96k/48ch) means the ring is pinned full: check fifo_level, where 128 = full and 64 = the servo target.")
         self.fifo_level     = CSRStatus(blk_bits + 8, description="block_fifo occupancy (blocks).")
+        # The ring-health CSRs that belong beside fifo_level are declared LAST
+        # instead, next to ts_subsec_max. See the note there: a CSR's address is
+        # its declaration order, so declaring them here would have shoved four
+        # existing registers up by 0x10.
         # Timestamp instrument: the ACTUAL emitted avtp_timestamp (pres) and the
         # live gPTP-ns(low32) latched at the SAME packet emit. effective offset =
         # dbg_last_pres - dbg_emit_gptp should hold ~= pres_offset (2ms); if it
@@ -369,6 +373,27 @@ class DantePacketizer(LiteXModule):
         _need_depth = fifo_depth * channels        # per-ring samples of buffering
         SRING_DEPTH = 1 << max(1, (_need_depth - 1).bit_length())
         log2depth   = log2_int(SRING_DEPTH)
+
+        # POINTER WIDTH. 32 bits wedged the audio four times in August 2026:
+        # rd advances by `channels` per media strobe, so 2**32 arrives after
+        # 2**32/(channels*fs) -- 3.107 h at 8ch/48k, and only 1.553 h at
+        # 8ch/96k, because the period scales with the sample rate. The level
+        # arithmetic below survives a wrap now (verified in hardware 2026-11-06:
+        # ~10 crossings in 16 h 8 min, underrun pinned at 129), but surviving a
+        # wrap is not the same as not having one. The receiver project states
+        # the lesson it took from our bug, and it is the right one
+        # (esp32p4-dante-rx/README.md): "64-bit sample indices everywhere. The
+        # FPGA's 32-bit ring pointer wrapped after 3.107 hours and wedged the
+        # audio four times, hidden by a safety clamp. Here the failure mode is
+        # removed by construction rather than defended against."
+        #
+        # 48 bits puts the wrap at 2**48/768000 = 11.6 YEARS at 96 kHz, i.e.
+        # outside the operating life of the board. It is nearly free: every
+        # consumer of these pointers already truncates. `_diff` keeps only
+        # _LVL_BITS, `rdf[0:log2depth]` only the address bits, and f_base is a
+        # difference that is exact modulo any power of two. Nothing compares a
+        # pointer against a constant.
+        PTR_BITS = 48
         # 36-bit entries: the 32 sample bits are spread to AVOID the RAMB36 parity
         # positions (8,17,26,35), which nextpnr-xilinx drops when packing a 32-bit
         # BRAM. Dummies land on parity; real data survives. See pack/unpack below.
@@ -388,8 +413,8 @@ class DantePacketizer(LiteXModule):
         # bit-exact passthrough: no resampler, no per-channel multiplier.
         self.fifo_depth = fifo_depth
 
-        wr     = Signal(32)                         # sample write pointer
-        rd     = Signal(32)                         # sample read/consumed pointer
+        wr     = Signal(PTR_BITS)                   # sample write pointer
+        rd     = Signal(PTR_BITS)                   # sample read/consumed pointer
 
         # ---- OCCUPANCY, COMPUTED MODULO SO A POINTER WRAP CANNOT LATCH -------
         #
@@ -611,15 +636,19 @@ class DantePacketizer(LiteXModule):
         # `channels` per `first` (one 48ch USB frame fills one 8-sample frame in EVERY
         # ring). within addresses the channel inside that frame -> a dropped sample is
         # one stale slot in one ring, never a rotation.
-        frame_base = Signal(32)
+        frame_base = Signal(PTR_BITS)
         self.dbg_frame_base = frame_base   # sims/sim_ring_wrap.py drives wr via this
-        new_base   = Signal(32)
+        new_base   = Signal(PTR_BITS)
         self.comb += new_base.eq(frame_base + channels)
-        base_now   = Signal(32)
+        # PTR_BITS, not 32: only wr_addr[0:log2depth] is ever used as an address,
+        # so a 32-bit truncation here would be harmless -- but leaving one 32-bit
+        # signal in the pointer path is exactly how a reader concludes that the
+        # 2**32 boundary still means something here. It does not.
+        base_now   = Signal(PTR_BITS)
         self.comb += base_now.eq(Mux(samp_vld & first, new_base, frame_base))
-        wr_addr    = Signal(32)
+        wr_addr    = Signal(PTR_BITS)
         self.comb += wr_addr.eq(base_now + within)
-        rd_anchor  = Signal(32)
+        rd_anchor  = Signal(PTR_BITS)
         have_space = Signal()
         self.comb += have_space.eq(level < (SRING_DEPTH - 2))
         do_write = Signal()
@@ -715,6 +744,7 @@ class DantePacketizer(LiteXModule):
             # was true and irrelevant -- the cost was paid at the other end.
             ).Elif(level < FRAME_SAMPLES, primed.eq(0)),
         ]
+
         strobe = Signal()
         self.comb += strobe.eq(mcr.sample_strobe & en)
 
@@ -746,6 +776,69 @@ class DantePacketizer(LiteXModule):
             description="Subsecond wrap = sample rate (48000 or 96000). "
                         "Firmware writes this from the Dante-selected rate.")
         SUBSEC_MAX = self.ts_subsec_max.storage
+
+        # ---- RING HEALTH ------------------------------------------------
+        # DECLARED LAST, AND THAT IS THE POINT. A CSR's address is its
+        # declaration order, so putting these next to fifo_level (where they
+        # belong by subject) moved dbg_last_ts, dbg_last_sec, holdover_count and
+        # ts_subsec_max up by 0x10 -- verified by generating csr.h both ways.
+        # An old firmware on the new bitstream would then have read
+        # ring_level_raw where it expected dbg_last_ts, i.e. fed garbage into
+        # the re-anchor phase check in dante_tx.c. Declared here the change is
+        # purely additive: every existing address is byte-identical, and only a
+        # firmware that WANTS the new registers needs the new header.
+        #
+        # THE CLAMP IS WHY FOUR WEDGES WENT UNNAMED. fifo_level reads
+        # block_level, which turns a negative level into 0 -- so the one number
+        # that would have identified the 2026-08 ring-pointer bug on its FIRST
+        # occurrence (-4,294,967,232) was the number deliberately thrown away,
+        # and three separate investigations concluded "the decoder is producing
+        # nothing" from a healthy-looking 0. These four expose the raw truth,
+        # and they are four counters and not one, because a counter that adds a
+        # benign cause to a harmful one can only ever be misread.
+        self.ring_level_raw = CSRStatus(32, description="RAW SIGNED ring level in samples, two's complement, NOT clamped. Healthy = around SRING_DEPTH/2. NEGATIVE means the consumer overtook the producer, which is impossible when healthy -- see ring_underflow.")
+        self.ring_level_min = CSRStatus(32, description="Most negative ring_level_raw since boot, two's complement. Sticky. MUST STAY 0: any negative value means the ring went inverted at least once, even if it recovered before you looked.")
+        self.ring_underflow = CSRStatus(32, description="Times the ring level ENTERED the negative region while enabled (edge-counted, not per cycle). MUST STAY 0. This is the signature of the 2026-08 wedge class; the hysteresis recovers from it in ~11 ms, so a nonzero value is a glitch you did not hear, not a silence you did.")
+        self.ring_unprime   = CSRStatus(32, description="Times `primed` fell while enabled (edge-counted). One per genuine underrun episode, so it is the EPISODE count that underrun_count's tick count cannot give. A slow nonzero rate is the USB servo's limit cycle; a step change is an event.")
+        #
+        # NO NEW RECOVERY MECHANISM, DELIBERATELY. The hysteresis above already
+        # IS the recovery: a negative level is < FRAME_SAMPLES, so `primed`
+        # drops, `rd` holds (it is gated on `primed`), `wr` keeps advancing, and
+        # the ring re-primes at _center after SRING_DEPTH/2/channels strobes --
+        # ~11 ms at 96 kHz. That is the same end state as the talker cycle which
+        # was verified on the wedged board on 2026-08-14 ("the ring re-primed and
+        # held at centre"). Adding a second path that reloads rd from wr would
+        # heal the same fault 11 ms sooner and would mask whether the first path
+        # ever ran. What was missing was never the recovery -- it was knowing
+        # that anything had happened at all.
+        lvl_min   = Signal((_LVL_BITS + 1, True))
+        underflow = Signal(32)
+        unprimes  = Signal(32)
+        neg_now   = Signal()
+        neg_d     = Signal()
+        primed_d  = Signal()
+        self.comb += neg_now.eq(level < 0)
+
+        def _sext32(sig):
+            return Cat(sig, Replicate(sig[len(sig) - 1], 32 - len(sig)))
+
+        self.comb += [
+            self.ring_level_raw.status.eq(_sext32(level)),
+            self.ring_level_min.status.eq(_sext32(lvl_min)),
+            self.ring_underflow.status.eq(underflow),
+            self.ring_unprime.status.eq(unprimes),
+        ]
+        self.sync += [
+            neg_d.eq(neg_now),
+            primed_d.eq(primed),
+            If(level < lvl_min, lvl_min.eq(level)),
+            # EDGES, not cycles. Counting every sys-clock tick spent negative
+            # would report ~50 million for one 11 ms episode and tell you
+            # nothing about how many episodes there were.
+            If(en & neg_now & ~neg_d,      underflow.eq(underflow + 1)),
+            If(en & primed_d & ~primed,    unprimes.eq(unprimes + 1)),
+        ]
+
         # A pending load is adopted at the next strobe, so the counter only ever
         # changes in the media-clock domain. Emitted timestamps stay multiples
         # of fpp regardless of what is loaded: the pacing condition below fires
@@ -780,7 +873,7 @@ class DantePacketizer(LiteXModule):
         # due_mask is derived from it further down, once cfg_arr exists.
 
         any_due   = Signal()      # driven below, once due_arr exists
-        rd_snap   = Signal(32)    # rd sampled at send_req; see f_base
+        rd_snap   = Signal(PTR_BITS)  # rd sampled at send_req; see f_base
         underruns = Signal(32)
         self.comb += self.ts_now_sub.status.eq(ts_sub)
         self.comb += [self.underrun_count.status.eq(underruns),
@@ -1265,7 +1358,7 @@ class DantePacketizer(LiteXModule):
         # Window START for this flow: all flows share `rd`, which advances one
         # 8-sample tick at a time, so an fpp=16 flow simply starts 8 samples
         # earlier. That keeps ONE read pointer for flows of different fpp.
-        f_base = Signal(32)
+        f_base = Signal(PTR_BITS)
         # LATCHED rd. rd now advances every media strobe, and a strobe (1042
         # sys cycles) lands in the middle of a packet build (~190 cycles, and
         # six builds exceed one strobe). A combinational f_base would therefore

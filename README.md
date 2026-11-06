@@ -344,6 +344,58 @@ NO SIMULATION IN THIS TREE EVER CROSSED THE WRAP -- `sim_ring_accounting` and
 `sim_ring_sample_rd` both model occupancy over seconds, and this needs 2^32
 increments. That is why it shipped.
 
+**2026-11-06, THE WIDTH IS GONE AS A CLASS.** The modulo fix above was
+verified in hardware first, which is why the widening could be done calmly: the
+board ran 16 h 8 min at 96 kHz with `en` high throughout, and at 8 ch x 96 kHz
+the wrap is 2^32/768000 = **1.553 h**, not 3.107 h, so the pointers crossed
+2^32 about ten times with `underrun` pinned at 129. (The 3.107-hour number
+belongs to 48 kHz. At 96 kHz the old bug would have fired more than twice as
+often, not less -- worth knowing before anyone tries to reproduce it.) The
+record is `bitstreams/dual-usb-96k_2026-11-04_phase333_BOTH-CLEAN.VERIFIED-16h.md`.
+
+The pointers are now `PTR_BITS = 48`, which puts the wrap at 2^48/768000 =
+11.6 years, and the receiver project's own statement of the lesson is the reason
+it is a width and not another guard: *"64-bit sample indices everywhere. Here
+the failure mode is removed by construction rather than defended against."*
+It is nearly free, because every consumer already truncates -- `_diff` keeps
+only `_LVL_BITS`, `rdf[0:log2depth]` only the address bits, and `f_base` is a
+difference that is exact modulo any power of two. Nothing compares a pointer
+against a constant.
+
+And four CSRs now report what the clamp used to eat: `ring_level_raw` (signed,
+unclamped), `ring_level_min` (sticky worst), `ring_underflow` (episodes, not
+cycles) and `ring_unprime`. Read them with `tools/stats.py --ring`. NO new
+recovery was added, deliberately: the prime hysteresis already is one -- a
+negative level un-primes, `rd` holds, `wr` catches up, and the ring re-primes
+at centre in ~11 ms, which is the same end state as the talker cycle verified
+below. What was missing was never the recovery. It was knowing that anything
+had happened.
+
+THE CSR CHANGE IS PURELY ADDITIVE, AND THAT TOOK ONE MEASUREMENT TO GET RIGHT.
+Declared next to `fifo_level`, where they belong by subject, the four registers
+pushed `dbg_last_ts`, `dbg_last_sec`, `holdover_count` and `ts_subsec_max` up by
+0x10 -- so an old firmware on the new bitstream would have read `ring_level_raw`
+where it expected `dbg_last_ts`, i.e. fed garbage straight into the re-anchor
+phase check in `dante_tx.c`. A CSR's address is its declaration order, so they
+are declared LAST instead, and `csr.h` generated both ways confirms the
+difference is now four appended addresses and nothing else:
+
+    32a33,36
+    > CSR_AAF_PKT_RING_LEVEL_RAW_ADDR (CSR_BASE + 0x80L)
+    > CSR_AAF_PKT_RING_LEVEL_MIN_ADDR (CSR_BASE + 0x84L)
+    > CSR_AAF_PKT_RING_UNDERFLOW_ADDR (CSR_BASE + 0x88L)
+    > CSR_AAF_PKT_RING_UNPRIME_ADDR   (CSR_BASE + 0x8cL)
+
+Generate the header without P&R to check this yourself:
+`BOARD=breakout USB2=1 USB_DUAL_RATE=1 python3 avb_soc.py --soft-only
+--output-dir build_csrcheck` -- and use an `--output-dir`, never the live
+`build/`, whose `csr.h` is the one the running firmware was compiled against.
+
+The firmware side is `#ifdef CSR_AAF_PKT_RING_LEVEL_RAW_ADDR`-guarded so it
+compiles against an older header too, and `tools/stats.py --ring` prints
+"firmware predates the 'r' opcode" instead of failing. Note the headroom:
+coderam is at 92108/98304 bytes (93%) with the `'r'` reply in.
+
 A TALKER CYCLE ALSO CLEARS IT, without JTAG: dropping the flows takes `en` low,
 and `If(~aligned_once, NextValue(rd, rd_anchor))` reloads `rd` from a pointer
 that tracks `wr`. Verified on the wedged board 2026-08-14 -- the ring re-primed

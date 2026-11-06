@@ -264,6 +264,44 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         net_udp_commit(src_ip, src_port, STATS_PORT, n, NET_TOS_BEST_EFFORT);
         return;
     }
+
+    // 'r' -- RING HEALTH. Its own opcode, not four more words on the main
+    // reply: growing that one from 200 to 208 bytes once killed the port
+    // outright (see the top of this file). A different reply is not a bigger
+    // one.
+    //
+    // WHY THIS EXISTS. fifo_level reads block_level, which CLAMPS a negative
+    // ring level to 0. The 2026-08 wedges each presented as fifo_level 0 with
+    // every ingress counter perfect, and the single number that would have
+    // named the bug on its first occurrence -- a level of -4,294,967,232 --
+    // was the one the clamp threw away. Three investigations concluded "the
+    // decoder is producing nothing" from that healthy-looking 0. These four
+    // words are the unclamped truth.
+    //
+    // READ ring_underflow FIRST. It is an EPISODE count, not a tick count, and
+    // it must be 0. The hysteresis recovers an inverted ring in ~11 ms (level
+    // < FRAME_SAMPLES un-primes, rd holds, wr catches up), so a nonzero value
+    // is a glitch nobody heard rather than a silence somebody did -- but it
+    // means the route exists, which 48-bit pointers are supposed to make
+    // impossible.
+#ifdef CSR_AAF_PKT_RING_LEVEL_RAW_ADDR
+    if (len >= 1 && req[0] == 'r') {
+        uint8_t *p = net_udp_payload_buf();
+        uint32_t n = 0;
+        put32(p, n, 0x524E4731u); n += 4;          // 'RNG1'
+        put32(p, n, aaf_pkt_ring_level_raw_read()); n += 4;   // signed, 2's compl
+        put32(p, n, aaf_pkt_ring_level_min_read()); n += 4;   // signed, sticky
+        put32(p, n, aaf_pkt_ring_underflow_read()); n += 4;   // MUST be 0
+        put32(p, n, aaf_pkt_ring_unprime_read());   n += 4;
+        // Context, so a reader never has to correlate two replies by hand:
+        // the clamped level it would otherwise have believed, and the tick
+        // count that says how long the un-primed episodes lasted in total.
+        put32(p, n, aaf_pkt_fifo_level_read());     n += 4;
+        put32(p, n, aaf_pkt_underrun_count_read()); n += 4;
+        net_udp_commit(src_ip, src_port, STATS_PORT, n, NET_TOS_BEST_EFFORT);
+        return;
+    }
+#endif
     // 'o' [ASCII signed decimal] -- set the TX timestamp offset in samples and
     // re-anchor. Replies with the value now in force so a sweep can confirm the
     // write landed rather than assuming it did.

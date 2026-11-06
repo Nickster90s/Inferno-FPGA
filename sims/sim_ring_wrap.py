@@ -19,6 +19,16 @@
 # increments. That is why it shipped. This one drives the pointers straight at
 # the boundary instead of waiting three hours to get there.
 #
+# 2026-11-06: THE POINTERS ARE 48 BITS NOW, so 2^32 is no longer a boundary at
+# all -- it is an ordinary count. This sim therefore checks TWO things: that the
+# old 3.107-hour cliff is gone (nothing special happens at 2^32), and that the
+# real boundary, wherever PTR_BITS puts it, is still exact. The boundary is read
+# from the DUT rather than hardcoded, so widening the pointers again cannot
+# silently stop testing anything.
+#
+# It also checks the health instrumentation added with the widening, because a
+# counter nobody has ever seen increment is not evidence of anything.
+#
 #   run:  python3 sims/sim_ring_wrap.py
 
 import os
@@ -30,7 +40,7 @@ from migen import *
 from migen.sim import run_simulation
 from dante_packetizer import DantePacketizer
 
-PTR_MOD = 1 << 32
+OLD_PTR_MOD = 1 << 32     # the width that wedged the audio four times
 
 
 class _MCR:
@@ -51,8 +61,86 @@ def old_level(wr, rd):
     return wr - rd
 
 
+def to_signed(value, bits):
+    return value - (1 << bits) if value >> (bits - 1) else value
+
+
+def health(dut):
+    """Do the ring-health CSRs actually report an inverted ring?
+
+    The 2026-08 wedges were invisible because block_level clamps a negative
+    level to 0. These four CSRs exist so that can never happen again -- which
+    is only true if they move when the ring really does invert.
+    """
+    out = {}
+
+    def tb():
+        mod = 1 << len(dut.dbg_rd)
+        # THE LEVELS HAVE TO COME FROM THE RING, NOT FROM A ROUND NUMBER. The
+        # modulus is 4*SRING_DEPTH, so only 0..2*SRING_DEPTH-1 reads positive;
+        # a first draft of this test used +1024 on a 512-sample ring and got
+        # -1024 back, then blamed the counters. Real occupancy cannot exceed
+        # SRING_DEPTH, so that value was never reachable -- the test was wrong,
+        # not the design, and the arithmetic said so immediately.
+        depth  = 1 << max(1, (dut.fifo_depth * 8 - 1).bit_length())
+        center = depth // 2                     # where the ring primes
+        base   = 4 * depth                      # anywhere, away from 0
+        yield dut.enable.storage.eq(1)
+        yield
+        # Quiet start: a healthy primed ring must leave every counter alone.
+        yield dut.dbg_frame_base.eq(base)
+        yield dut.dbg_rd.eq(base - center)
+        for _ in range(4):
+            yield
+        out["primed"]      = (yield dut.block_level)
+        out["clean_uf"]    = (yield dut.ring_underflow.status)
+        out["clean_min"]   = to_signed((yield dut.ring_level_min.status), 32)
+        # Now invert it: the consumer ahead of the producer, which is the thing
+        # that cannot happen -- and did, for three hours at a time.
+        yield dut.dbg_rd.eq((base + 64) % mod)  # level -64
+        for _ in range(4):
+            yield
+        out["raw"]      = to_signed((yield dut.ring_level_raw.status), 32)
+        out["blk"]      = (yield dut.block_level)
+        out["uf"]       = (yield dut.ring_underflow.status)
+        out["min"]      = to_signed((yield dut.ring_level_min.status), 32)
+        out["unprime"]  = (yield dut.ring_unprime.status)
+        # Recover, then invert a second time: the counter must count EPISODES.
+        yield dut.dbg_rd.eq(base - center)
+        for _ in range(4):
+            yield
+        yield dut.dbg_rd.eq((base + 8) % mod)
+        for _ in range(4):
+            yield
+        out["uf2"] = (yield dut.ring_underflow.status)
+
+    run_simulation(dut, tb())
+
+    checks = [
+        ("a healthy ring leaves ring_underflow at 0",      out["clean_uf"] == 0),
+        ("a healthy ring leaves ring_level_min at 0",      out["clean_min"] == 0),
+        ("block_level still CLAMPS the negative level",    out["blk"] == 0),
+        ("ring_level_raw reports it unclamped (-64)",      out["raw"] == -64),
+        ("ring_underflow counted the episode",             out["uf"] == 1),
+        ("ring_level_min remembers the worst (-64)",       out["min"] == -64),
+        ("the healthy ring primed first",                  out["primed"] > 0),
+        ("ring_unprime saw primed fall",                   out["unprime"] >= 1),
+        ("a second episode counts as 2, not as cycles",    out["uf2"] == 2),
+    ]
+    print("  RING HEALTH CSRs")
+    bad = 0
+    for name, ok in checks:
+        print(f"    {'ok  ' if ok else 'FAIL'}  {name}")
+        bad += 0 if ok else 1
+    print(f"    raw {out['raw']}, block_level {out['blk']} (the clamp), "
+          f"underflow {out['uf']}->{out['uf2']}, min {out['min']}, "
+          f"unprime {out['unprime']}")
+    return bad
+
+
 def main():
     dut = build()
+    PTR_MOD = 1 << len(dut.dbg_rd)
     fails = 0
     got = {}
 
@@ -68,6 +156,10 @@ def main():
         for true_level in (64, 8, 0):
             cases.append((true_level, true_level))            # nowhere near a wrap
             cases.append((true_level, 0))                     # wr JUST wrapped
+            # 2^32 USED to be the cliff. With PTR_BITS=48 it is an ordinary
+            # count, and this row proves it: wr sits exactly on it and the level
+            # must come out right without anything special happening.
+            cases.append((true_level, OLD_PTR_MOD % PTR_MOD))
         for true_level, wr in cases:
             rd = (wr - true_level) % PTR_MOD
             yield dut.dbg_frame_base.eq(wr)
@@ -102,8 +194,10 @@ def main():
 
     ok_all = fails == 0
     print(f"\n  {'PASS' if ok_all else 'FAIL'}  modular level is exact on both "
-          f"sides of the 2^32 boundary")
-    print(f"\n{'ALL CHECKS PASSED' if ok_all else str(fails) + ' CHECK(S) FAILED'}")
+          f"sides of the 2^{len(dut.dbg_rd)} boundary, and 2^32 is now just a number")
+    print()
+    fails += health(build())
+    print(f"\n{'ALL CHECKS PASSED' if fails == 0 else str(fails) + ' CHECK(S) FAILED'}")
     return 1 if fails else 0
 
 

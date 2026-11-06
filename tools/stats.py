@@ -35,9 +35,58 @@ def read(board):
         if n in SIGNED and v >= 1 << 31: v -= 1 << 32
         out[n] = v
     return out
+# RING HEALTH ('r' -> 'RNG1'), its own reply because the main one must not grow.
+# fifo_level in the list above is the CLAMPED level: block_level turns a negative
+# ring level into 0, and that clamp is why four wedges in 2026-08 each presented
+# as "fifo_level 0, every ingress counter perfect" and were misread three times
+# as "the decoder is producing nothing". ring_level_raw is the same number
+# without the clamp.
+RING_NAMES  = ["ring_level_raw", "ring_level_min", "ring_underflow",
+               "ring_unprime", "fifo_level_clamped", "underrun_ticks"]
+RING_SIGNED = {"ring_level_raw", "ring_level_min"}
+
+def read_ring(board):
+    """None if the firmware predates the 'r' opcode (it simply will not reply)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(2)
+    s.sendto(b"r", (board, 7779))
+    try:
+        d, _ = s.recvfrom(512)
+    except socket.timeout:
+        return None
+    if len(d) < 4 or d[:4] != b"RNG1":
+        return None
+    out = {}
+    for i, n in enumerate(RING_NAMES):
+        off = 4 + i * 4
+        if off + 4 > len(d): break
+        v = struct.unpack(">I", d[off:off+4])[0]
+        if n in RING_SIGNED and v >= 1 << 31: v -= 1 << 32
+        out[n] = v
+    return out
+
+def print_ring(r):
+    if r is None:
+        print("  (no RNG1 reply -- firmware predates the 'r' opcode)")
+        return
+    for k, v in r.items(): print(f"  {k:20s} {v}")
+    bad = []
+    if r.get("ring_underflow"):   bad.append("ring_underflow is NOT 0")
+    if r.get("ring_level_min", 0) < 0: bad.append("ring_level_min went negative")
+    # Stated as the fault it means, not as a number to interpret later.
+    print("  VERDICT: " + ("ring inverted at least once -- " + ", ".join(bad) +
+                           ". The hysteresis recovers in ~11 ms, so this is a"
+                           " glitch, but the route is supposed to be impossible"
+                           " with 48-bit pointers."
+                           if bad else
+                           "the ring has never inverted since boot."))
+
 if __name__ == "__main__":
     board = sys.argv[1] if len(sys.argv) > 1 else "169.254.9.200"
     secs = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+    if board == "--ring" or (len(sys.argv) > 2 and sys.argv[2] == "--ring"):
+        if board == "--ring": board = "169.254.9.200"
+        print_ring(read_ring(board))
+        sys.exit(0)
     a = read(board)
     if not secs:
         for k, v in a.items(): print(f"  {k:16s} {v}")
@@ -47,3 +96,5 @@ if __name__ == "__main__":
         for k in a:
             d = b[k] - a[k]
             print(f"  {k:16s} {b[k]:<12} {'delta %+d' % d if d else ''}")
+    print("ring health:")
+    print_ring(read_ring(board))
