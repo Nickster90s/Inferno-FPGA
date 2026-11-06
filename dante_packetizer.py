@@ -801,6 +801,51 @@ class DantePacketizer(LiteXModule):
         self.ring_underflow = CSRStatus(32, description="Times the ring level ENTERED the negative region while enabled (edge-counted, not per cycle). MUST STAY 0. This is the signature of the 2026-08 wedge class; the hysteresis recovers from it in ~11 ms, so a nonzero value is a glitch you did not hear, not a silence you did.")
         self.ring_unprime   = CSRStatus(32, description="Times `primed` fell while enabled (edge-counted). One per genuine underrun episode, so it is the EPISODE count that underrun_count's tick count cannot give. A slow nonzero rate is the USB servo's limit cycle; a step change is an event.")
         #
+        # PER-CHANNEL SIGNAL PEAKS, for the thing Dante Controller shows in the
+        # Signal column of its Transmit tab. We already send the heartbeat record
+        # that carries them (TLV 0x8002 in firmware/dante_info.c) with every byte
+        # ZERO, and a comment there called the zeros "a truthful no meter". That
+        # comment was wrong about the encoding: the receiver project's
+        # device_server/peaks.rs sends -40*log10(peak/full_scale), so 0 means 0
+        # dBFS and SILENCE is 255. We were claiming 48 channels pinned at full
+        # scale, which is why Controller showed a red speaker with an exclamation
+        # mark instead of a meter.
+        #
+        # Firmware cannot measure it: audio goes USB -> this ring -> packetizer
+        # and never passes the CPU. So it is measured here, at the one place that
+        # sees every sample with its channel number already decoded.
+        self.peak_select = CSRStorage(6,  description="Channel 0..47 whose peak appears in peak_value.")
+        self.peak_value  = CSRStatus(8,   description="Top 8 bits of max|sample| for the channel in peak_select, since the last peak_clear. 255 = full scale, 0 = nothing. Convert with -40*log10(v/256) for the Dante byte.")
+        self.peak_clear  = CSRStorage(1,  description="Write anything: zero all 48 peak registers. Firmware reads all 48 and then writes this, so the window is exactly one heartbeat.")
+
+        # PEAK DETECT. One comparator, not 48: the demux writes exactly one
+        # channel per cycle and chan_nr already says which, so the cost is the
+        # 48x8-bit register array and an indexed write.
+        #
+        # ONES' COMPLEMENT FOR THE MAGNITUDE, NOT TWO'S. abs() of the most
+        # negative value overflows back to itself, and its top bits then read as
+        # ZERO -- a channel pinned to full-scale negative would have metered as
+        # silence. ~x is off by one LSB, which no meter can see, and maps
+        # 0x80000000 to 0x7fffffff correctly.
+        #
+        # chan_nr counts 0..63 because the USB wrapper's tag does; only the first
+        # BLOCK_CH of those are real channels, so the write is guarded.
+        samp_abs = Signal(32)
+        peak_mag = Signal(8)
+        self.comb += samp_abs.eq(Mux(samp32[31], ~samp32, samp32))
+        self.comb += peak_mag.eq(samp_abs[23:31])
+        peak_arr = Array([Signal(8) for _ in range(BLOCK_CH)])
+        self.comb += self.peak_value.status.eq(peak_arr[self.peak_select.storage])
+        self.sync += [
+            If(self.peak_clear.re,
+                *[peak_arr[_i].eq(0) for _i in range(BLOCK_CH)]
+            ).Elif(do_write & (chan_nr < BLOCK_CH) &
+                   (peak_mag > peak_arr[chan_nr]),
+                peak_arr[chan_nr].eq(peak_mag),
+            ),
+        ]
+
+        #
         # NO NEW RECOVERY MECHANISM, DELIBERATELY. The hysteresis above already
         # IS the recovery: a negative level is < FRAME_SAMPLES, so `primed`
         # drops, `rd` holds (it is gated on `primed`), `wr` keeps advancing, and
@@ -831,16 +876,16 @@ class DantePacketizer(LiteXModule):
         self.sync += [
             neg_d.eq(neg_now),
             primed_d.eq(primed),
-            // GATED ON `en`, AND IT TOOK HARDWARE TO SEE WHY. Ungated, this
-            // read -4096 on a freshly loaded board with the talker still off,
-            // and tools/stats.py duly announced that the ring had inverted.
-            // It had not. With `en` low, `strobe` is low, so `rd` is parked at
-            // its reset value while `wr` climbs with USB samples -- and the
-            // level is taken modulo 4*SRING_DEPTH, so it sweeps the whole
-            // +-4096 range every 8192 samples (~10.7 ms at 96 kHz). The number
-            // only means occupancy once both pointers are moving. A counter
-            // that reports garbage in a state nobody excluded is exactly the
-            // kind this commit set out to replace.
+            # GATED ON `en`, AND IT TOOK HARDWARE TO SEE WHY. Ungated, this
+            # read -4096 on a freshly loaded board with the talker still off,
+            # and tools/stats.py duly announced that the ring had inverted.
+            # It had not. With `en` low, `strobe` is low, so `rd` is parked at
+            # its reset value while `wr` climbs with USB samples -- and the
+            # level is taken modulo 4*SRING_DEPTH, so it sweeps the whole
+            # +-4096 range every 8192 samples (~10.7 ms at 96 kHz). The number
+            # only means occupancy once both pointers are moving. A counter
+            # that reports garbage in a state nobody excluded is exactly the
+            # kind this commit set out to replace.
             If(en & (level < lvl_min), lvl_min.eq(level)),
             # EDGES, not cycles. Counting every sys-clock tick spent negative
             # would report ~50 million for one 11 ms episode and tell you

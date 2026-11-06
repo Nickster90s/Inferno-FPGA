@@ -229,12 +229,52 @@ static void send_heartbeat(void)
     // then rx, zero-padded to a multiple of four. The observed lengths agree:
     // the A16R's 60 = 24 + 36 (16+16 channels padded), the AM2's 28 = 24 + 4.
     //
-    // PEAKS ARE REPORTED AS ZERO, honestly. Firmware never sees sample values
-    // -- audio goes USB -> gateware ring -> packetizer without passing through
-    // the CPU -- so there is nothing to measure here yet. Real meters need a
-    // per-channel peak detector in dante_packetizer.py exposed over CSR. The
-    // record is sent because its ABSENCE is a structural difference from every
-    // real device; the zeros are a truthful "no meter", not a fabricated level.
+    // PEAKS ARE REAL NOW, and the ZEROS WE USED TO SEND WERE NOT "no meter".
+    //
+    // The old comment here said firmware cannot measure this -- true, audio goes
+    // USB -> gateware ring -> packetizer and never passes the CPU -- and then
+    // called the zeros a truthful absence. THAT WAS WRONG ABOUT THE ENCODING.
+    // The receiver project's device_server/peaks.rs sends
+    //
+    //     peak_lin = peak / full_scale
+    //     byte     = round(-40 * log10(peak_lin))   clamped 0..255
+    //
+    // so the byte counts HALF-DECIBELS BELOW FULL SCALE: 0 is 0 dBFS, 12 is
+    // -6 dBFS, 96 is -48 dBFS and silence is 255. Sending zeros claimed all 48
+    // channels were pinned at full scale, and Dante Controller answered with a
+    // red speaker and an exclamation mark in the Signal column of its Transmit
+    // tab -- reported from the bench 2026-11-06.
+    //
+    // dante_packetizer.py now meters at the ring write point, where every sample
+    // arrives with its channel number already decoded, and keeps max|sample| per
+    // channel in a 48 x 8-bit array. We read all of them and then clear, so the
+    // window is exactly one heartbeat.
+    //
+    // THE TABLE IS EXACT AND COSTS NO ARITHMETIC. 256 entries of -40*log10(m/256)
+    // for the 8-bit magnitude the gateware keeps; no log, no float, no divide on
+    // a CPU that has none. Its floor is a cliff and that is worth knowing: m=1 is
+    // -48 dBFS (96) and m=0 jumps straight to 255, so anything quieter than
+    // -48 dBFS reads as silence. Enough for "is there signal", coarse for a meter
+    // bottom; widening the gateware magnitude to 16 bits is the fix if that ever
+    // matters, and then this table needs a leading-zero count in front of it.
+    static const uint8_t PEAK_DB[256] = {
+    255,  96,  84,  77,  72,  68,  65,  63,  60,  58,  56,  55,  53,  52,  50,  49,
+     48,  47,  46,  45,  44,  43,  43,  42,  41,  40,  40,  39,  38,  38,  37,  37,
+     36,  36,  35,  35,  34,  34,  33,  33,  32,  32,  31,  31,  31,  30,  30,  29,
+     29,  29,  28,  28,  28,  27,  27,  27,  26,  26,  26,  25,  25,  25,  25,  24,
+     24,  24,  24,  23,  23,  23,  23,  22,  22,  22,  22,  21,  21,  21,  21,  20,
+     20,  20,  20,  20,  19,  19,  19,  19,  19,  18,  18,  18,  18,  18,  17,  17,
+     17,  17,  17,  17,  16,  16,  16,  16,  16,  15,  15,  15,  15,  15,  15,  15,
+     14,  14,  14,  14,  14,  14,  13,  13,  13,  13,  13,  13,  13,  12,  12,  12,
+     12,  12,  12,  12,  12,  11,  11,  11,  11,  11,  11,  11,  10,  10,  10,  10,
+     10,  10,  10,  10,  10,   9,   9,   9,   9,   9,   9,   9,   9,   8,   8,   8,
+      8,   8,   8,   8,   8,   8,   8,   7,   7,   7,   7,   7,   7,   7,   7,   7,
+      7,   6,   6,   6,   6,   6,   6,   6,   6,   6,   6,   5,   5,   5,   5,   5,
+      5,   5,   5,   5,   5,   5,   4,   4,   4,   4,   4,   4,   4,   4,   4,   4,
+      4,   4,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   3,   2,   2,
+      2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   1,   1,   1,   1,   1,
+      1,   1,   1,   1,   1,   1,   1,   1,   1,   0,   0,   0,   0,   0,   0,   0,
+    };
     {
         const uint16_t ntx = DANTE_TX_CHANNELS, nrx = DANTE_RX_CHANNELS;
         uint16_t npk = ntx + nrx;
@@ -251,7 +291,21 @@ static void send_heartbeat(void)
         put_u16(p, n, 0);       n += 2;
         put_u16(p, n, 24);      n += 2;
         put_u16(p, n, 0);       n += 2;
-        for (uint16_t i = 0; i < npk + pad; i++) { p[n] = 0; n += 1; }
+#ifdef CSR_AAF_PKT_PEAK_VALUE_ADDR
+        for (uint16_t i = 0; i < ntx; i++) {
+            aaf_pkt_peak_select_write(i);
+            p[n] = PEAK_DB[aaf_pkt_peak_value_read() & 0xFFu];
+            n += 1;
+        }
+        // Our RX channels exist so Controller can subscribe to us; no audio is
+        // ever received, so 255 (silence) is the honest value, not 0 (0 dBFS).
+        for (uint16_t i = 0; i < nrx; i++) { p[n] = 255; n += 1; }
+        aaf_pkt_peak_clear_write(1);     // window = one heartbeat
+#else
+        // No detector in this bitstream: say SILENCE, not full scale.
+        for (uint16_t i = 0; i < npk; i++) { p[n] = 255; n += 1; }
+#endif
+        for (uint16_t i = 0; i < pad; i++) { p[n] = 0; n += 1; }
     }
 
     // 0x8003 / 0x8004: emitted LAST, deliberately.
