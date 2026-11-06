@@ -138,32 +138,67 @@ wait
 # Take the LAST reported Fmax per clock: nextpnr prints an estimate mid-route and
 # the real figure after routing completes.
 {
-    printf "%-6s %-9s %-9s %-11s %-11s %-8s %s\n" \
-           SEED SYS_MHz USB_MHz ETH_TX_MHz ETH_RX_MHz VERDICT BITSTREAM
+    printf "%-6s %-9s %-9s %-9s %-11s %-11s %-8s %s\n" \
+           SEED SYS_MHz USB_MHz USB2_MHz ETH_TX_MHz ETH_RX_MHz VERDICT BITSTREAM
     for s in $(seq "$FIRST" "$LAST"); do
         log="$LOGDIR/seed$s.log"
         [[ -f "$log" ]] || continue
         get() { grep -a "Max frequency for clock .*'$1'" "$log" | tail -1 \
                 | sed -n 's/.*: \([0-9.]*\) MHz.*/\1/p'; }
-        sys=$(get 'crg_s7pll0_clkout_buf0')
-        usb=$(get 'crg_s7pll1_clkout_buf')
+        # THE NAMES GAINED A `main_` PREFIX AND THIS SILENTLY BROKE.
+        # The patterns used to be 'crg_s7pll0_clkout_buf0', but nextpnr now
+        # prints 'main_crg_s7pll0_clkout_buf0' -- with the quote before `main`,
+        # so the old pattern matched nothing, sys and usb came back EMPTY, the
+        # ${sys:-0} default made them 0, and every seed was reported FAIL.
+        # On 2026-11-06 that declared a sweep of seven seeds a total loss while
+        # seed 8 had in fact passed every requirement.
+        sys=$(get 'main_crg_s7pll0_clkout_buf0')
+        usb=$(get 'main_crg_s7pll1_clkout_buf')
+        # usb2 WAS NEVER CHECKED AT ALL, and it is not cosmetic: in that same
+        # sweep seeds 3 and 4 met every other requirement and failed ONLY on
+        # usb2 (56.36 and 59.15 against 60), so with the parser fixed and this
+        # line missing they would both have been reported PASS with a Backup PHY
+        # below spec.
+        usb2=$(get 'main_crg_s7pll2_clkout_buf')
         etx=$(get 'eth_tx_clk')
         erx=$(get 'eth_rx_clk')
         bit="$HERE/build_seed$s/gateware/colorlight_i9plus.bit"
-        [[ -f "$bit" ]] && have=yes || have=NO-BIT
+        # A BITSTREAM THAT EXISTS IS NOT A BITSTREAM FROM THIS SWEEP. A failed
+        # build leaves the PREVIOUS one in place, and this column used to report
+        # it as `yes`: on 2026-11-06 seeds 2 and 5 died and still advertised
+        # bitstreams from 08-14 and 08-13. Flashing one of those against today's
+        # csr.h is the hazard flash.sh devotes a paragraph to.
+        #
+        # THE TEST IS AGAINST ITS OWN csr.h, NOT AGAINST THE LOG. Comparing to
+        # the log reports everything stale, because the log keeps growing after
+        # the bitstream is written (the fasm parser warnings come last) -- the
+        # first version of this check did exactly that. csr.h is generated
+        # BEFORE place-and-route in the same run, so "bit newer than csr.h" is
+        # both a freshness test and the header-pairing check this project
+        # already lives by.
+        csr="$HERE/build_seed$s/software/include/generated/csr.h"
+        if [[ ! -f "$bit" ]]; then
+            have=NO-BIT
+        elif [[ -f "$csr" && "$bit" -ot "$csr" ]]; then
+            have=STALE-$(date -r "$bit" +%m-%d)
+        else
+            have=yes
+        fi
         verdict=PASS
         if grep -aq "^STALLED$" "$log"; then
             printf "%-6s %-9s %-9s %-11s %-11s %-8s %s\n" \
                    "$s" - - - - HEAP-STALL "do not use"
             continue
         fi
-        for chk in "${sys:-0} 55" "${usb:-0} 60" "${etx:-0} 125" "${erx:-0} 125"; do
+        for chk in "${sys:-0} 55" "${usb:-0} 60" "${usb2:-0} 60" \
+                   "${etx:-0} 125" "${erx:-0} 125"; do
             set -- $chk
             awk -v v="$1" -v t="$2" 'BEGIN{exit !(v+0 < t+0)}' && verdict=FAIL
         done
-        [[ "$have" == "NO-BIT" ]] && verdict=NOBUILD
-        printf "%-6s %-9s %-9s %-11s %-11s %-8s %s\n" \
-               "$s" "${sys:--}" "${usb:--}" "${etx:--}" "${erx:--}" "$verdict" "$have"
+        [[ "$have" == NO-BIT || "$have" == STALE-* ]] && verdict=NOBUILD
+        printf "%-6s %-9s %-9s %-9s %-11s %-11s %-8s %s\n" \
+               "$s" "${sys:--}" "${usb:--}" "${usb2:--}" "${etx:--}" "${erx:--}" \
+               "$verdict" "$have"
     done
 } | tee "$OUT"
 

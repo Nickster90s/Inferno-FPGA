@@ -240,10 +240,24 @@ static void send_heartbeat(void)
     //     byte     = round(-40 * log10(peak_lin))   clamped 0..255
     //
     // so the byte counts HALF-DECIBELS BELOW FULL SCALE: 0 is 0 dBFS, 12 is
-    // -6 dBFS, 96 is -48 dBFS and silence is 255. Sending zeros claimed all 48
-    // channels were pinned at full scale, and Dante Controller answered with a
-    // red speaker and an exclamation mark in the Signal column of its Transmit
-    // tab -- reported from the bench 2026-11-06.
+    // -6 dBFS, 96 is -48 dBFS and silence is ~253..255. Sending zeros claimed
+    // all 48 channels were pinned at full scale, and Dante Controller answered
+    // with a red speaker and an exclamation mark in the Signal column of its
+    // Transmit tab -- reported from the bench 2026-11-06.
+    //
+    // CONFIRMED AGAINST A REAL DEVICE, not just against the receiver project.
+    // captures/dante_control.pcap holds the heartbeat of 169.254.61.114, a
+    // receive-only device, and its 0x8002 decodes field for field as this code
+    // writes it:
+    //
+    //     len 28  type 0x8002  4  content_len 16  ctr 780  0
+    //     tx_count 0  0  rx_count 2  0  data_off 24  0
+    //     peaks [253, 253, 0, 0]
+    //
+    // Two silent RX channels reporting 253 -- about -126 dBFS, its own noise
+    // floor -- and the two pad bytes zero. A quiet channel reports a HIGH
+    // number on real hardware. That settles the direction without having to
+    // trust a single source for it.
     //
     // dante_packetizer.py now meters at the ring write point, where every sample
     // arrives with its channel number already decoded, and keeps max|sample| per
