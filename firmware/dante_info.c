@@ -817,6 +817,47 @@ static void send_caps(const uint8_t *dst_ip, uint16_t dst_port)
     }
 }
 
+// RUNTIME OVERRIDE OF THE NETWORK-INFO PAYLOAD.
+//
+// Dante Controller now ASKS us for this message -- it never did before today.
+// Advertising a DirectOut PRODIGY's model id (mdns.c) is what flipped that:
+// with model=_00000000000000ff DC never touched the info port, with
+// _0000000000000020 it immediately queries q=0x13 (this reply), 0x83, 0x61 and
+// 0xc1. Found with a proxy on the build host that borrowed the PRODIGY's TXT
+// records: DC asked IT for model information and never asked our board.
+//
+// The field is still grey, so whatever decides it is in these 64 bytes -- and
+// we do not know what any of them mean. Gateway and DNS are zero, the netmask
+// comes from a 16-or-24 prefix, the leading six bytes are 00 01 00 00 00 00 and
+// the 32-byte tail starts 00 18 00 30 and is otherwise empty.
+//
+// Sweeping that by rebuilding is one firmware push and one audio dropout per
+// guess. The 0x1100 table has had runtime patching for exactly this reason
+// ("Patching at runtime turns that into seconds"), so this message gets it too:
+// UDP opcode 'N' writes bytes into an override array with a per-byte mask, and
+// the builder applies them last. One build, then as many experiments as it
+// takes.
+static uint8_t g_ni_ovr[64];
+static uint8_t g_ni_msk[64];
+
+int dante_info_netinfo_patch(uint16_t off, const uint8_t *val, uint8_t n)
+{
+    if (off >= sizeof(g_ni_ovr)) return -1;
+    if (off + n > sizeof(g_ni_ovr)) n = (uint8_t)(sizeof(g_ni_ovr) - off);
+    for (uint8_t i = 0; i < n; i++) {
+        g_ni_ovr[off + i] = val[i];
+        g_ni_msk[off + i] = 1;
+    }
+    printf("[info] netinfo patch @%u x%u\n", off, n);
+    return 0;
+}
+
+void dante_info_netinfo_clear(void)
+{
+    for (unsigned i = 0; i < sizeof(g_ni_msk); i++) g_ni_msk[i] = 0;
+    printf("[info] netinfo overrides cleared\n");
+}
+
 static void send_network_info(const uint8_t *dst_ip, uint16_t dst_port)
 {
     static const uint8_t op[8] = {0x07, 0x2a, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00};
@@ -847,6 +888,11 @@ static void send_network_info(const uint8_t *dst_ip, uint16_t dst_port)
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
     };
     memcpy(c + o, tail, 32); o += 32;
+
+    // Overrides last, so a probe can reach any byte including the ones computed
+    // above. `o` is 64 here; the arrays are sized to match.
+    for (uint32_t i = 0; i < o && i < sizeof(g_ni_ovr); i++)
+        if (g_ni_msk[i]) c[i] = g_ni_ovr[i];
 
     n += o;
     put_u16(p, 2, (uint16_t)n);

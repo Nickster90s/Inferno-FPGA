@@ -314,6 +314,28 @@ static uint32_t build_txt_arc(uint8_t *p)
     n = txt_put(p, n, "router_vers=4.4.0");
     n = txt_put(p, n, "router_info=N-Series AoIP");   // "Dante Model" in DC
     n = txt_put(p, n, "mf=N-Series");
+    // OUR OWN MODEL ID, AND IT STAYS OURS. _0000000000000020 (a DirectOut
+    // PRODIGY's) was tried on 2026-11-06 and reverted.
+    //
+    // WHAT IT PROVED, and the finding is worth keeping even though it changed
+    // nothing on screen: this string decides whether Dante Controller looks at
+    // a device's network configuration AT ALL. With _00000000000000ff there is
+    // ZERO traffic from DC to our info port -- verified with the on-device ring
+    // across every tab in Device View. With the PRODIGY's id, DC immediately
+    // queries q=0x13 (network info), 0x61, 0x83 and 0xc1. Found by running a
+    // proxy on the build host that borrowed the PRODIGY's mDNS TXT records: DC
+    // asked THAT for model information and had never asked our board.
+    //
+    // And it STILL did not make the Network Config field editable, so there is
+    // a second condition we have not found, somewhere in that reply or beyond
+    // it. Real Audinate hardware will not answer our info queries from any
+    // source port, in DC's exact request shape, unicast or multicast, so we
+    // cannot read the message a device that CAN do it sends.
+    //
+    // Reverted because it is another vendor's identity and it bought nothing.
+    // Earlier the same day, claiming a PRODIGY's arcp_vers kept audio flowing
+    // but made DC stop showing the subscription as patched: these claims have
+    // consequences, and we should only make ones we can stand behind.
     n = txt_put(p, n, "model=_00000000000000ff");
     return n;
 }
@@ -353,6 +375,28 @@ static uint32_t build_txt_cmc(uint8_t *p)
     // into something no device would say.
     n = txt_put(p, n, "channels=0x6000004d");
     n = txt_put(p, n, "mf=N-Series");
+    // OUR OWN MODEL ID, AND IT STAYS OURS. _0000000000000020 (a DirectOut
+    // PRODIGY's) was tried on 2026-11-06 and reverted.
+    //
+    // WHAT IT PROVED, and the finding is worth keeping even though it changed
+    // nothing on screen: this string decides whether Dante Controller looks at
+    // a device's network configuration AT ALL. With _00000000000000ff there is
+    // ZERO traffic from DC to our info port -- verified with the on-device ring
+    // across every tab in Device View. With the PRODIGY's id, DC immediately
+    // queries q=0x13 (network info), 0x61, 0x83 and 0xc1. Found by running a
+    // proxy on the build host that borrowed the PRODIGY's mDNS TXT records: DC
+    // asked THAT for model information and had never asked our board.
+    //
+    // And it STILL did not make the Network Config field editable, so there is
+    // a second condition we have not found, somewhere in that reply or beyond
+    // it. Real Audinate hardware will not answer our info queries from any
+    // source port, in DC's exact request shape, unicast or multicast, so we
+    // cannot read the message a device that CAN do it sends.
+    //
+    // Reverted because it is another vendor's identity and it bought nothing.
+    // Earlier the same day, claiming a PRODIGY's arcp_vers kept audio flowing
+    // but made DC stop showing the subscription as patched: these claims have
+    // consequences, and we should only make ones we can stand behind.
     n = txt_put(p, n, "model=_00000000000000ff");
     return n;
 }

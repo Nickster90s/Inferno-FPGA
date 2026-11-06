@@ -403,6 +403,32 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         return;
     }
 
+    // 'N' -- patch the network-info payload at runtime, or clear the patches.
+    //
+    //   'N' 'c'                     -> clear every override
+    //   'N' <u16 offset> <bytes...> -> write those bytes at that offset
+    //
+    // The whole point is to sweep 64 bytes whose meaning is unknown without a
+    // firmware push per guess; see dante_info.c. Replies 'NIOK' or 'NIER'.
+    if (len >= 2 && req[0] == 'N') {
+        int r;
+        if (req[1] == 'c') {
+            dante_info_netinfo_clear();
+            r = 0;
+        } else if (len >= 4) {
+            uint16_t off = (uint16_t)((req[1] << 8) | req[2]);
+            r = dante_info_netinfo_patch(off, req + 3, (uint8_t)(len - 3));
+        } else {
+            r = -1;
+        }
+        uint8_t *pn = net_udp_payload_buf();
+        uint32_t nn = 0;
+        put32(pn, nn, r ? 0x4e494552u : 0x4e494f4bu);   // 'NIER' / 'NIOK'
+        nn += 4;
+        net_udp_commit(src_ip, src_port, STATS_PORT, nn, NET_TOS_BEST_EFFORT);
+        return;
+    }
+
     if (len >= 3 && req[0] == 'G') {
         g_dev_flags0 = req[1];
         g_dev_flags2 = req[2];

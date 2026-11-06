@@ -25,6 +25,11 @@ typedef struct {
 } dante_info_stats_t;
 extern dante_info_stats_t g_info_stats;
 
+/* Runtime probe of the q=0x13 network-info payload. 'N' over UDP 7779.
+ * See the long note at the definition in dante_info.c. */
+int  dante_info_netinfo_patch(uint16_t off, const uint8_t *val, uint8_t n);
+void dante_info_netinfo_clear(void);
+
 // Zet de sample rate LIVE: g_fs, de subsecond-wrap, de NCO en de
 // USB-clock-source, en laat de flows opnieuw onderhandelen. Geen reset -- de
 // firmware staat in coderam, dus een reset landt in de loader.
