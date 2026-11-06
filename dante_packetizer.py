@@ -830,6 +830,16 @@ class DantePacketizer(LiteXModule):
         #
         # chan_nr counts 0..63 because the USB wrapper's tag does; only the first
         # BLOCK_CH of those are real channels, so the write is guarded.
+        #
+        # THE METER IS BLIND WHILE THE TALKER IS OFF, and that is not a bug.
+        # do_write is gated on `en`, so nothing is written to the ring and
+        # nothing is metered until the talker runs. On 2026-11-06 a heartbeat
+        # captured one minute after loading showed all 48 channels at 255
+        # (silence) with USB ingress at a perfect 18,431,934 B/s, and it took a
+        # raw CSR read-back to see that the array was genuinely zero rather than
+        # the readout being broken -- the talker simply had not come on yet
+        # (PTP lock plus PTP_SETTLE_MS). Anyone testing this before lock will
+        # see a dead meter and should not go looking for a fault.
         samp_abs = Signal(32)
         peak_mag = Signal(8)
         self.comb += samp_abs.eq(Mux(samp32[31], ~samp32, samp32))

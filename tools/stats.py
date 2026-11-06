@@ -43,7 +43,11 @@ def read(board):
 # without the clamp.
 RING_NAMES  = ["ring_level_raw", "ring_level_min", "ring_underflow",
                "ring_unprime", "fifo_level_clamped", "underrun_ticks",
-               "talker_enables"]
+               "talker_enables",
+               # Raw gateware peak registers, to tell "detector never fired"
+               # from "readout broken". peak_select_rb must read back 3.
+               "peak_ch0", "peak_ch1", "peak_ch2", "peak_ch3",
+               "peak_select_rb"]
 RING_SIGNED = {"ring_level_raw", "ring_level_min"}
 
 def read_ring(board):

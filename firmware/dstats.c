@@ -303,6 +303,18 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         // is parked and the modular level sweeps its whole range, which read as
         // an inversion on the first boot of this firmware.
         put32(p, n, g_tx_stats.enables);            n += 4;
+        // RAW PEAK READBACK, for one question only: is the gateware array zero,
+        // or is the readout path broken? The heartbeat reported 255 (silence)
+        // on all 48 channels while USB ingress was a perfect 18,431,934 B/s, and
+        // PEAK_DB[0] is 255, so the firmware read 0 -- but that does not say
+        // whether the detector never fired or peak_select never took effect.
+        // Four channels plus a select read-back answers it.
+        for (unsigned ch = 0; ch < 4; ch++) {
+            aaf_pkt_peak_select_write(ch);
+            put32(p, n, aaf_pkt_peak_value_read()); n += 4;
+        }
+        aaf_pkt_peak_select_write(3);
+        put32(p, n, aaf_pkt_peak_select_read());    n += 4;
         net_udp_commit(src_ip, src_port, STATS_PORT, n, NET_TOS_BEST_EFFORT);
         return;
     }
