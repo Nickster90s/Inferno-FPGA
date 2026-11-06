@@ -298,6 +298,11 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         // count that says how long the un-primed episodes lasted in total.
         put32(p, n, aaf_pkt_fifo_level_read());     n += 4;
         put32(p, n, aaf_pkt_underrun_count_read()); n += 4;
+        // AND WHETHER THE TALKER HAS EVER RUN. Without it a reader cannot tell
+        // "the ring inverted" from "the ring was never driven": with en low, rd
+        // is parked and the modular level sweeps its whole range, which read as
+        // an inversion on the first boot of this firmware.
+        put32(p, n, g_tx_stats.enables);            n += 4;
         net_udp_commit(src_ip, src_port, STATS_PORT, n, NET_TOS_BEST_EFFORT);
         return;
     }

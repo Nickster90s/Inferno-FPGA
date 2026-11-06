@@ -831,7 +831,17 @@ class DantePacketizer(LiteXModule):
         self.sync += [
             neg_d.eq(neg_now),
             primed_d.eq(primed),
-            If(level < lvl_min, lvl_min.eq(level)),
+            // GATED ON `en`, AND IT TOOK HARDWARE TO SEE WHY. Ungated, this
+            // read -4096 on a freshly loaded board with the talker still off,
+            // and tools/stats.py duly announced that the ring had inverted.
+            // It had not. With `en` low, `strobe` is low, so `rd` is parked at
+            // its reset value while `wr` climbs with USB samples -- and the
+            // level is taken modulo 4*SRING_DEPTH, so it sweeps the whole
+            // +-4096 range every 8192 samples (~10.7 ms at 96 kHz). The number
+            // only means occupancy once both pointers are moving. A counter
+            // that reports garbage in a state nobody excluded is exactly the
+            // kind this commit set out to replace.
+            If(en & (level < lvl_min), lvl_min.eq(level)),
             # EDGES, not cycles. Counting every sys-clock tick spent negative
             # would report ~50 million for one 11 ms episode and tell you
             # nothing about how many episodes there were.

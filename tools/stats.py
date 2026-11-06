@@ -42,7 +42,8 @@ def read(board):
 # as "the decoder is producing nothing". ring_level_raw is the same number
 # without the clamp.
 RING_NAMES  = ["ring_level_raw", "ring_level_min", "ring_underflow",
-               "ring_unprime", "fifo_level_clamped", "underrun_ticks"]
+               "ring_unprime", "fifo_level_clamped", "underrun_ticks",
+               "talker_enables"]
 RING_SIGNED = {"ring_level_raw", "ring_level_min"}
 
 def read_ring(board):
@@ -69,6 +70,21 @@ def print_ring(r):
         print("  (no RNG1 reply -- firmware predates the 'r' opcode)")
         return
     for k, v in r.items(): print(f"  {k:20s} {v}")
+    # NOTHING HERE MEANS ANYTHING UNTIL THE TALKER HAS RUN ONCE. With the
+    # gateware enable low, `rd` is parked at its reset value while `wr` climbs
+    # with USB samples, and the level is modulo 4*SRING_DEPTH -- so it sweeps
+    # its whole +-4096 range every ~10.7 ms at 96 kHz and reads as a deep
+    # inversion. On the first boot of this firmware that is exactly what this
+    # function reported. Say so instead of crying wolf.
+    if r.get("talker_enables") is None:
+        print("  VERDICT: firmware predates talker_enables in this reply -- "
+              "check `enables` in the main reply before believing level_min.")
+        return
+    if r["talker_enables"] == 0:
+        print("  VERDICT: the talker has never been enabled, so the ring level "
+              "is not occupancy yet (rd is parked, the level is modular). "
+              "ring_level_min is meaningless until enables >= 1.")
+        return
     bad = []
     if r.get("ring_underflow"):   bad.append("ring_underflow is NOT 0")
     if r.get("ring_level_min", 0) < 0: bad.append("ring_level_min went negative")
