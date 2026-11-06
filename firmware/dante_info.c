@@ -32,6 +32,12 @@
 #include <string.h>
 #include <stdio.h>
 
+/* printf in this file is a NARRATIVE, not an interface. The format strings
+ * were 77% of .rodata; see log.h for the measurement and the rebuild flag. */
+#include "log.h"
+#define printf(...) LOGF(__VA_ARGS__)
+
+
 static void put_fixed(uint8_t *c, uint32_t at, uint32_t width, const char *s);
 
 #define MCAST_HDR_LEN     32

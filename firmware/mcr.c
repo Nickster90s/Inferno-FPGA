@@ -14,6 +14,12 @@
 #include <string.h>
 #include <stdio.h>
 
+/* printf in this file is a NARRATIVE, not an interface. The format strings
+ * were 77% of .rodata; see log.h for the measurement and the rebuild flag. */
+#include "log.h"
+#define printf(...) LOGF(__VA_ARGS__)
+
+
 static inline uint16_t be16(const uint8_t *p) {
     return ((uint16_t)p[0] << 8) | p[1];
 }
@@ -692,6 +698,10 @@ void mcr_dump_conv_log(const mcr_state_t *m)
     printf("  idx   offset_ns    delta_ns   inc_delta  lk\n");
     for (uint16_t k = 0; k < n; k++) {
         uint16_t i = (uint16_t)((start + k) % 320);
+        /* Used only by the printf below, which log.h compiles out in a quiet build.
+         * Cast rather than deleted: -DDANTE_VERBOSE=1 needs them back.
+         */
+        (void)i;
         printf("  %3u  %10ld  %10ld  %10ld   %u\n", (unsigned)k,
                (long)m->crf_log[i].offset_ns, (long)m->crf_log[i].delta_ns,
                (long)m->crf_log[i].inc_delta, (unsigned)m->crf_log[i].locked);

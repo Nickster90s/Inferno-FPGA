@@ -18,6 +18,12 @@
 #include <string.h>
 #include <stdio.h>
 
+/* printf in this file is a NARRATIVE, not an interface. The format strings
+ * were 77% of .rodata; see log.h for the measurement and the rebuild flag. */
+#include "log.h"
+#define printf(...) LOGF(__VA_ARGS__)
+
+
 dante_arc_stats_t g_arc_stats;
 
 // Per-RX-channel subscription, set by 0x3010 and reported back by 0x3000.

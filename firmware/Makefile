@@ -26,6 +26,14 @@ OBJECTS = crt0.o main.o gptp.o mcr.o cfgflash.o config.o cap.o net.o dante_dev.o
 # Add our source directory to includes
 CFLAGS += $(DEPFLAGS) -I.
 
+# THE CONSOLE NARRATIVE IS OFF BY DEFAULT. `make DANTE_VERBOSE=1` brings all 203
+# printf lines back; quiet they cost nothing, because log.h makes printf a macro
+# that never evaluates its arguments, so the format strings never reach .rodata.
+# Measured 2026-11-06: coderam 92108 -> 72364 bytes (93% -> 73%).
+ifeq ($(DANTE_VERBOSE),1)
+CFLAGS += -DDANTE_VERBOSE=1
+endif
+
 # Region sizes read from the generated regions.ld so they cannot drift from the
 # SoC. LiteX's own memusage tool is NOT used here: it assumes .text lives in
 # `rom`, but since Dante Phase 0.5 the firmware links into `coderam` and rom

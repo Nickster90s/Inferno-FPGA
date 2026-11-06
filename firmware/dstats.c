@@ -40,6 +40,12 @@ extern uint8_t  usb_fb_sweep_hold;
 #include "dante_info.h"
 #include <stdio.h>
 
+/* printf in this file is a NARRATIVE, not an interface. The format strings
+ * were 77% of .rodata; see log.h for the measurement and the rebuild flag. */
+#include "log.h"
+#define printf(...) LOGF(__VA_ARGS__)
+
+
 #define STATS_PORT 7779
 
 static void put32(uint8_t *p, uint32_t n, uint32_t v)

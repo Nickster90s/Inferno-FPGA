@@ -5,6 +5,12 @@
 #include <string.h>
 #include <stdio.h>
 
+/* printf in this file is a NARRATIVE, not an interface. The format strings
+ * were 77% of .rodata; see log.h for the measurement and the rebuild flag. */
+#include "log.h"
+#define printf(...) LOGF(__VA_ARGS__)
+
+
 dante_dev_t g_dante;
 
 // 0.5 ms. This is a FLOOR we impose on every receiver -- a receiver plays out

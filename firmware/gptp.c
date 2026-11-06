@@ -9,6 +9,12 @@
 #include <string.h>
 #include <stdio.h>
 
+/* printf in this file is a NARRATIVE, not an interface. The format strings
+ * were 77% of .rodata; see log.h for the measurement and the rebuild flag. */
+#include "log.h"
+#define printf(...) LOGF(__VA_ARGS__)
+
+
 extern uint8_t g_verbose;   /* console verbose toggle (main.c); 0 = quiet */
 
 // ---------------------------------------------------------------------------
@@ -236,6 +242,7 @@ void gptp_dump_conv_log(const gptp_t *g)
     printf("  idx   offset_ns   addend_delta  lk\n");
     for (uint16_t k = 0; k < n; k++) {
         uint16_t i = (uint16_t)((start + k) % 400);
+        (void)i;
         printf("  %3u  %10ld  %12ld   %u\n", (unsigned)k,
                (long)g->conv_log[i].offset_ns,
                (long)g->conv_log[i].addend_delta,
@@ -440,6 +447,7 @@ static void process_follow_up(gptp_t *g, const uint8_t *ptp, uint32_t ptp_len)
     // carries it. live-vs-rx shows the Sync-RX -> handler parse latency.
     if (g->sync_count < 40) {
         ptp_timestamp_t lv = gptp_read_time();
+        (void)lv;
         printf("[gPTP-cs] sc=%lu rx=%lu.%09lu orig=%lu.%09lu mpd=%ld raw=%ld live=%lu.%09lu corr=%ld\n",
                (unsigned long)g->sync_count,
                (unsigned long)g->sync_rx_ts.seconds,   (unsigned long)g->sync_rx_ts.nanoseconds,
@@ -480,6 +488,10 @@ static void process_follow_up(gptp_t *g, const uint8_t *ptp, uint32_t ptp_len)
         uint64_t uorig = (uint64_t)orig_ns;
         uint64_t uoff  = (uint64_t)g->offset_from_master_ns;
         uint64_t upd   = (uint64_t)g->mean_path_delay_ns;
+        /* Used only by the printf below, which log.h compiles out in a quiet build.
+         * Cast rather than deleted: -DDANTE_VERBOSE=1 needs them back.
+         */
+        (void)urx; (void)uorig; (void)uoff; (void)upd;
         printf("[gPTP] dump rx=%08lx_%08lx orig=%08lx_%08lx pd=%08lx_%08lx off=%08lx_%08lx sec=%08lx_%08lx ns=%08lx\n",
                (unsigned long)(urx   >> 32), (unsigned long)(urx   & 0xFFFFFFFF),
                (unsigned long)(uorig >> 32), (unsigned long)(uorig & 0xFFFFFFFF),

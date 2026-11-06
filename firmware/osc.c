@@ -33,6 +33,12 @@
 #include "dante_info.h"
 #include "osc.h"
 
+/* printf in this file is a NARRATIVE, not an interface. The format strings
+ * were 77% of .rodata; see log.h for the measurement and the rebuild flag. */
+#include "log.h"
+#define printf(...) LOGF(__VA_ARGS__)
+
+
 #define OSC_PORT 9000
 
 // OSC pads every string to a 4-byte boundary, INCLUDING its null terminator.

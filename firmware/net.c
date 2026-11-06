@@ -15,6 +15,12 @@
 #include <generated/mem.h>
 #include <generated/soc.h>
 
+/* printf in this file is a NARRATIVE, not an interface. The format strings
+ * were 77% of .rodata; see log.h for the measurement and the rebuild flag. */
+#include "log.h"
+#define printf(...) LOGF(__VA_ARGS__)
+
+
 #define IPPROTO_ICMP  1u
 #define IPPROTO_IGMP  2u
 #define IPPROTO_UDP   17u

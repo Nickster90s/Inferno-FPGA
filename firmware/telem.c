@@ -6,6 +6,12 @@
 
 #include <stdio.h>
 
+/* printf in this file is a NARRATIVE, not an interface. The format strings
+ * were 77% of .rodata; see log.h for the measurement and the rebuild flag. */
+#include "log.h"
+#define printf(...) LOGF(__VA_ARGS__)
+
+
 #define TELEM_PORT   7779          // shares the stats port, opcode 't'
 
 // Max records per drain reply. 20-byte header + 16 * 28 = 468 bytes, well

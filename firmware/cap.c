@@ -25,6 +25,12 @@
 #include <stdio.h>
 #include <string.h>
 
+/* printf in this file is a NARRATIVE, not an interface. The format strings
+ * were 77% of .rodata; see log.h for the measurement and the rebuild flag. */
+#include "log.h"
+#define printf(...) LOGF(__VA_ARGS__)
+
+
 // 64 x 256 B ~= 16.6 KB. 256 bytes holds a full ARC response header plus the
 // start of its payload, which is what identifies an exchange; the recorded
 // length field still reports the true on-wire size when truncated.
@@ -243,6 +249,10 @@ void cap_dump(void)
         uint32_t u = 14 + ihl;
         uint16_t sp = (uint16_t)((e->data[u] << 8) | e->data[u + 1]);
         uint16_t dp = (uint16_t)((e->data[u + 2] << 8) | e->data[u + 3]);
+        /* Used only by the printf below, which log.h compiles out in a quiet build.
+         * Cast rather than deleted: -DDANTE_VERBOSE=1 needs them back.
+         */
+        (void)sp; (void)dp;
         printf("  %8lu ms %s %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u len=%u\n",
                (unsigned long)e->t_ms, e->dir ? "TX" : "RX",
                e->data[26], e->data[27], e->data[28], e->data[29], sp,

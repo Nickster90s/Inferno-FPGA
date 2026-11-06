@@ -22,6 +22,12 @@
 #include <generated/csr.h>
 #include <stdio.h>
 
+/* printf in this file is a NARRATIVE, not an interface. The format strings
+ * were 77% of .rodata; see log.h for the measurement and the rebuild flag. */
+#include "log.h"
+#define printf(...) LOGF(__VA_ARGS__)
+
+
 static uint8_t  s_enabled;
 static uint8_t  s_pending;
 static uint32_t s_revert_at_ms;

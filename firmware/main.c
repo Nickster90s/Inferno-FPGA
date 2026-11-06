@@ -33,6 +33,12 @@
 #include "rx_gate.h"
 #include "mcr_dante.h"
 #include "telem.h"
+
+/* printf in this file is a NARRATIVE, not an interface. The format strings
+ * were 77% of .rodata; see log.h for the measurement and the rebuild flag. */
+#include "log.h"
+#define printf(...) LOGF(__VA_ARGS__)
+
 void dante_stats_init(void);
 void osc_init(void);
 
@@ -52,7 +58,16 @@ static mcr_state_t    mcr;
 #define N_AAF_STREAMS     6
 
 // RX EtherType counters for link-debug
-static uint32_t rx_total, rx_ptp, rx_avtp, rx_msrp, rx_other;
+static uint32_t rx_total, rx_ptp, rx_other;
+// rx_avtp AND rx_msrp ARE NEVER INCREMENTED BY ANYTHING. Silencing the console
+// made that visible: with the only printf that mentioned them compiled out,
+// gcc reported both as defined-but-not-used, i.e. nothing ever wrote them. The
+// comment further down calls them "retained and should stay at ~0 on a Dante
+// network" -- they stayed at 0 because no code counts them, not because the
+// network was clean. Kept so the -DDANTE_VERBOSE=1 build still compiles, marked
+// so the dead-counter reading is not mistaken for a measurement.
+static uint32_t rx_avtp __attribute__((unused));
+static uint32_t rx_msrp __attribute__((unused));
 static uint32_t rx_filtered;         // frames early-dropped by the SOFTWARE MAC allow-list
 // Exposed for the rx_gate readout: the software filter runs AFTER the frame has
 // taken an RX slot, so this counter and rx_gate's discard_count measure the same
@@ -393,6 +408,7 @@ static void check_uart_cmd(void)
     switch (c) {
         case 's': {
             ptp_timestamp_t t = gptp_read_time();
+            (void)t;
             printf("\n[gPTP] state=%d time=%llu.%09lu\n",
                    gptp.state,
                    (unsigned long long)t.seconds,
@@ -491,6 +507,7 @@ static void check_uart_cmd(void)
                 busy_wait(300);  // ≥1 top-byte tick at 125e6/2^24 ≈ 7.5 Hz
                 uint8_t hbb = main_eth_rx_heartbeat_read();
                 int d = (int)((uint8_t)(hbb - hba));
+                (void)d;
                 printf("  eth_rx heartbeat (PHY1 L3): %u -> %u (delta=%d) %s\n",
                        hba, hbb, d, d ? "alive" : "*** DEAD ***");
             }
@@ -568,12 +585,16 @@ static void check_uart_cmd(void)
                    (unsigned long)((uint64_t)(crxb - pr_rxb) * 1000u / dms),
                    (unsigned long)((uint64_t)(cepo - pr_epo) * 1000u / dms));
             pr_rxb = crxb; pr_epo = cepo; pr_ms = now; pr_pkts = cpkts;
+            /* Read only by the printf above, which is compiled out when quiet;
+             * pr_ms is still read for dms, so only these three need the cast. */
+            (void)pr_rxb; (void)pr_epo; (void)pr_pkts;
             }
             // Dante stamps a SAMPLE INDEX, not a presentation time, so the
             // old pres-vs-gPTP instrument has no meaning here. What matters now
             // is that the emitted index advances by exactly fpp per packet.
             uint32_t gw_ts  = aaf_pkt_dbg_last_ts_read();
             uint32_t gw_sec = aaf_pkt_dbg_last_sec_read();
+            (void)gw_ts; (void)gw_sec;
             // Gateware packetizer + USB ingress health. The firmware-side AAF
             // software TX/RX counters are gone with aaf.c; what remains is the
             // authoritative view: what the gateware actually put on the wire
@@ -650,6 +671,7 @@ static void check_uart_cmd(void)
                 printf("[FBSWEEP] fb_ovr = AUTO (measured loop)\n");
             } else {
                 long bp = ((long)usb_fb_manual - 0x60000) * 10000 / 0x60000; // x100 %
+                (void)bp;
                 printf("[FBSWEEP] fb_ovr = 0x%lx (%ld.%02ld%% vs 6.0) -- watch ep_out/underrun\n",
                        (unsigned long)usb_fb_manual, bp/100, (bp<0?-bp:bp)%100);
             }
@@ -876,7 +898,11 @@ int main(void)
 #endif
     uart_init();
 
-    printf("\n[DANTE-USB] 48ch TX  (Phase 0: AVB stack stripped)\n");
+    // UARTF, not printf: this ONE line survives the quiet build. A console
+    // that shows nothing at all cannot be told apart from a dead UART, and the
+    // UART is kept on purpose (loader, and an RP2350 link later). Everything
+    // after it is LOGF and compiles out -- see log.h.
+    UARTF("\n[DANTE-USB] 48ch TX  (quiet build; -DDANTE_VERBOSE=1 for the console)\n");
 
     // Enable PHY-side RGMII-ID delays at boot. The B50612D on i9plus needs:
     //   shadow_07 bit 8 = 1 (RXC delay) — reg 0x18 write 0xF1E7
@@ -903,6 +929,10 @@ int main(void)
         cfgflash_warmup();           // clock past STARTUPE2 first-edge masking
         uint32_t j = cfgflash_jedec();
         int found = cfg_load();
+        /* Used only by the printf below, which log.h compiles out in a quiet build.
+         * Cast rather than deleted: -DDANTE_VERBOSE=1 needs them back.
+         */
+        (void)j; (void)found;
         printf("[CFG] JEDEC=0x%06lx  config %s  cs=%u  crf_valid=%u\n",
                (unsigned long)j, found ? "LOADED from NV" : "defaults (new flash)",
                g_cfg.cs, g_cfg.crf_valid);
