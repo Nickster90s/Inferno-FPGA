@@ -62,6 +62,27 @@ void cap_set_eid(const uint8_t *eid) { (void)eid; }   // AVB leftover; unused
 // 99.2% of frames on this network and would evict the exchange we care about
 // within milliseconds. Also excludes our own mDNS and heartbeat multicast,
 // which the host can already see.
+// The MEDIA port, excluded from the ring entirely.
+//
+// MEASURED 2026-11-06: the inbound-unicast catch-all below keeps every unicast
+// frame, and the two receivers' keepalives to our media port are unicast. With
+// two flows bound that is 100555 frames in two minutes against 128 ring slots,
+// so the ring held well under a second and a click in Dante Controller was
+// gone before it could be fetched -- twice. The keepalives are not lost
+// information: dante_tx tracks them per flow as ka_rx and ka_age_ms, which is
+// what tools/flows.py prints. This ring exists for the control plane.
+static int cap_is_media(const uint8_t *f, uint32_t len)
+{
+    if (len < 34 || f[12] != 0x08 || f[13] != 0x00) return 0;
+    uint32_t ihl = (uint32_t)(f[14] & 0x0f) * 4;
+    if (ihl < 20 || len < 14 + ihl + 8) return 0;
+    if (f[23] != 17) return 0;
+    uint32_t u = 14 + ihl;
+    uint16_t sp = (uint16_t)((f[u] << 8) | f[u + 1]);
+    uint16_t dp = (uint16_t)((f[u + 2] << 8) | f[u + 3]);
+    return sp == 4321 || dp == 4321;
+}
+
 static int cap_is_control(const uint8_t *f, uint32_t len)
 {
     if (len < 42) return 0;
@@ -166,6 +187,9 @@ void cap_record(uint8_t dir, const uint8_t *frame, uint32_t len)
     // board, because the switch forwards it only to the destination port. That
     // is the entire reason this ring exists, so that is all it now keeps.
     if (!unicast) return;
+
+    // Media keepalives would own the ring; see cap_is_media() above.
+    if (cap_is_media(frame, len)) return;
 
     // RING, not stop-when-full. The old first-N behaviour was right for a boot
     // handshake; here the interesting traffic happens when someone clicks in

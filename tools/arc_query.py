@@ -12,19 +12,36 @@
 #   start_code | total_length | seqnum | opcode1 | opcode2 | content
 import socket, struct, sys
 
-TARGETS = sys.argv[1:] or ["169.254.60.249", "169.254.61.114"]
-OPCODES = [0x1000, 0x1100, 0x1102, 0x3300, 0x2204, 0x4100, 0x2200, 0x2320]
+# THE START CODE SELECTS A MESSAGE REVISION. This script had 0x2714 hardcoded
+# with a comment claiming it was "what DC uses on the wire". It is not, and the
+# difference is not cosmetic -- measured 2026-11-06 against a DirectOut PRODIGY,
+# reproducibly, same device and same opcode:
+#
+#     0x1000 with 0x2714 -> 46 bytes, capability word 0x0ff9
+#     0x1000 with 0x2809 -> 86 bytes, capability word 0x1ff9
+#
+# The on-device capture (tools/cap_fetch.py) shows Dante Controller sending
+# 0x2809. So every comparison made with this script before that date was
+# reading the OLD revision, and twice sent me after the wrong capability bytes.
+# 0x2809 is now the default; pass --old to get the previous behaviour, and both
+# are printed so a reply can never be attributed to the wrong revision.
+SC_DC  = 0x2809
+SC_OLD = 0x2714
+START_CODE = SC_OLD if "--old" in sys.argv else SC_DC
+
+TARGETS = [a for a in sys.argv[1:] if not a.startswith("-")] or \
+          ["169.254.60.249", "169.254.61.114"]
+OPCODES = [0x1000, 0x1100, 0x1102, 0x3300, 0x2204, 0x4100, 0x2200, 0x2320, 0x3320]
 
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(1.5)
 seq = 0x1000
 
 for ip in TARGETS:
-    print(f"\n===== {ip} =====")
+    print(f"\n===== {ip}   (start_code {START_CODE:#06x})")
     for op in OPCODES:
         seq += 1
-        # start_code 0x2714 is what DC uses on the wire; content empty.
-        pkt = struct.pack(">HHHHH", 0x2714, 10, seq, op, 0)
+        pkt = struct.pack(">HHHHH", START_CODE, 10, seq, op, 0)
         try:
             s.sendto(pkt, (ip, 4440))
             data, _ = s.recvfrom(2048)

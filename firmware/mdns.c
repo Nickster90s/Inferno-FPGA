@@ -232,6 +232,22 @@ static char n_arc_svc[48];                  // "_netaudio-arc._udp.local"
 static char n_cmc_svc[48];
 static char n_chan_svc[48];                 // "_netaudio-chan._udp.local"
 static char n_bund_svc[48];                 // "_netaudio-bund._udp.local"
+// _netaudio-dbc. MEASURED MISSING 2026-11-06 while chasing Dante Controller's
+// greyed-out Network Config field. Asked every device on the bench for its
+// service enumeration (_services._dns-sd._udp, PTR) and got:
+//
+//     DirectOut PRODIGY   arc  chan  cmc  dbc
+//     Sennheiser bar      arc        cmc  dbc
+//     N-Series DAC8       arc        cmc
+//     us                  arc        cmc
+//
+// The PRODIGY's dbc instance resolves to SRV port 4455 -- which is the flow
+// control port we ALREADY serve. So the service runs here; it was simply never
+// advertised, and a controller that enumerates services to decide what a device
+// can do would never see it. Same for _netaudio-chan: we answer its PTR queries
+// but left it out of the enumeration, so nothing asks.
+static char n_dbc_svc[48];                  // "_netaudio-dbc._udp.local"
+static char n_dbc_inst[DANTE_MAX_NAME + 48];
 static char n_arc_inst[DANTE_MAX_NAME + 48];
 static char n_cmc_inst[DANTE_MAX_NAME + 48];
 static const char n_services[] = "_services._dns-sd._udp.local";
@@ -239,6 +255,7 @@ static const char n_services[] = "_services._dns-sd._udp.local";
 static char lcq_host[DANTE_MAX_NAME + 8];
 static char lcq_arc_inst[DANTE_MAX_NAME + 48];
 static char lcq_cmc_inst[DANTE_MAX_NAME + 48];
+static char lcq_dbc_inst[DANTE_MAX_NAME + 48];
 
 static void cat2(char *dst, int max, const char *a, const char *b)
 {
@@ -284,6 +301,14 @@ static uint32_t txt_put_hexid(uint8_t *p, uint32_t n)
 static uint32_t build_txt_arc(uint8_t *p)
 {
     uint32_t n = 0;
+    // 2.8.9, AND DO NOT RAISE IT. Tried 2.8.15 on 2026-11-06 -- the version a
+    // DirectOut PRODIGY advertises -- to see whether Dante Controller gates its
+    // greyed-out Network Config field on the protocol version. It does not.
+    // What it DOES do is take the claim seriously: with 2.8.15 the audio kept
+    // flowing but Controller STOPPED SHOWING THE SUBSCRIPTION AS PATCHED,
+    // because it then queries in a protocol revision we do not implement and
+    // gets 0x22 back. So arcp_vers really is a behaviour gate in DC -- which
+    // means it is exactly the wrong thing to inflate. Claim what we speak.
     n = txt_put(p, n, "arcp_vers=2.8.9");
     n = txt_put(p, n, "arcp_min=0.2.4");
     n = txt_put(p, n, "router_vers=4.4.0");
@@ -722,6 +747,9 @@ static int match_bund_inst(const char *q, unsigned *idx)
 #define W_CMC_TXT   (1u << 5)
 #define W_A         (1u << 6)
 #define W_SERVICES  (1u << 7)
+#define W_DBC_PTR   (1u << 8)
+#define W_DBC_SRV   (1u << 9)
+#define W_DBC_TXT   (1u << 10)
 #define W_CHAN_PTR  (1u << 8)      // all 48 channel PTRs
 #define W_BUND_PTR  (1u << 9)      // all 6 bundle PTRs
 // Single-instance answers carry their index alongside the mask.
@@ -736,6 +764,23 @@ static unsigned chan_resweep;      // channel TXTs still to re-publish
 // resolves on this network rather than what the RFC permits.
 static const uint8_t *echo_q;
 static uint32_t       echo_q_len;
+
+// WHERE THE REPLY GOES. Measured 2026-11-06: a unicast mDNS query to us was
+// ANSWERED -- and the answer went to 224.0.0.251, so the asker never saw it.
+// mdns_rx() discarded src_ip and src_port with (void) casts and send_response()
+// hardcoded the group. All three real devices on the bench (two DirectOut
+// PRODIGY cards, a Sennheiser bar) reply straight to the asker; we were the
+// only one that did not, and a controller that asks a direct question and gets
+// nothing falls back to defaults -- the same shape as the clock-stats reply
+// whose absence made Dante Controller read us as a PTPv2 device.
+//
+// Two cases per RFC 6762, and both want a unicast answer:
+//   * a LEGACY query -- source port is not 5353, so the asker is an ordinary
+//     resolver socket. That is what the measurement above used.
+//   * the QU bit -- top bit of qclass set on the question (RFC 6762 5.4).
+// Anything else still goes to the group.
+static uint8_t  uni_ip[4];
+static uint16_t uni_port;
 
 static void send_response(uint32_t want)
 {
@@ -758,8 +803,14 @@ static void send_response(uint32_t want)
     // a working A16R reply that DVS accepted has qd=0. The qd=1 sample that
     // prompted the change was a different response type.
 
-    if (want & W_SERVICES) { n = put_ptr(p, n, n_services, n_arc_svc); answers++;
-                             n = put_ptr(p, n, n_services, n_cmc_svc); answers++; }
+    if (want & W_SERVICES) { n = put_ptr(p, n, n_services, n_arc_svc);  answers++;
+                             n = put_ptr(p, n, n_services, n_cmc_svc);  answers++;
+                             n = put_ptr(p, n, n_services, n_chan_svc); answers++;
+                             n = put_ptr(p, n, n_services, n_dbc_svc);  answers++; }
+    if (want & W_DBC_PTR)  { n = put_ptr(p, n, n_dbc_svc, n_dbc_inst); answers++; }
+    // Port 4455: the flow control service, which this firmware already answers.
+    if (want & W_DBC_SRV)  { n = put_srv(p, n, n_dbc_inst, DANTE_PORT_FLOWS); answers++; }
+    if (want & W_DBC_TXT)  { n = put_txt(p, n, n_dbc_inst, 0); answers++; }
     if (want & W_ARC_PTR)  { n = put_ptr(p, n, n_arc_svc, n_arc_inst); answers++; }
     if (want & W_ARC_SRV)  { n = put_srv(p, n, n_arc_inst, DANTE_PORT_ARC); answers++; }
     if (want & W_ARC_TXT)  { n = put_txt(p, n, n_arc_inst, 1); answers++; }
@@ -834,7 +885,9 @@ static void send_response(uint32_t want)
     additional += chan_txt_additional;
     p[10] = (uint8_t)(additional >> 8); p[11] = (uint8_t)additional;
 
-    if (net_udp_commit(mdns_group, MDNS_PORT, MDNS_PORT, n, NET_TOS_BEST_EFFORT) == 0)
+    const uint8_t *dst   = uni_port ? uni_ip : mdns_group;
+    uint16_t       dport = uni_port ? uni_port : MDNS_PORT;
+    if (net_udp_commit(dst, dport, MDNS_PORT, n, NET_TOS_BEST_EFFORT) == 0)
         g_mdns_stats.tx_responses++;
 }
 
@@ -851,7 +904,7 @@ static int streq(const char *a, const char *b)
 static void mdns_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
                     uint16_t src_port, const uint8_t *msg, uint32_t len)
 {
-    (void)src_ip; (void)dst_ip; (void)src_port;
+    (void)dst_ip;
     if (len < 12) return;
 
     uint16_t flags   = (uint16_t)((msg[2] << 8) | msg[3]);
@@ -865,6 +918,10 @@ static void mdns_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     uint32_t want = 0;
     char     qname[128];
     echo_q = 0; echo_q_len = 0;
+    // A legacy query (source port != 5353) is answered to the asker; the QU bit
+    // below can also switch this on for a real multicast responder.
+    uni_port = (src_port != MDNS_PORT) ? src_port : 0;
+    for (int _i = 0; _i < 4; _i++) uni_ip[_i] = src_ip[_i];
 
     for (uint16_t q = 0; q < qdcount && off < len; q++) {
         off = name_decode(msg, len, off, qname, sizeof(qname));
@@ -875,6 +932,8 @@ static void mdns_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
             uint32_t nlen = off - 12;
             (void)nlen; qstart = 12;
         }
+        uint16_t qclass = (uint16_t)((msg[off + 2] << 8) | msg[off + 3]);
+        if (qclass & 0x8000) uni_port = src_port;   // QU: answer the asker
         off += 4;                                   // qtype + qclass
         if (!echo_q_len) { echo_q = msg + qstart; echo_q_len = off - qstart; }
 
@@ -888,12 +947,18 @@ static void mdns_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         } else if (streq(qname, n_cmc_svc)) {
             if (any || qtype == DNS_T_PTR)
                 want |= W_CMC_PTR | W_CMC_SRV | W_CMC_TXT | W_A;
+        } else if (streq(qname, n_dbc_svc)) {
+            if (any || qtype == DNS_T_PTR)
+                want |= W_DBC_PTR | W_DBC_SRV | W_DBC_TXT | W_A;
         } else if (streq(qname, lcq_arc_inst)) {
             if (any || qtype == DNS_T_SRV) want |= W_ARC_SRV | W_A;
             if (any || qtype == DNS_T_TXT) want |= W_ARC_TXT;
         } else if (streq(qname, lcq_cmc_inst)) {
             if (any || qtype == DNS_T_SRV) want |= W_CMC_SRV | W_A;
             if (any || qtype == DNS_T_TXT) want |= W_CMC_TXT;
+        } else if (streq(qname, lcq_dbc_inst)) {
+            if (any || qtype == DNS_T_SRV) want |= W_DBC_SRV | W_A;
+            if (any || qtype == DNS_T_TXT) want |= W_DBC_TXT;
         } else if (streq(qname, n_chan_svc)) {
             if (any || qtype == DNS_T_PTR) want |= W_CHAN_PTR | W_A;
         } else if (streq(qname, n_bund_svc)) {
@@ -973,15 +1038,19 @@ void mdns_init(void)
     cat2(n_bund_svc, sizeof(n_bund_svc), "_netaudio-bund._udp", ".local");
     cat2(n_arc_inst, sizeof(n_arc_inst), g_dante.name, "._netaudio-arc._udp.local");
     cat2(n_cmc_inst, sizeof(n_cmc_inst), g_dante.name, "._netaudio-cmc._udp.local");
+    cat2(n_dbc_svc, sizeof(n_dbc_svc), "_netaudio-dbc._udp", ".local");
+    cat2(n_dbc_inst, sizeof(n_dbc_inst), g_dante.name, "._netaudio-dbc._udp.local");
 
     // Lowercased copies FOR COMPARISON ONLY. The originals keep their case
     // because the instance name is the display name in Dante Controller.
     memcpy(lcq_host,     n_host,     sizeof(lcq_host));
     memcpy(lcq_arc_inst, n_arc_inst, sizeof(lcq_arc_inst));
     memcpy(lcq_cmc_inst, n_cmc_inst, sizeof(lcq_cmc_inst));
+    memcpy(lcq_dbc_inst, n_dbc_inst, sizeof(lcq_dbc_inst));
     for (char *s = lcq_host;     *s; s++) *s = lc(*s);
     for (char *s = lcq_arc_inst; *s; s++) *s = lc(*s);
     for (char *s = lcq_cmc_inst; *s; s++) *s = lc(*s);
+    for (char *s = lcq_dbc_inst; *s; s++) *s = lc(*s);
 
     if (net_udp_bind(MDNS_PORT, mdns_rx) != 0)
         printf("[net] BIND FAILED on port %u -- udp table full\n", MDNS_PORT);

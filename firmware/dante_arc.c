@@ -421,6 +421,20 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     uint8_t hdr[DANTE_HDR_LEN];
     memcpy(hdr, req, DANTE_HDR_LEN);
 
+    // THE START CODE SELECTS A MESSAGE REVISION, which this firmware ignored.
+    // Measured 2026-11-06, reproducibly, against a DirectOut PRODIGY:
+    //
+    //     0x1000 with start_code 0x2714 -> 46 bytes
+    //     0x1000 with start_code 0x2809 -> 86 bytes
+    //
+    // Same device, same opcode, same session. And 0x2809 is what Dante
+    // Controller sends -- the on-device capture shows 2809003e53d71100... So DC
+    // asks in the newer revision and real hardware answers 26 extra u16 words,
+    // while we answered the short form to everything. tools/arc_query.py had
+    // 0x2714 hardcoded with a comment claiming it was what DC uses, so every
+    // comparison made with it was measuring the OLD revision.
+    uint16_t req_sc = (uint16_t)((hdr[0] << 8) | hdr[1]);
+
     // Stash for the mirror BEFORE building into net_udp_payload_buf(). `req`
     // must not be read after the reply is committed.
     uint8_t  mir[96];
@@ -467,6 +481,22 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         dante_msg_u16(&m, 1);                              // unknown6_1
         dante_msg_u16(&m, 1);                              // unknown7_1
         for (int i = 0; i < 6; i++) dante_msg_u16(&m, 0);  // unknown8_0[6]
+
+        // THE START CODE SELECTS A REVISION, AND WE DELIBERATELY STILL SEND
+        // THE SHORT FORM. Measured 2026-11-06 against a DirectOut PRODIGY,
+        // reproducibly: 0x1000 answered 46 bytes to start_code 0x2714 and
+        // 86 bytes to 0x2809 -- same device, same opcode. DC sends 0x2809.
+        //
+        // Replaying the PRODIGY's 26 extra u16 words was tried and REVERTED.
+        // It changed nothing in Dante Controller (the Network Config field
+        // stayed grey), and the words are not ours to send: 0x20/0x40 read as
+        // maxima for a 32x32 device with 64-channel flows, which contradicts
+        // the 48 TX / 2 RX / 8-per-flow we report eight words earlier. An
+        // internally inconsistent reply is worse than a short one.
+        //
+        // So the finding is recorded and the behaviour is not changed. Whoever
+        // works out what those words mean can add them with OUR numbers in
+        // them; `req_sc` above is already parsed and waiting.
         break;
     }
 
@@ -915,6 +945,33 @@ static void arc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
 
     case OP_UNKNOWN_2320:
         code = 0x30;
+        break;
+
+    // 0x3320 -- ANSWER 0x31, NOT 0x22, BECAUSE 0x22 MAKES DC LOOP AT 1 kHz.
+    //
+    // Measured 2026-11-06 with the on-device ring (tools/cap_fetch.py) while
+    // chasing Dante Controller's greyed-out Network Config field. Opening the
+    // device makes DC cycle 0x1100, 0x3300, 0x2320 and 0x3320 -- and 128
+    // captured frames spanned 1484 ms with sequence numbers running 27948 ->
+    // 29406, i.e. ~980 requests per second. 0x3320 was the only one we answered
+    // with an error.
+    //
+    // That is the SAME failure the 0x2204 comment below records: DC retries on
+    // an error instead of completing its refresh, so the tab it was filling
+    // never gets populated and falls back to defaults. There it cost us the
+    // Clock Status columns; here it is the most likely reason the Network
+    // Config tab stays grey.
+    //
+    // 0x31 is what real hardware returns. Two DirectOut PRODIGY cards answer
+    // 0x31 to both 0x3320 and 0x2320, where we had 0x22 and 0x30 -- and the
+    // PRODIGY's Network Config field IS editable. Copying the status code a
+    // working device returns is cheaper than guessing what the code means.
+    //
+    // THE TEST NEEDS NO HUMAN: reset the ring, fetch it, and look at the
+    // timespan of 128 frames. ~1.5 s is the storm; seconds-per-frame is a
+    // settled poll loop.
+    case 0x3320:
+        code = 0x31;
         break;
 
     // 0x2204 -- tx flow detail. MUST answer OK with an empty list, not an error.
