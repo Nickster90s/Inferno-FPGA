@@ -156,10 +156,10 @@ Two properties are load-bearing and must survive every future change:
 | 0.5 | Frozen loader ROM + `coderam` + netload | firmware edit → running in seconds | **code complete**, HW check pending |
 | 1 | LiteDRAM on the 8 MB SDRAM (`--with-sdram`) | 8 MB memtest passes | planned |
 | 2 | `net.c` — IPv4 / UDP / ICMP / IGMP / ARP | **FPGA answers `ping`** | **done** |
-| 3 | Dante discovery (mDNS + ARC + CMC + info) | **device appears in Dante Controller** | **done** |
+| 3 | Dante discovery (mDNS + ARC + CMC + info) | **device appears in Dante Controller** | **done** — incl. live TX flows (`0x2200`) and the Signal meter (`0x8002`) |
 | 4 | `ptpv1.c` — PTPv1 slave | locks to a PTPv1 master | **done** — locks in ~30 s, offset sub-µs |
 | 5 | `dante_packetizer.py` + `dante_tx.c` | audio received by real hardware | **done** — clean audio on the bench |
-| 6 | Hardening / long-run | 24 h, no dropouts | **partial** — see below |
+| 6 | Hardening / long-run | 24 h, no dropouts | **partial** — 16 h 8 min clean on 2026-11-05/06, see below |
 | 8 | Persistent settings + RX patch | survives a power cycle | **not started** |
 | 7 | Unicast flows + subscriptions | subscribe from Dante Controller | **done** — per-flow map, slots and fpp |
 
@@ -916,6 +916,7 @@ it does not need the CH347 (which JTAG and the UART share).
 | `?` | | all runtime counters (the default `stats.py` read) |
 | `f` | | per-flow detail: dst, port, slots, **fpp**, age |
 | `u` | | USB ingress counters -- `rx_beats`, `ep_out`, over/underrun |
+| `r` | | ring health -- `ring_level_raw` (**unclamped**, signed), `ring_level_min`, `ring_underflow`, `ring_unprime`, plus four raw peak registers. `tools/stats.py --ring` |
 | `s` `g` `p` `t` `m` | | PTP servo status, gPTP, phase, telemetry, media clock |
 | `L` | u32 ns | advertised latency; no payload = read it back |
 | `M` | | multicast fpp / create |
@@ -928,6 +929,15 @@ it does not need the CH347 (which JTAG and the UART share).
 
 `A`/`K`/`B`/`G`/`V` are protocol-archaeology probes. They are RAM-only and a
 reboot reverts them.
+
+**Read `r` before believing `fifo_level` from `?`.** `fifo_level` is
+`block_level`, which CLAMPS a negative ring level to 0 — and that clamp is why
+the four ring-pointer wedges of 2026-08 each presented as "fifo_level 0, every
+ingress counter perfect" and were misread three times as "the decoder is
+producing nothing". `ring_underflow` counts episodes where the consumer
+overtook the producer and **must stay 0**; `tools/stats.py --ring` refuses a
+verdict while the talker has never been enabled, because with the gateware
+enable low `rd` is parked and the level is modular rather than occupancy.
 
 ### OSC control surface (port 9000)
 
@@ -1081,6 +1091,29 @@ touch-sensitive, intermittent link.
 
 ## Console
 
+**THE CONSOLE IS QUIET BY DEFAULT SINCE 2026-11-06, AND THE KEYS BELOW STILL
+WORK.** Only the printing is gone. The narrative was the biggest single thing in
+coderam and it was the format strings, not the UART:
+
+    203 printf format strings    10084 bytes = 77% of ALL .rodata
+    vfprintf                      1712 bytes
+    uart_* driver + printf          676 bytes
+
+    quiet    coderam 72364 / 98304 (73%)
+    verbose  coderam 91980 / 98304 (93%)
+
+`firmware/log.h` makes `printf` a macro that does not evaluate its arguments, so
+quiet the literals are never referenced and never reach `.rodata`. The text
+stays in the source on purpose — in this project the messages are the record of
+what was measured. `make DANTE_VERBOSE=1` brings all 203 lines back.
+
+The UART itself stays: `firmware/loader/loader.c` reads it (that is what
+`tools/netload.py` talks to), an RP2350 link is planned on it, and every key
+below with a side effect still works — `r` reboot, `t`/`T` talker, `x` rx_gate,
+`d` mcr_dante, `z` cap_reset. The keys that only PRINT are inert unless you
+build verbose. `g_verbose` ('v') now gates lines that no longer exist: a runtime
+flag cannot save a format string, only compile-time removal can.
+
 | Key | Action |
 |---|---|
 | `s` | status — PTP servo, grandmaster, RX message counts |
@@ -1230,6 +1263,28 @@ comparing devices that differ in the behaviour of interest — a RedNet A16R
 (Brooklyn-3) against a RedNet AM2 (UltimoX2). Probing our own device could not
 have found any of them; the comparison had to be against hardware that works.
 
+- **Heartbeat TLV `0x8002` — the Signal column in Controller's Transmit tab.**
+  One byte per channel, TX first then RX, zero-padded to a multiple of four,
+  and the byte is `round(-40*log10(peak/full_scale))` — **half-decibels BELOW
+  full scale, so 0 is 0 dBFS and silence is 253..255.** We used to send all
+  zeros with a comment calling them "a truthful no meter"; that claimed 48
+  channels pinned at full scale, and Controller answered with a red speaker and
+  an exclamation mark. inferno documents the encoding in
+  `device_server/peaks.rs`, and a real device confirms it:
+  `captures/dante_control.pcap` holds 169.254.61.114's heartbeat, whose
+  `0x8002` decodes as `tx_count 0, rx_count 2, data_off 24, peaks [253, 253,
+  0, 0]` — two silent RX channels reporting 253, its own noise floor. A quiet
+  channel reports a HIGH number.
+
+  Firmware cannot measure this: audio goes USB → gateware ring → packetizer and
+  never passes the CPU. `dante_packetizer.py` therefore meters at the ring write
+  point, the one place that sees every sample with its channel number already
+  decoded, and keeps `max|sample|` per channel in a 48x8-bit array read over
+  `peak_select`/`peak_value` and cleared once per heartbeat. **The meter is
+  blind while the talker is off**, because the ring write is gated on the
+  gateware enable — a heartbeat captured before PTP lock shows 48x 255 with USB
+  ingress perfect, and that is not a fault.
+
 - **ARC `0x1101` — Dante Controller's latency SET.** Carries the latency in
   nanoseconds as u32, **twice**; both copies have always been equal, and we
   require that before applying, so a misparsed message is rejected rather than
@@ -1269,6 +1324,23 @@ RFC 1112/2236 (IGMP), RFC 6762/6763 (mDNS/DNS-SD).
 
 Hard-won, each one cost real debugging time. Read before changing gateware.
 
+- **A SMALL NETLIST CHANGE CAN COST YOU THE WHOLE SEED SET.** Measured
+  2026-11-06: adding a 48x8-bit peak register file plus three CSRs was enough
+  that **seed 1 — the seed behind the two bitstreams before it — stalled in
+  HeAP** with no output for 904 s. Sweeping 1..8 on the new netlist gave two
+  HeAP stalls, one build error, four FAIL and **one PASS**. So budget a seed
+  hunt for any gateware change here, and do not conclude anything from the
+  seed number: `tools/seed_sweep.sh` already warns that `sys` Fmax is not
+  reproducible run to run, so the BITSTREAM is the validated artifact.
+
+  Two of the four FAILs missed on `usb2` alone — the Backup PHY's clock, which
+  `seed_sweep.sh` never checked until it was fixed that day. The same fix
+  covers two more traps the tool had: its clock-name patterns had gone stale
+  (the names gained a `main_` prefix, so `sys` and `usb` parsed as EMPTY,
+  defaulted to 0 and reported **every** seed FAIL), and its BITSTREAM column
+  called a leftover from a failed build `yes` — two seeds advertised August
+  bitstreams as present. Freshness is now "the .bit is newer than its own
+  csr.h", which doubles as the header-pairing check.
 - **Inject clock constraints yourself, and know what binds.** openXC7 emits no
   `create_clock` for PLL-derived clocks, so without help every CDC is timed as a
   single-cycle path. `avb_soc.py` injects `create_clock` onto the PLL output
