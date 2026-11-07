@@ -57,6 +57,7 @@ from litex.soc.integration.soc_core import *
 from litex.soc.integration.builder import *
 from litex.soc.cores.led import LedChaser
 from litex.soc.cores.spi_flash import S7SPIFlash   # config-flash NV via STARTUPE2 (cs=/CRF persist)
+from litex.soc.cores.icap import ICAP              # zelf-herconfiguratie uit SPI: de enige reset die terugkomt
 from litex.soc.interconnect.csr import CSR, CSRStatus, CSRStorage, AutoCSR
 
 from liteeth.phy.s7rgmii import LiteEthPHYRGMII
@@ -1512,6 +1513,54 @@ class AVBSoC(SoCCore):
             pads         = platform.request_all("user_led"),
             sys_clk_freq = sys_clk_freq,
         )
+
+        # ICAP -- SELF-RECONFIGURATION FROM SPI FLASH.
+        #
+        # THE ONLY RESET THAT COMES BACK ON THIS DESIGN. dstats.c has carried
+        # the measurement since the 'R' rate opcode was written: a warm
+        # ctrl_reset "landt in de loader ... gemeten: het bord kwam niet terug,
+        # OOK NIET MET NETLOAD". Confirmed again on 2026-11-07 -- three attempts
+        # at honouring Dante Controller's reboot command (info opcode 0x90) each
+        # left the board silent on the wire and needed the JTAG cable. It is the
+        # reset itself, not the loader (its flash-fallback strings are in
+        # rom.init) and not the image (it passes its own CRC in SPI).
+        #
+        # ICAPE2 with the IPROG command makes the FPGA reload its bitstream from
+        # SPI flash: a full clean boot, the same thing a power cycle does. That
+        # is what lets a static address set from Controller actually be applied,
+        # because net_init() re-reads g_cfg.osc_ip on a real boot.
+        #
+        # Toolchain checked before building, because an unsupported primitive
+        # would waste a seed sweep: yosys knows ICAPE2 as a blackbox
+        # (xilinx/cells_xtra.v, which synth_xilinx reads), the chipdb has the
+        # sites (ICAP_X0Y0 and ICAP_X0Y1 in xc7a50tfgg484.bin) and prjxray-db
+        # carries ICAP wires for xc7a50t.
+        #
+        # THE BANK IS PINNED TO 13, AND IT HAS TO BE.
+        #
+        # "Declare it last" is NOT enough here, and that is worth spelling out
+        # because it is a different rule from the one this file already follows
+        # for CSRs inside a bank. LiteX allocates BANK addresses by sorting the
+        # bank NAMES, so `icap` lands between `ethphy` and `identifier_mem` no
+        # matter where the instantiation sits. Generated with it unpinned, 77
+        # registers moved: every main_* (USB feedback, both ULPI idelays, the
+        # source mux), every mcr_*, rx_gate_*, tsu_* and uart_*. That is exactly
+        # the shift the README warns produces host sample-rate drift and a
+        # missed playout deadline -- "no audio" with perfect packets -- and it
+        # would have silently invalidated the firmware image sitting in SPI
+        # flash, which is the failure that cost three JTAG recoveries today.
+        #
+        # Banks 0..12 are occupied (aaf_pkt, cfgflash, ctrl, ethmac, ethphy,
+        # identifier_mem, leds, main, mcr, rx_gate, timer0, tsu, uart) and
+        # 13..15 are free, so pinning icap at 13 leaves the map PURELY additive:
+        # firmware built against the old header still reads every register at
+        # the address it was built for.
+        #
+        # WBSTAR is left at its reset value of 0, which is where our bitstream
+        # lives (flash.sh --permanent writes it at 0x0), so IPROG needs no
+        # warm-boot address set up first.
+        self.icap = ICAP()
+        self.add_csr("icap", csr_id=13)
 
 # Build ------------------------------------------------------------------------------------------------
 

@@ -1465,7 +1465,21 @@ static void handle_sys_reset(const uint8_t *req, uint32_t len,
     }
     printf("[info] reboot op verzoek van %u.%u.%u.%u (ICAP IPROG)\n",
            src_ip[0], src_ip[1], src_ip[2], src_ip[3]);
-    icap_iprog();                       /* reconfigure from SPI */
+
+    // IPROG: write command 0x0f to the CMD register (0b00100) through ICAPE2
+    // and the FPGA reloads its bitstream from SPI flash -- a full clean boot,
+    // the same thing a power cycle does. Register and command numbers are
+    // UG470's, as carried by litex.soc.cores.icap (ICAPRegisters.CMD = 0b00100,
+    // ICAPCMDs.IPROG = 0b01111).
+    //
+    // No handshake and no wait: the ICAP core's FSM runs on its own divided
+    // clock and the configuration engine takes the die down in the middle of
+    // it. There is nothing left to synchronise with, which is why this does not
+    // poll icap_done -- waiting for a "done" that can never arrive would just
+    // hang here instead of rebooting.
+    icap_addr_write(0x04);              /* CMD register  */
+    icap_data_write(0x0f);              /* IPROG         */
+    icap_write_write(1);
     for (;;) { }
 #else
     (void)spi_image_present;
