@@ -3,8 +3,12 @@
 Everything a fresh session needs to make the IP address settable from Dante
 Controller (DC). Written 2026-11-07, updated the same day after an Apply capture.
 
-**Status:** steps 1 and 2 are on the board: DC shows the address form, and Apply
-reaches the firmware. Step 3 is half done (see "Apply capture"), step 4 is open.
+**Status:** steps 1 to 4 work end to end: DC shows the form, Apply reaches the
+firmware, and Reboot from DC brought the board up on the new address
+(`169.254.9.201`). Open: the reboot record holds the old address after boot
+(see "Reboot from DC").
+
+**The board is now on `169.254.9.201`, not `.200`.**
 
 **Read first:** the firmware running on the board is not what `main`
 (`a9b541b`) contains. `main` sends capabilities `0x1000` and one interface in
@@ -235,6 +239,49 @@ Keeps the current record unchanged and fills the reboot record (flags
 must be rebooted for the changes to take effect", and the address changes at
 boot. This follows from DC's code (`equalConfig` of current vs reboot); it was
 not captured from a real device.
+
+## Reboot from DC (2026-11-07, about 11:40)
+
+After an Apply with `169.254.9.201` (not captured), pressing Reboot in DC
+restarted the board, and it came back on `169.254.9.201`. So the address is
+stored and applied at boot.
+
+### What DC sends
+
+Not captured; this is from `conmon_audinate_init_sys_reset_control` and
+`SysResetControl` in DC:
+
+```
+opcode  07 3d 00 90 00 00 00 64     SYS_RESET, type 144
+content 00 00                       u16 mode: 0 soft reboot, 1 factory reset
+```
+
+The status reply is `SYS_RESET_STATUS` (`0x92`), content a u16 mode. Whether DC
+needs that reply is unknown.
+
+### What the board announces after the reboot
+
+```
+000 00 01 00 00 00 00 03 e8 00 03 02 00 00 00 00 42
+010 a9 fe 09 c9 ff ff 00 00 00 00 00 00 00 00 00 00
+020 00 18 00 30 00 03 00 00 00 04 00 00 a9 fe 09 c8
+030 ff ff 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+```
+
+- Current: `169.254.9.201` / `255.255.0.0`, flags `0x0003`. Right.
+- **Reboot record is backwards:** flags `0x0004` (valid) with `169.254.9.200`,
+  the OLD address. DC reads this as "will be `.200` after the next reboot", so
+  it presumably shows "must be rebooted" again, and if the firmware applies the
+  reboot record at boot, the next reboot goes back to `.200`.
+- The reboot flags lack `0x0002`, so DC may read the pending config as dynamic.
+- `mode` went from 1 to 0. Meaning still unknown.
+
+### Fix
+
+After boot, the reboot record should describe what the next boot will apply:
+the active address (`0x0006`, `.201`), or empty. Only a new Apply should put a
+different address there. Check in DC whether Network Config shows "must be
+rebooted" now; that confirms how DC reads the reboot record.
 
 ### Unrelated, seen in the same capture
 
