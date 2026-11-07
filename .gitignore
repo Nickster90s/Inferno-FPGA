@@ -54,6 +54,11 @@ build_dual_*/
 build_sweep/
 build_sweep.log
 build_usb2_*/
+# En nu op prefix, want de lijst hierboven liep opnieuw achter: build_csrchk2/
+# en build_ring48_s1/ stonden untracked en zijn 229 MB per stuk. Elke
+# build-output van dit project begint met build_, dus dek dat af in plaats van
+# er bij elke nieuwe naam een regel bij te zetten.
+build_*/
 # Verilog-backups van tools/gen_usb_subsystem.py: de originelen zitten in de
 # geschiedenis, dus een kopie op schijf hoort niet in de repo.
 *.pre-dante-bak

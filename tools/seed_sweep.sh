@@ -80,10 +80,32 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 #
 # These are defaults, not overrides -- export them yourself to sweep something
 # else, and build.sh prints and records whatever it ends up with.
+# AND THE FOURTH ONE DECIDES WHETHER THE DESIGN CAN BE PLACED AT ALL.
+# Measured 2026-11-07, immediately after the three lines below were added and
+# still one variable short: all eight seeds hung in HeAP and were killed by the
+# watchdog at ~245 s. The cause was NOT ICAP, not BRAM (63/75, 25% LUT) and not
+# the seed -- it was the FULL USB floorplan box, because NEXTPNR_USB_FP_LIGHT
+# was unset. The two build logs name it exactly:
+#
+#     places (11-06, HeAP 48.71s):  usb_fp 1429 cells (via  585 nets)
+#     hangs  (11-07, 8/8 killed):   usb_fp 3109 cells (via 2359 nets)
+#
+# Same region, same geometry, more than twice the cells. floorplan_usb.py:394
+# gives the numbers as ~697 light / ~3000 full, and DUAL_USB_96K_HANDOFF.md:81
+# records 11 seeds stalling on the full box with no error at all. The full box
+# is infeasible by construction, so this is not a sweepable parameter.
 export BOARD="${BOARD:-breakout}"
 export USB2="${USB2:-1}"
 export USB_DUAL_RATE="${USB_DUAL_RATE:-1}"
-echo "config: BOARD=$BOARD USB2=$USB2 USB_DUAL_RATE=$USB_DUAL_RATE"
+export NEXTPNR_USB_FP_LIGHT="${NEXTPNR_USB_FP_LIGHT:-1}"
+# And the two the README's recipe names that memory kept dropping: the cd_usb
+# over-constraint and the sampling phase. build.sh defaults these too, so this
+# is belt-and-braces -- but a sweep that silently timed usb at 60 instead of
+# 71.43 produced seeds that cannot be compared with the recorded measurements,
+# which happened on 2026-11-07 and cost the third restart of the day.
+export USB_PERIOD_NS="${USB_PERIOD_NS:-14}"
+export USB_PHASE_DEG="${USB_PHASE_DEG:-333}"
+echo "config: BOARD=$BOARD USB2=$USB2 USB_DUAL_RATE=$USB_DUAL_RATE NEXTPNR_USB_FP_LIGHT=$NEXTPNR_USB_FP_LIGHT USB_PERIOD_NS=$USB_PERIOD_NS USB_PHASE_DEG=$USB_PHASE_DEG"
 FIRST="${1:-1}"
 LAST="${2:-8}"
 JOBS="${JOBS:-3}"
@@ -108,12 +130,22 @@ echo "logs: $LOGDIR"
 #
 # Watchdog: if a build's log has not grown for STALL_SECS while HeAP has not yet
 # completed, kill that build and record it as stalled.
-STALL_SECS="${STALL_SECS:-240}"
+# 900, NOT 240. The recipe in README.md uses STALL_SECS=900, and on 2026-11-07
+# the 240 default killed seeds 1 and 3 at ~245 s while HeAP was still working --
+# HeAP itself took 48.7 s on one build and 71.2 s on another, and the log does
+# not grow while it solves, so the quiet window is not a reliable clock. A false
+# stall discards a seed that would have passed; waiting 15 minutes on a real
+# hang only costs time.
+STALL_SECS="${STALL_SECS:-900}"
 
 build_one() {
     local seed="$1"
     local log="$LOGDIR/seed$seed.log"
     local dir="$HERE/build_seed$seed"
+
+    # A marker from a PREVIOUS run would report this fresh build as stalled --
+    # the same stale-intermediate trap as the .d files and the archived csr.h.
+    rm -f "$LOGDIR/seed$seed.stalled"
 
     ( cd "$HERE" && ./build.sh --seed "$seed" --output-dir "$dir" ) > "$log" 2>&1 &
     local bpid=$!
@@ -132,7 +164,29 @@ build_one() {
                     kill -9 "$p" 2>/dev/null
                 fi
             done
-            kill -9 "$bpid" 2>/dev/null
+            # AND THE WRAPPER'S DESCENDANTS. `kill -9 $bpid` kills only the
+            # subshell; build.sh and build_colorlight_i9plus.sh survive it,
+            # keep the inherited log fd open, and go on writing -- which is how
+            # the marker below used to disappear (see the .stalled note).
+            _kill_tree() {
+                local parent="$1" kid
+                for kid in $(pgrep -P "$parent" 2>/dev/null); do _kill_tree "$kid"; done
+                kill -9 "$parent" 2>/dev/null
+            }
+            _kill_tree "$bpid"
+            # THE MARKER GOES IN ITS OWN FILE, NOT IN THE LOG.
+            # It used to be `echo STALLED >> "$log"`, and on 2026-11-07 it was
+            # gone from all eight logs. Mechanism: the appended marker lands at
+            # EOF, while the still-living build scripts write through their
+            # inherited fd at their OWN, lower offset -- the "Killed" line plus
+            # the Python traceback (~1.5 kB) then overwrote it completely, which
+            # is also why all eight logs ended up byte-identical in size. The
+            # table therefore said NOBUILD ("the build failed") instead of
+            # HEAP-STALL ("this configuration has no legal placement"), and that
+            # one word sent the diagnosis to the OOM killer for an hour. A
+            # separate file cannot be overwritten by a process that does not
+            # know about it.
+            : > "$LOGDIR/seed$seed.stalled"
             echo "STALLED" >> "$log"
             return
         fi
@@ -200,7 +254,14 @@ wait
             have=yes
         fi
         verdict=PASS
-        if grep -aq "^STALLED$" "$log"; then
+        # THERE ARE TWO WATCHDOGS AND ONLY ONE WROTE A MARKER WE RECOGNISED.
+        # build.sh has its own stall watchdog, and when IT fires (which it did
+        # for seed 1 on 2026-11-07, after HeAP managed two iterations and then
+        # lay silent for 912 s) no .stalled file is created here -- so a real
+        # HeAP stall was reported as NOBUILD, "the build failed", which points
+        # the diagnosis somewhere else entirely. Match build.sh's message too.
+        if [[ -f "$LOGDIR/seed$s.stalled" ]] || grep -aq "^STALLED$" "$log" \
+           || grep -aq "HeAP STALL: no build output" "$log"; then
             printf "%-6s %-9s %-9s %-11s %-11s %-8s %s\n" \
                    "$s" - - - - HEAP-STALL "do not use"
             continue
