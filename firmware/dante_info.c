@@ -976,7 +976,16 @@ static void send_network_info(const uint8_t *dst_ip, uint16_t dst_port)
     // a new address (see handle_netinfo_write).
     memset(c + o, 0, 0x18 * n_if);
     if (g_if_pend) {
-        put_u16(c, o + 0, 0x0004);              // valid
+        // 0x0004 = valid, 0x0002 = static -- so 0x0006 for a statically
+        // configured pending address. INFERENCE, NOT MEASUREMENT: the
+        // decompile gives 0x0004 as "valid" and
+        // STATIC_ADDRESSING_HANDOFF.md reasons that a static address wants
+        // 0x0006. There is no reference capture to check it against, because
+        // the PRODIGY sends its reboot records ALL ZERO -- it has nothing
+        // pending, so real hardware never showed us a filled-in one. This sent
+        // 0x0004 first; if Controller acts on 0x0006 where it ignored 0x0004,
+        // that is the confirmation.
+        put_u16(c, o + 0, 0x0006);              // valid | static
         memcpy(c + o + 4,  g_if_pend_ip,   4);
         memcpy(c + o + 8,  g_if_pend_mask, 4);
         // DNS at +12 and gateway at +16 stay zero: we have neither, and the

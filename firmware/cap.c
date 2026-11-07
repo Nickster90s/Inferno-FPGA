@@ -186,7 +186,50 @@ void cap_record(uint8_t dir, const uint8_t *frame, uint32_t len)
     // What the host CANNOT see is unicast between the controller and this
     // board, because the switch forwards it only to the destination port. That
     // is the entire reason this ring exists, so that is all it now keeps.
-    if (!unicast) return;
+    //
+    // EXCEPT FOR A FEW CONTROL-PLANE GROUPS, added 2026-11-07. Excluding ALL
+    // multicast left a blind spot big enough to lose a command in: Dante
+    // Controller was asked to reboot this board and the ring recorded nothing
+    // at all -- which is not evidence that DC sent nothing, because anything it
+    // addressed to 224.0.0.231:8702 (the device-info group we actually JOIN)
+    // could never have been recorded. "Saw nothing" and "cannot see" are not
+    // the same statement, and the ring was quietly making the second look like
+    // the first.
+    //
+    // So: inbound multicast is kept for the control ports only, and the four
+    // high-rate groups stay excluded for exactly the reasons above --
+    //   5353 mDNS, 8708 heartbeat : flooded the ring in ~24 s,
+    //   319/320 PTPv1            : several per second per device on the bench.
+    // Those are all visible to a host tcpdump anyway, which is the test for
+    // whether this ring needs to carry them.
+    if (!unicast) {
+        if (dir) return;                       // our own multicast: host sees it
+        uint32_t mihl = (uint32_t)(frame[14] & 0x0F) * 4;
+        uint32_t mu   = 14 + mihl;
+        if (frame[23] != 17 || len < mu + 8) return;
+        uint16_t mdp = (uint16_t)((frame[mu + 2] << 8) | frame[mu + 3]);
+        int keep = (mdp == 8700 || mdp == 8702 || mdp == 8800 ||
+                    mdp == 4440 || mdp == 4455);
+        if (!keep) return;
+
+        // ON THE DEVICE-INFO GROUP, KEEP REQUESTS AND DROP ANNOUNCEMENTS.
+        // Measured 2026-11-07 with the multicast allowance above switched on:
+        // 23 frames reached 224.0.0.231:8702 in 20 s, of which 18 were other
+        // devices' own announcements (opcode version 0x072a: 9x device info
+        // 0x0060 and 9x product info 0x00c0). Those are multicast, so the
+        // switch floods them and a host tcpdump already has them -- and they
+        // cut this ring's retention from ~80 s to ~21 s, which is too short to
+        // survive the gap between someone clicking in Controller and saying so.
+        //
+        // The remaining 5 were version 0x073e opcode 0x0020, which this
+        // firmware does not handle at all. 0x072a is what a DEVICE sends about
+        // itself; 0x073d and 0x073e are what a CONTROLLER sends to ask for
+        // something. Keeping the second class is the whole point.
+        if (mdp == 8702 && len >= mu + 8 + 26) {
+            const uint8_t *mpl = frame + mu + 8;
+            if (mpl[24] == 0x07 && mpl[25] == 0x2a) return;
+        }
+    }
 
     // Media keepalives would own the ring; see cap_is_media() above.
     if (cap_is_media(frame, len)) return;
