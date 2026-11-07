@@ -869,6 +869,20 @@ void dante_info_netinfo_clear(void)
     printf("[info] netinfo overrides cleared\n");
 }
 
+// STATIC ADDRESSING STATE.
+//
+// g_if_static is what we REPORT, not a mode we implement: it says a controller
+// has told us this address is static. g_if_pend* is a REQUESTED address that is
+// not live yet, reported in the reboot records so Controller shows "must be
+// rebooted" -- which is how real Dante hardware behaves and, here, the only
+// honest option: changing g_net_ip under a running stack would strand every
+// bound flow, every ARP cache entry on the segment and our own reply in flight.
+// The address is applied by net_init() out of g_cfg at the next boot.
+static uint8_t g_if_static;
+static uint8_t g_if_pend;
+static uint8_t g_if_pend_ip[4];
+static uint8_t g_if_pend_mask[4];
+
 static void send_network_info(const uint8_t *dst_ip, uint16_t dst_port)
 {
     static const uint8_t op[8] = {0x07, 0x2a, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00};
@@ -910,7 +924,11 @@ static void send_network_info(const uint8_t *dst_ip, uint16_t dst_port)
     put_u16(c, o, 1);    o += 2;              // mode, the value the PRODIGY sends
 
     put_u32(c, o, 1000);   o += 4;            // link speed, Mbps -> "1Gbps"
-    put_u16(c, o, 0x0001); o += 2;            // flags, bit 0 = link up
+    // bit 0 = link up, 0x0002 = statically configured. The PRODIGY's live
+    // interface sends 0x0001 on a link-local address; the 0x0002 bit is the one
+    // DC's own setter writes for "static", so we mirror it back once a write
+    // has told us the address is static.
+    put_u16(c, o, (uint16_t)(0x0001u | (g_if_static ? 0x0002u : 0u))); o += 2;
 
     memcpy(c + o, g_dante.mac, 6); o += 6;
     memcpy(c + o, g_net_ip,    4); o += 4;
@@ -930,11 +948,19 @@ static void send_network_info(const uint8_t *dst_ip, uint16_t dst_port)
     put_u16(c, o, 0x0000);           o += 2;
 
     // Reboot config. The PRODIGY sends these ALL ZERO -- no pending change --
-    // and Controller still offers the form, so nothing is guessed here. Once a
-    // write arrives this is where the address-after-reboot goes, and a value
-    // that differs from the live config is what makes Controller say the device
-    // must be rebooted.
-    memset(c + o, 0, 0x18 * n_if); o += 0x18 * n_if;
+    // and Controller still offers the form, so zero is the resting state. A
+    // value that DIFFERS from the live config is what makes Controller say the
+    // device must be rebooted, which is also the only way this device can apply
+    // a new address (see handle_netinfo_write).
+    memset(c + o, 0, 0x18 * n_if);
+    if (g_if_pend) {
+        put_u16(c, o + 0, 0x0004);              // valid
+        memcpy(c + o + 4,  g_if_pend_ip,   4);
+        memcpy(c + o + 8,  g_if_pend_mask, 4);
+        // DNS at +12 and gateway at +16 stay zero: we have neither, and the
+        // write that set this could not give us one (see below).
+    }
+    o += 0x18 * n_if;
 
     // Overrides last, so a probe can reach any byte including the ones computed
     // above. `o` is 64 here; the arrays are sized to match.
@@ -948,6 +974,173 @@ static void send_network_info(const uint8_t *dst_ip, uint16_t dst_port)
                        NET_TOS_BEST_EFFORT) == 0)
         g_info_stats.tx_info++;
     seqnum++;
+}
+
+// EXECUTING DANTE CONTROLLER'S 0x13 WRITE.
+//
+// Message layout from the conmon_audinate_interface_* setters in
+// libDanteController.dylib, and every field below was then read off the wire:
+// DC's own Apply, captured by the on-device ring (tools/cap_fetch.py), is the
+// only place this message is visible -- it is unicast, and an unmanaged switch
+// forwards it to the board's port alone.
+//
+//   content +00 u8  interface count          DC writes 1
+//           +01 u8  record size              0x1c
+//           +02 u8  field mask               0x0f on a static write
+//           +03 u8  record offset FROM THE OPCODE, i.e. content + (off - 8)
+//           +04 u16 mask      } only for message version >= 0x0602
+//           +06 u16 flags     }
+//   record  +00 u16 interface index
+//           +02 u16 flag values      0x0002 = static
+//           +04 ip   +08 netmask   +12 dns   +16 gateway
+//           +20 u16 which of those flags are valid
+//
+// MEASURED 2026-11-07, three things the decompile left open:
+//   - the interface index COUNTS FROM 0 (DC addressed our only interface as 0),
+//   - the static setter really does send flag values 0x0002 AND valid 0x0002,
+//   - DC retries the write every ~2 s while we answer with an unchanged 0x11.
+//
+// What DC asked for was "make the current address static": index 0, static,
+// 169.254.9.200/255.255.0.0, no DNS, no gateway.
+//
+// WE DO NOT SUPPORT DNS OR A GATEWAY, and a request for either is refused
+// rather than accepted and dropped. There is nothing in this firmware that
+// would use them, and reporting zeros back while having said "fine" is the kind
+// of quiet lie that costs a session to find.
+static int mask_prefix(const uint8_t m[4])
+{
+    if (m[0] == 255 && m[1] == 255 && m[2] == 0   && m[3] == 0) return 16;
+    if (m[0] == 255 && m[1] == 255 && m[2] == 255 && m[3] == 0) return 24;
+    return 0;   // net.c carries a /16 or /24 and nothing else
+}
+
+static int ip_usable(const uint8_t a[4], int prefix)
+{
+    if (a[0] == 0 || a[0] == 127 || a[0] >= 224) return 0;  // zero, loopback, multicast+
+    if (prefix == 16) {
+        if (a[2] == 0   && a[3] == 0)   return 0;           // network address
+        if (a[2] == 255 && a[3] == 255) return 0;           // broadcast
+    } else {
+        if (a[3] == 0 || a[3] == 255)   return 0;
+    }
+    return 1;
+}
+
+static void handle_netinfo_write(const uint8_t *req, uint32_t len,
+                                 const uint8_t src_ip[4], uint16_t src_port)
+{
+    const uint8_t *c    = req + MCAST_HDR_LEN;
+    uint32_t       clen = len - MCAST_HDR_LEN;
+
+    // Every rejection still answers with 0x11. A controller that gets silence
+    // retries forever (measured: every ~2 s); one that gets the current state
+    // can see its request did not take.
+    if (clen < 8) {
+        printf("[info] 0x13 write too short (%lu)\n", (unsigned long)clen);
+        send_network_info(src_ip, src_port);
+        return;
+    }
+
+    uint8_t n_rec = c[0], rsize = c[1], fmask = c[2], roff = c[3];
+
+    if (n_rec < 1 || roff < 8 || rsize < 22) {
+        printf("[info] 0x13 write odd header n=%u rsize=%u off=%u\n",
+               n_rec, rsize, roff);
+        send_network_info(src_ip, src_port);
+        return;
+    }
+    uint32_t off = (uint32_t)roff - 8;
+    if (off + 22 > clen) {
+        printf("[info] 0x13 record runs past the message\n");
+        send_network_info(src_ip, src_port);
+        return;
+    }
+
+    const uint8_t *r    = c + off;
+    uint16_t       idx  = (uint16_t)((r[0] << 8) | r[1]);
+    uint16_t       fval = (uint16_t)((r[2] << 8) | r[3]);
+    uint16_t       fvld = (uint16_t)((r[20] << 8) | r[21]);
+
+    if (idx != 0) {
+        printf("[info] 0x13 for interface %u; we have one, index 0\n", idx);
+        send_network_info(src_ip, src_port);
+        return;
+    }
+
+    if ((fmask & 0x04) && (r[12] | r[13] | r[14] | r[15])) {
+        printf("[info] 0x13 asks for a DNS server; unsupported\n");
+        send_network_info(src_ip, src_port);
+        return;
+    }
+    if ((fmask & 0x08) && (r[16] | r[17] | r[18] | r[19])) {
+        printf("[info] 0x13 asks for a gateway; unsupported\n");
+        send_network_info(src_ip, src_port);
+        return;
+    }
+
+    if (fmask & 0x01) {
+        const uint8_t *ip   = r + 4;
+        const uint8_t *mask = r + 8;
+        int prefix = (fmask & 0x02) ? mask_prefix(mask) : g_net_prefix;
+
+        if (prefix == 0) {
+            printf("[info] 0x13 netmask %u.%u.%u.%u unsupported (/16 or /24)\n",
+                   mask[0], mask[1], mask[2], mask[3]);
+            send_network_info(src_ip, src_port);
+            return;
+        }
+        if (!ip_usable(ip, prefix)) {
+            printf("[info] 0x13 refuses %u.%u.%u.%u/%d\n",
+                   ip[0], ip[1], ip[2], ip[3], prefix);
+            send_network_info(src_ip, src_port);
+            return;
+        }
+
+        // Byte for byte: this libc has memcpy and memset but no memcmp, and
+        // the link failure is the only warning you get.
+        int same = (ip[0] == g_net_ip[0] && ip[1] == g_net_ip[1] &&
+                    ip[2] == g_net_ip[2] && ip[3] == g_net_ip[3]);
+        // cfg_save() WRITES SPI FLASH, AND DC RETRIES EVERY ~2 s. So the
+        // stored value decides whether to write, not the fact that a request
+        // arrived -- otherwise a controller that keeps re-sending the same
+        // address grinds the flash for as long as its dialog is open.
+        int cfg_differs = !(g_cfg.osc_ip[0] == ip[0] && g_cfg.osc_ip[1] == ip[1] &&
+                            g_cfg.osc_ip[2] == ip[2] && g_cfg.osc_ip[3] == ip[3] &&
+                            g_cfg.osc_prefix == (uint8_t)prefix);
+
+        if (same && prefix == g_net_prefix) {
+            // Exactly what we already are: nothing pending, nothing to reboot
+            // for. This is the case DC's first Apply produced. It also CANCELS
+            // an earlier pending change -- setting the address back to what it
+            // is must undo the stored one, or the next boot would still move
+            // the board to an address nobody is asking for any more.
+            g_if_pend = 0;
+            if (cfg_differs) {
+                memcpy(g_cfg.osc_ip, ip, 4);
+                g_cfg.osc_prefix = (uint8_t)prefix;
+                cfg_save();
+                printf("[info] 0x13 cancelt de opgeslagen wijziging\n");
+            }
+        } else {
+            memcpy(g_if_pend_ip, ip, 4);
+            g_if_pend_mask[0] = 255; g_if_pend_mask[1] = 255;
+            g_if_pend_mask[2] = (prefix == 24) ? 255 : 0;
+            g_if_pend_mask[3] = 0;
+            g_if_pend = 1;
+
+            if (cfg_differs) {
+                memcpy(g_cfg.osc_ip, ip, 4);
+                g_cfg.osc_prefix = (uint8_t)prefix;
+                cfg_save();
+                printf("[info] 0x13 -> %u.%u.%u.%u/%d na reboot (opgeslagen)\n",
+                       ip[0], ip[1], ip[2], ip[3], prefix);
+            }
+        }
+    }
+
+    if (fvld & 0x0002) g_if_static = (fval & 0x0002) ? 1 : 0;
+
+    send_network_info(src_ip, src_port);
 }
 
 // ---------------------------------------------------------------------------
@@ -1063,7 +1256,12 @@ static void info_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
     switch (q) {
     case 0x60: case 0x61: send_device_info (src_ip, src_port); break;
     case 0xc0: case 0xc1: send_product_info(src_ip, src_port); break;
-    case 0x13:            send_network_info(src_ip, src_port); break;
+    // Met content is het een WRITE, zonder een query -- hetzelfde patroon als
+    // 0x81 hieronder. DC's query is precies de 32-byte header.
+    case 0x13:
+        if (len > MCAST_HDR_LEN) handle_netinfo_write(req, len, src_ip, src_port);
+        else                     send_network_info(src_ip, src_port);
+        break;
     // Clock stats goes to the DEVICE-INFO MULTICAST GROUP, not back to the
     // requester. inferno sends it to device_info_destination like every other
     // info message, and this deviated from that by replying unicast.

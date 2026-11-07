@@ -8,7 +8,7 @@ requests or our replies -- which is why several "DC sent us nothing"
 conclusions during bring-up were wrong. The board is the only vantage point
 that sees both directions.
 
-    ./tools/cap_fetch.py [board_ip] [--reset]
+    ./tools/cap_fetch.py [board_ip] [--reset] [--bytes N]
 
 Sends a request to :7778; the board ships its ring back on :9997.
 """
@@ -19,6 +19,10 @@ import sys
 BOARD = "169.254.9.200"
 REQ_PORT = 7778
 OUT_PORT = 9997
+
+# How many payload bytes to dump. None = decide per frame (full for the info
+# port, 64 elsewhere); 0 = everything the device captured.
+NBYTES = None
 
 ARC_OPCODES = {
     0x1000: "channel/flow counts", 0x1002: "device name",
@@ -41,9 +45,12 @@ PORTNAMES = {4440: "ARC", 8800: "CMC", 8700: "INFO", 4455: "FLOW",
 
 
 def main():
+    global NBYTES
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     board = args[0] if args else BOARD
     reset = "--reset" in sys.argv
+    if "--bytes" in sys.argv:
+        NBYTES = int(sys.argv[sys.argv.index("--bytes") + 1])
 
     rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -136,7 +143,21 @@ def main():
         print(f"[{t_ms:>8} ms] {arrow} {svc:<9s} {src}:{sp} -> {dst}:{dp} "
               f"len={ln}{note}")
         if note and len(pay) > 10:
-            print(f"             {pay[:64].hex()}")
+            # A TRUNCATED CONTROL MESSAGE IS WORSE THAN NO DUMP. This printed
+            # pay[:64] unconditionally, and on 2026-11-07 that cut Dante
+            # Controller's 68-byte interface WRITE down to 64 -- losing exactly
+            # the domain-name field we were trying to read. The device stores
+            # 256 B per frame, so the bytes were there all along.
+            #
+            # Info-port traffic (8700) is the control plane being reverse
+            # engineered, so it prints in full; ARC replies run to 413 B and
+            # stay clipped unless --bytes says otherwise.
+            lim = NBYTES
+            if lim is None:
+                lim = len(pay) if (sp == 8700 or dp == 8700) else 64
+            d_ = pay if lim == 0 else pay[:lim]
+            for i in range(0, len(d_), 32):
+                print(f"             {d_[i:i+32].hex()}")
     return 0
 
 
