@@ -1432,15 +1432,48 @@ static void handle_sys_reset(const uint8_t *req, uint32_t len,
     }
     g_info_stats.reboot_req++;
 
+    // ctrl_reset DOES NOT PRODUCE A BOOTABLE BOARD ON THIS DESIGN, AND THAT WAS
+    // ALREADY MEASURED BEFORE TODAY. firmware/dstats.c, at the 'R' rate opcode:
+    // "Een reset landt in de loader omdat de firmware in coderam staat en niet
+    // in flash -- gemeten: het bord kwam niet terug, OOK NIET MET NETLOAD."
+    // That note is why the sample rate is applied live instead of by resetting,
+    // and it is the whole answer to why a reboot command cannot simply pulse
+    // the SoC reset here.
+    //
+    // I walked past it three times today. All three attempts left the board
+    // silent on the wire -- no ARP, nothing from its MAC under tcpdump -- and
+    // each one needed the JTAG cable. The SPI image was not the problem: the
+    // ROM loader demonstrably contains the flash fallback (its "[ldr] flash
+    // image" strings are in build_seed8's rom.init) and the image at 0x300000
+    // now passes its own CRC. The reset itself is what does not come back,
+    // presumably because a warm CPU reset leaves the clocking or the PHY in a
+    // state phy_init() does not restore.
+    //
+    // THE RIGHT MECHANISM ON A 7-SERIES PART IS ICAPE2 WITH IPROG, which makes
+    // the FPGA reconfigure itself out of SPI flash -- a full clean boot, the
+    // same thing a power cycle does, which is exactly what a Dante device does
+    // for a static-address change. LiteX has the core (litex.soc.cores.icap);
+    // the current gateware does not instantiate it, so there is no CSR for it.
+    //
+    // So this refuses, loudly and countably, instead of bricking. The moment
+    // ICAP is in the gateware this compiles into the working path and the SPI
+    // precondition below is already the right one to check first.
+#ifdef CSR_ICAP_BASE
     if (!spi_image_present()) {
         g_info_stats.reboot_refused++;
         return;
     }
-
-    printf("[info] reboot op verzoek van %u.%u.%u.%u\n",
+    printf("[info] reboot op verzoek van %u.%u.%u.%u (ICAP IPROG)\n",
            src_ip[0], src_ip[1], src_ip[2], src_ip[3]);
-    ctrl_reset_write(1);
-    for (;;) { }                        /* reset is onderweg */
+    icap_iprog();                       /* reconfigure from SPI */
+    for (;;) { }
+#else
+    (void)spi_image_present;
+    g_info_stats.reboot_unsupported++;
+    printf("[info] reboot van %u.%u.%u.%u GEWEIGERD: deze gateware heeft geen "
+           "ICAP, en ctrl_reset komt op dit ontwerp niet terug (gemeten)\n",
+           src_ip[0], src_ip[1], src_ip[2], src_ip[3]);
+#endif
 }
 
 static void info_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],

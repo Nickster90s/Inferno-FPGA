@@ -31,6 +31,7 @@ typedef struct {
     uint32_t reboot_req;        /* 0x90 arrived with action 0x0001          */
     uint32_t reboot_odd;        /* 0x90 arrived with some other action      */
     uint32_t reboot_refused;    /* refused: no usable image in SPI flash    */
+    uint32_t reboot_unsupported;/* refused: no ICAP, so no way to reboot    */
 } dante_info_stats_t;
 extern dante_info_stats_t g_info_stats;
 

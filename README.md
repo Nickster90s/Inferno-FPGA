@@ -1337,6 +1337,95 @@ place: `tools/dante_board.py`, overridable per invocation.
 DANTE_BOARD=169.254.9.77 tools/stats.py      # flash.sh honours it too
 ```
 
+### Controller's Reboot button: info opcode `0x90`
+
+Measured off the wire 2026-11-07, which was the only way: the command is unicast
+to our info port, and it was invisible for one round of looking because the
+capture ring dropped all multicast and so could not tell "DC sent nothing" from
+"we cannot see it".
+
+```
+RX INFO 169.254.228.170:8700 -> :8700  len 78
+ffff 0024 6a5d 0000 c8a362ebd51a0000 "Audinate" 07 3d 00 90 00 00 00 64
+00 01 00 00
+```
+
+36 bytes, four of content, version `0x073d` (a **controller** asking for
+something, against `0x072a` which is a device talking about itself), preceded by
+a CMC `0x1001` device-advertisement request — the same two-step DC uses before
+the `0x13` interface write. **Sent exactly once, with no retry**, unlike that
+write which it repeats every ~2 s: a reboot needs no acknowledgement, because
+the device going away is the acknowledgement. So we answer nothing.
+
+inferno does not handle `0x90` at all, so there is no reference for it. Only
+action `0x0001` is honoured here; the capability byte at `content[0x17]` of
+`0x60` is annotated "identify / rate config / reboot / factory reset" with the
+bits never isolated, so `0x90` may be a family of system commands with the u16
+selecting which. Anything else is counted and logged, not obeyed.
+
+**But the reboot is REFUSED, because `ctrl_reset` does not come back on this
+design — and that was measured before today.** `firmware/dstats.c`, at the `'R'`
+rate opcode: *"Een reset landt in de loader omdat de firmware in coderam staat
+en niet in flash — gemeten: het bord kwam niet terug, **ook niet met
+netload**."* That note is why the sample rate is applied live rather than by
+resetting, and it is the whole reason a reboot command cannot simply pulse the
+SoC reset. It was walked past three times on 2026-11-07; all three attempts left
+the board silent on the wire (no ARP, nothing from its MAC under `tcpdump`) and
+each needed the JTAG cable.
+
+The SPI image was **not** the problem, and ruling that out is worth recording:
+the ROM loader demonstrably contains the flash fallback (its `[ldr] flash image`
+strings are present in `build_seed8`'s `rom.init`) and the image at `0x300000`
+passes its own CRC after `--permanent`. The reset itself does not come back,
+presumably because a warm CPU reset leaves the clocking or the PHY in a state
+`phy_init()` does not restore.
+
+**The right mechanism on a 7-series part is ICAPE2 with IPROG**, which makes the
+FPGA reconfigure itself out of SPI flash — a full clean boot, the same thing a
+power cycle does, which is what a Dante device does for a static-address change.
+LiteX has the core (`litex.soc.cores.icap`); this gateware does not instantiate
+it, so there is no CSR for it and the handler refuses, countably
+(`reboot_unsupported`), rather than bricking. It compiles into the working path
+the moment ICAP is added.
+
+So the remaining work for a self-service address change is **one gateware
+change**: instantiate ICAP. Everything else is in place — the `0x13` write, the
+persistence, a matching image in SPI, the interlock and the command itself.
+
+**The interlock, and why it needed two attempts.** This firmware runs from
+coderam. A reset enters the loader, which waits for netload and falls through to
+the SPI image at `0x300000` — and **halts** if that image is not loadable. So
+honouring a reboot on a board that has only had volatile loads turns one click
+in Controller into a JTAG recovery.
+
+The first version checked only the magic and a plausible length, with a comment
+admitting it did not cover "flashed but since corrupted" and arguing that case
+was far-fetched. It was not: the first test passed that check, reset the board,
+and the board did not come back. It now streams the image out of SPI in
+256-byte chunks and verifies the CRC with the same bitwise IEEE CRC-32 the
+loader applies — an interlock that does not check what the loader checks is not
+an interlock. It costs ~100 ms of stalled main loop and will glitch the flows,
+which is the right trade for a rare operator action that ends in a reset anyway.
+
+**And the limit that bit next:** the interlock proves an image is *loadable*, not
+that it *matches the running gateware*. This board's SPI already held an `INFN`
+image with a valid CRC, from older firmware built against a different CSR map,
+which comes up mute. The image header carries no map identity, so nothing in the
+firmware can tell. What closes it is `./flash.sh --permanent`, which writes the
+bitstream and the firmware from one tree and refuses a `csr.h` mismatch.
+
+**Observability**, because the shipping build has no console:
+
+```bash
+tools/stats.py --info      # 'I' -> 'INF1'
+```
+
+reports `reboot_req` / `reboot_odd` / `reboot_refused`. Without them a board that
+stays up after the button is pressed is indistinguishable between "DC sent
+nothing", "we did not recognise it" and "we refused". It has its own reply
+rather than extra words on the main one: growing that from 200 to 208 bytes once
+killed the port outright.
+
 ### Secondary network: why there is only a primary
 
 **Decision 2026-11-07: primary only.** Not because the protocol is unknown — we

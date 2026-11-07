@@ -72,7 +72,7 @@ def read_ring(board):
 
 # INFO-PORT STATS ('I' -> 'INF1'). Separate reply for the same reason as --ring.
 INFO_NAMES = ["info_rx", "info_rx_unknown", "info_tx", "info_tx_heartbeat",
-              "reboot_req", "reboot_odd", "reboot_refused"]
+              "reboot_req", "reboot_odd", "reboot_refused", "reboot_unsupported"]
 
 def read_info(board):
     """{} of counters, "silent" if nothing answered, "old" if something did but
@@ -120,6 +120,14 @@ def print_info(r):
               " If Controller's button was pressed, either it sent nothing or"
               " the frame never arrived -- check the capture ring for an"
               " inbound 0x90 on the info port before blaming the firmware.")
+    elif r.get("reboot_unsupported"):
+        print(f"  VERDICT: {rq} reboot command(s) arrived and"
+              f" {r['reboot_unsupported']} were refused because this GATEWARE"
+              " has no ICAP. A warm ctrl_reset does not come back on this"
+              " design -- measured, see the note at handle_sys_reset() -- so"
+              " refusing is the correct answer until ICAPE2/IPROG is"
+              " instantiated. Nothing is wrong with the firmware or the SPI"
+              " image.")
     elif rr:
         print(f"  VERDICT: {rq} reboot command(s) arrived and {rr} were REFUSED"
               " -- there is no usable firmware image in SPI flash at 0x300000,"

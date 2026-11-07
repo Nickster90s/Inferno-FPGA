@@ -487,6 +487,7 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         put32(pi, ni, g_info_stats.reboot_req);     ni += 4;
         put32(pi, ni, g_info_stats.reboot_odd);     ni += 4;
         put32(pi, ni, g_info_stats.reboot_refused); ni += 4;
+        put32(pi, ni, g_info_stats.reboot_unsupported); ni += 4;
         net_udp_commit(src_ip, src_port, STATS_PORT, ni, NET_TOS_BEST_EFFORT);
         return;
     }
