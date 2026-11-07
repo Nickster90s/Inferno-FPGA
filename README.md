@@ -181,6 +181,20 @@ proportional to actual subscriptions (0.03 Mbit/s idle).
 
 ## Open bugs
 
+**Open: `ptp_locked` drops and comes back, and two independent sources see it.**
+Controller's own log has this device repeatedly losing and regaining clock sync
+(2026-11-06 18:07–18:43, 2026-11-07 09:41–09:45), and `tools/stats.py` caught
+`ptp_locked` going 1 → 0 within 20 s on 2026-11-07 at a raw offset of about
+−12 µs. Audio kept flowing through all of it — an 18-hour run with `underrun`
+stable and `disables 0` — so it costs no samples that we can measure, but it
+should not happen. Not investigated.
+
+Note that `offset_ns` in the `?` reply is the **raw** PTP sample, not the servo
+output, so isolated 15–50 µs excursions in it are normal and are not evidence
+of anything; `tools/telemetry.py` carries raw **and** filtered per servo update,
+and that is the right source for the real clock error. Half a day was spent in
+2026-11-04 reporting those raw spikes as clock disturbance.
+
 **Fixed (2026-11-04): Main's ULPI input eye sat beyond the delay line — both
 PHYs are now clean at once.** The Backup PHY measured perfect while Main lost
 ~1.3% of real audio, which a listener heard as crackle and then as drift: the
@@ -1254,6 +1268,74 @@ Neither is a dependency; both are read as specifications.
   under `statime/src/datastructures/messages_v1/`. Permissively licensed, so
   safe to reference or vendor. `statime-stm32/src/ptp_clock.rs` is a good
   template for mapping a PTP servo onto a hardware addend register.
+
+### Setting the IP from Dante Controller
+
+Controller's Network Config tab said **"This device does not support static
+addressing"**, and that was the device's own answer, not a network problem.
+`IVersions.hasStaticIp()` in `DanteController.jar` is
+`inferredCapabilities & 0x4000` — **bit 14 of the capabilities u32 at
+`content[0x14]` of the `0x60` versions message**. A PRODIGY1-32 sends
+`0x0e7cd65b` with that bit set; we sent `0x000010db` without it. One byte in
+`firmware/dante_info.c`:
+
+```c
+c[0x16] = 0x10 | 0x40;      /* 0x40 == bit 14 == network configurable */
+```
+
+Everything tried before that was in the wrong message, and each was ruled out
+by measurement: four extra `0x1100` keys, a unicast mDNS reply, `arcp_vers`
+2.8.15 (a regression — audio kept flowing but Controller stopped showing the
+subscription as patched), the `dbc` and `chan` services, the `0x3320` code, the
+extended `0x1000` form, CMC registration, and a second interface in `0x11`.
+That last one made Controller draw primary **and** secondary, which looked like
+progress; both halves stayed grey.
+
+**`0x11` interface status** and **`0x13` interface control** are laid out in
+`STATIC_ADDRESSING_HANDOFF.md`, derived from the
+`conmon_audinate_interface_*` accessors in `libDanteController.dylib` and then
+checked byte for byte against a real PRODIGY. Four things the decompile left
+open were settled by capturing Controller's own Apply — unicast, so the
+board's capture ring (`tools/cap_fetch.py`) is the only vantage point:
+
+- the **interface index counts from 0**,
+- the static setter sends flag values `0x0002` **and** flags-valid `0x0002`,
+- the record is `0x1c` bytes with `+22..+27` zero and the domain-name offset at
+  `+24` equal to 0,
+- Controller **retries the write every ~2 s** until the answer reflects it —
+  which is why `cfg_save()` is gated on the stored value changing, or an open
+  dialog would grind the SPI flash.
+
+We report **one** interface, because the gateware instantiates one RGMII PHY.
+The PRODIGY reports two because it has a redundant port.
+
+**A new address is applied by a reboot, not live.** It goes to `g_cfg.osc_ip`,
+which `main.c` already feeds to `net_init()` at boot, and is reported in the
+`0x11` reboot records — that is what makes Controller say the device must be
+rebooted, and it is how real Dante hardware behaves. Writing `g_net_ip` under a
+running stack would strand every bound flow, every ARP cache entry on the
+segment and the reply still in flight. Setting the address back to the live one
+cancels a stored change.
+
+**The reboot is not self-service yet.** The firmware lives in coderam, not
+flash, so a reset lands in the loader and does not come back without
+`tools/netload.py`; the UART RX is not wired on this breakout, so `'r'` on the
+console does nothing. A JTAG reconfigure (`./flash.sh`) is the only reset, and
+it requires the audio to be stopped.
+
+**This device is statically configured by construction** — it reads its address
+out of `g_cfg` at every boot and has no DHCP client and no link-local
+negotiation — so the `0x0002` interface flag is unconditional, and a write
+asking to stop being static, or to turn on DHCP or link-local assignment, is
+refused rather than accepted and ignored. 169.254.x.x sitting in the link-local
+*range* is not the same as link-local *assigned*.
+
+Because Controller can move the address, the board's management IP lives in one
+place: `tools/dante_board.py`, overridable per invocation.
+
+```bash
+DANTE_BOARD=169.254.9.77 tools/stats.py      # flash.sh honours it too
+```
 
 ### Decoded on this bench — not in inferno
 
