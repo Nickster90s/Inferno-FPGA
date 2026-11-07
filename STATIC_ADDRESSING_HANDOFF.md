@@ -1,12 +1,16 @@
 # Handoff: static addressing from Dante Controller
 
 Everything a fresh session needs to make the IP address settable from Dante
-Controller (DC). Written 2026-11-07. Nothing here is implemented or tested yet.
+Controller (DC). Written 2026-11-07, updated the same day after an Apply capture.
 
-**Read first:** the firmware running on the board is newer than this repo's
-`a9b541b`. The repo sends capabilities `0x1000` and one interface in `0x11`; the
-board sends `0x10db` and two. Check the code you are editing against the live
-bytes below, and re-query the board (see "Querying a device").
+**Status:** steps 1 and 2 are on the board: DC shows the address form, and Apply
+reaches the firmware. Step 3 is half done (see "Apply capture"), step 4 is open.
+
+**Read first:** the firmware running on the board is not what `main`
+(`a9b541b`) contains. `main` sends capabilities `0x1000` and one interface in
+`0x11`. The other branches (`ring-pointers-48bit`, `fpp-arbitrary-wip`) and the
+November tags were not checked. Compare the code you edit against the live bytes
+below.
 
 ---
 
@@ -150,15 +154,19 @@ Flags in `+2` and `+20`:
 | DHCP on / off | `0x0020` | `0` / `0x0020` |
 | link-local on / off | `0x0008` | `0` / `0x0008` |
 
+### Confirmed by the Apply capture
+
+- The interface index counts from 0.
+- DC sends field mask `0x0f` with ip, netmask, dns and gateway, so `0x02` is
+  netmask.
+- Static is flag value `0x0002` with `0x0002` in the valid-flags field.
+
 ### Inferred, not confirmed
 
 - In status flags, bit 0 means link up and `0x0002` means static. The status
   initialiser derives bit 0 from speed being non-zero and masks the caller's
-  flags with `0x0002`. If right, the FPGA should send `0x0003`.
-- `0x02` in the field mask means netmask. The `0x01`, `0x04` and `0x08` bits were
-  read from their getters; the netmask getter was not read.
-- Whether the interface index counts from 0 or 1.
-- What `mode` means (Prodigy 1, FPGA 0).
+  flags with `0x0002`.
+- What `mode` means (Prodigy 1, FPGA 0 in the old firmware, 1 now).
 - What the reboot record's flags should be for a static address, probably
   `0x0006`.
 
@@ -181,6 +189,65 @@ In `firmware/dante_info.c`:
 Do step 1 and 2 first, then capture DC pressing Apply to settle the inferred
 items.
 
+## Apply capture (2026-11-07 10:35)
+
+46 s on the Mac's `en8`, DC at `169.254.228.170`, after steps 1 and 2 were on
+the board. The board now announces capabilities `0x000050db` (bit 14 set) and
+this `0x11`, one interface:
+
+```
+000 00 01 00 01 00 00 03 e8 00 01 02 00 00 00 00 42
+010 a9 fe 09 c8 ff ff 00 00 00 00 00 00 00 00 00 00
+020 00 18 00 30 00 03 00 00 00 00 00 00 00 00 00 00
+030 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+```
+
+### What DC sends on Apply
+
+From `169.254.228.170:8700` to `169.254.9.200:8700`, opcode `07 3d 00 13 00 00 00 64`:
+
+```
+000 01 1c 0f 10 00 00 00 00 00 00 00 02 a9 fe 09 c8
+010 ff ff 00 00 00 00 00 00 00 00 00 00 00 02 00 00
+020 00 00 00 00
+```
+
+That is interface 0, static, `169.254.9.200` / `255.255.0.0`, no dns, no
+gateway. It is the board's current address, so this capture cannot tell a
+change from no change. Retest with a different address.
+
+DC sent the same write again 2 s later. It repeats its other requests (`0xc1`,
+the empty `0x13`) once after 2 s too, so the repeat is not by itself a failure.
+No reboot command followed.
+
+### What the board answers
+
+`0x11` with interface flags `0x0003` instead of `0x0001`: the firmware applies
+static at once. The reboot record stays empty (offset `0x30`, all zeros).
+
+At 10:36:29, after the capture, the multicast `0x11` went back to flags
+`0x0001`. Cause unknown: Revert or dynamic in DC, or a reboot.
+
+### What a real device presumably does
+
+Keeps the current record unchanged and fills the reboot record (flags
+`0x0004 | 0x0002`, new ip, netmask, dns, gateway). DC then shows "This device
+must be rebooted for the changes to take effect", and the address changes at
+boot. This follows from DC's code (`equalConfig` of current vs reboot); it was
+not captured from a real device.
+
+### Unrelated, seen in the same capture
+
+- **ARC `0x4100` storm:** DC sent 11,732 identical `0x4100` requests to 4440 in
+  46 s (up to ~1000/s), body
+  `0000000000000000000100000001000000000000830283060310`. The firmware answers
+  code `0x30` (`dante_arc.c`, copied from inferno), and DC keeps retrying. A real
+  device's answer to `0x4100` is not known.
+- **Queries from other ports go unanswered:** the board answers DC's 8700→8700
+  requests, but no longer answered queries sent from an ephemeral port, as the
+  old firmware did. Send queries from port 8700, or listen on `224.0.0.231:8702`
+  for the 3 s announcements.
+
 ## Capturing and querying
 
 Sniffing needs root on the Mac. DC runs there, on `en8`:
@@ -191,7 +258,8 @@ sudo tcpdump -i en8 -s0 -w /tmp/dc-static.pcap host 169.254.9.200
 
 ### Querying a device
 
-No root needed. Send a 32-byte header to UDP 8700; replies arrive on the
+No root needed. Send a 32-byte header to UDP 8700 (from source port 8700 for
+the current firmware); replies arrive on the
 requesting socket or on `224.0.0.231:8702`, so listen on both (`SO_REUSEPORT`,
 joined on the Dante interface). An empty `0x13` is only a query, and is safe on
 real devices. Never add a body when querying the Prodigy.
