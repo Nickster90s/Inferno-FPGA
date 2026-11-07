@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Read the board's runtime counters over UDP (the UART belongs to picocom)."""
 import socket, struct, sys, time
+from dante_board import BOARD as _BOARD
 # "sendreq_busy" HEETTE "overrun". Het is send_req dat midden in een traversal
 # landt, wat pend[] alsnog serveert: BENIGNE, en op een gezonde 96 kHz-stroom
 # loopt het met 11k-28k/s. Onder de oude naam las dat als massale sample-loss en
@@ -89,45 +90,61 @@ def print_ring(r):
               "is not occupancy yet (rd is parked, the level is modular). "
               "ring_level_min is meaningless until enables >= 1.")
         return
-    # AN INVERSION IS AN EPISODE, AND ONLY THE EPISODE COUNTERS SEE ONE.
+    # THE THREE COUNTERS MEAN THREE DIFFERENT THINGS, AND I HAVE NOW GOT THIS
+    # WRONG IN BOTH DIRECTIONS. Written out so the next reader does not have to
+    # rediscover it:
     #
-    # ring_underflow counts the RISING EDGE of a negative level and ring_unprime
-    # counts the hysteresis dropping out. ring_level_min is a sticky minimum
-    # with no edge behind it, so it also records the one sample taken as `en`
-    # goes high -- at that instant `rd` is still parked at its reset value while
-    # `wr` has been climbing with USB samples, and the difference is modulo
-    # 4*SRING_DEPTH. That sample can be deeply negative on a ring that then runs
-    # for hours without a single underflow episode.
+    #   ring_underflow  episodes where the level went NEGATIVE -- rd passed wr,
+    #                   i.e. samples were emitted that were never written. THIS
+    #                   IS THE FAULT. It must be 0.
+    #   ring_unprime    episodes where the prime hysteresis dropped out, which
+    #                   happens at level < FRAME_SAMPLES -- a LOW level, not
+    #                   necessarily a negative one. This is the SAFETY NET
+    #                   FIRING, not the fault. It holds rd until wr catches up
+    #                   and re-primes at centre in ~11 ms.
+    #   ring_level_min  a sticky minimum with no edge behind it, so it also
+    #                   records the one sample taken as `en` goes high, when rd
+    #                   is still parked at its reset value and the difference is
+    #                   modulo 4*SRING_DEPTH. That can read deeply negative on a
+    #                   ring that then runs for hours clean.
     #
-    # Measured 2026-11-07, right after a reload: level_min -2856 with
-    # ring_underflow 0 AND ring_unprime 0, level_raw a healthy 1072, audio
-    # flowing and the peak meter correct. Judging that on level_min alone said
-    # "ring inverted" about a ring that never inverted -- the same wolf this
-    # project has now cried twice (the other was -4096 before `en` gated the
-    # sampling at all). So: the episode counters decide, and a negative minimum
-    # without an episode is reported as what it is.
-    bad = []
-    if r.get("ring_underflow"): bad.append("ring_underflow is NOT 0")
-    if r.get("ring_unprime"):   bad.append("ring_unprime is NOT 0")
-    if bad:
-        print("  VERDICT: ring inverted at least once -- " + ", ".join(bad) +
-              ". The hysteresis recovers in ~11 ms, so this is a glitch, but"
-              " the route is supposed to be impossible with 48-bit pointers.")
-    elif r.get("ring_level_min", 0) < 0:
-        print("  VERDICT: no inversion episode (ring_underflow 0, ring_unprime"
-              f" 0), but ring_level_min is {r['ring_level_min']}. That is"
-              " consistent with the single sample taken as the talker was"
-              " enabled, when rd was still parked. NOT an inversion during"
-              " operation. If level_min keeps dropping while both episode"
+    # Measured 2026-11-07, two boots of the same bitstream: one showed
+    # level_min -2856 with both episode counters 0, the other level_min 0 with
+    # ring_unprime 1 -- in both cases level_raw was healthy, audio was flowing
+    # and the peak meter was correct. First this function called the first case
+    # an inversion, then it called the second one an inversion. Neither was.
+    uf = r.get("ring_underflow", 0)
+    up = r.get("ring_unprime", 0)
+    mn = r.get("ring_level_min", 0)
+
+    if uf:
+        print(f"  VERDICT: THE RING INVERTED -- ring_underflow {uf}. rd passed"
+              " wr, so samples went out that were never written. The hysteresis"
+              " recovers in ~11 ms, but with 48-bit pointers this route is"
+              " supposed to be impossible: find out how it was reached.")
+        return
+    if up:
+        print(f"  VERDICT: no inversion (ring_underflow 0), but the prime guard"
+              f" fired {up}x -- the level dipped below one frame and rd was held"
+              " until wr caught up. ONE episode at the talker's first enable is"
+              " expected, because rd starts parked. A count that CLIMBS while"
+              " running means the level is grazing the floor and a re-prime will"
+              " eventually be audible. Read this twice to tell those apart.")
+    elif mn < 0:
+        print(f"  VERDICT: no episode at all (ring_underflow 0, ring_unprime 0)"
+              f" but ring_level_min is {mn}. That is the sample taken as the"
+              " talker was enabled, with rd still parked -- not an inversion"
+              " during operation. If level_min keeps dropping while both episode"
               " counters stay 0, the edge detector is what is wrong.")
     else:
-        print("  VERDICT: the ring has never inverted since boot.")
+        print("  VERDICT: the ring has never inverted and the prime guard has"
+              " never fired since boot.")
 
 if __name__ == "__main__":
-    board = sys.argv[1] if len(sys.argv) > 1 else "169.254.9.200"
+    board = sys.argv[1] if len(sys.argv) > 1 else _BOARD
     secs = int(sys.argv[2]) if len(sys.argv) > 2 else 0
     if board == "--ring" or (len(sys.argv) > 2 and sys.argv[2] == "--ring"):
-        if board == "--ring": board = "169.254.9.200"
+        if board == "--ring": board = _BOARD
         print_ring(read_ring(board))
         sys.exit(0)
     a = read(board)

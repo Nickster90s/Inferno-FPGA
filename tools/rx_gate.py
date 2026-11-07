@@ -24,6 +24,7 @@ import socket
 import struct
 import sys
 import time
+from dante_board import BOARD as _BOARD
 
 PORT = 7779
 TAG = 0x52584731  # 'RXG1'
@@ -93,7 +94,7 @@ def watch(board, secs):
 
 
 def main():
-    board = "169.254.9.200"
+    board = _BOARD
     args = sys.argv[1:]
     if args and args[0].count(".") == 3:
         board = args.pop(0)

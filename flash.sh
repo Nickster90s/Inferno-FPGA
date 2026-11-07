@@ -22,7 +22,10 @@ OCD_TCL=/home/lisp/openocd/tcl
 TOOLS=/home/lisp/FPGA/Colorlight-FPGA-Projects/tools
 CFG=$TOOLS/ch347.cfg
 IFACE=${IFACE:-ens5}
-BOARD=${BOARD:-169.254.9.200}
+# The board's management address. Dante Controller can SET this now (the 0x13
+# write in firmware/dante_info.c), so it is a variable rather than a literal and
+# the Python tools read the same one out of tools/dante_board.py.
+BOARD=${BOARD:-${DANTE_BOARD:-169.254.9.201}}
 
 # WHICH BITSTREAM. bitstreams/dual-usb-96k_2026-11-03_seed8_VERIFIED.bit is the
 # one that was VALIDATED on hardware WITH BOTH PHYS: 48 ch @ 96 kHz on each

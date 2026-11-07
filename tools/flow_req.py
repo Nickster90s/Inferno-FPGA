@@ -39,9 +39,10 @@ import argparse
 import socket
 import struct
 import sys
+from dante_board import BOARD as _BOARD
 
 ap = argparse.ArgumentParser()
-ap.add_argument("board", nargs="?", default="169.254.9.200")
+ap.add_argument("board", nargs="?", default=_BOARD)
 ap.add_argument("--slots", type=int, default=4)
 ap.add_argument("--fpp", type=int, default=60)
 ap.add_argument("--port", type=int, default=14336, help="destination UDP port")

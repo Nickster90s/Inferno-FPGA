@@ -7,10 +7,11 @@
 # firmware timestamped against the gaps we actually sent. Absolute offset does
 # not matter -- only whether the SHAPE is reproduced.
 import os, socket, struct, subprocess, sys, time
+from dante_board import BOARD as _BOARD
 
 D = os.path.dirname(os.path.abspath(__file__))
 PCAP = os.path.join(D, "probe2.pcap")
-FPGA = sys.argv[1] if len(sys.argv) > 1 else "169.254.9.200"
+FPGA = sys.argv[1] if len(sys.argv) > 1 else _BOARD
 
 GAPS_MS = [5, 40, 7, 60, 12, 5, 90, 20, 5, 35, 8, 70, 15, 5, 50, 25]
 

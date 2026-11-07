@@ -28,10 +28,11 @@ import socket
 import time
 import struct
 import sys
+from dante_board import BOARD as _BOARD
 
 OSC_PORT = 9000
 CTRL_PORT = 7779
-BOARD_DEFAULT = "169.254.9.200"
+BOARD_DEFAULT = _BOARD
 TAG_DUAL = 0x55534232      # 'USB2'
 TAG_SINGLE = 0x55534231    # 'USB1'
 

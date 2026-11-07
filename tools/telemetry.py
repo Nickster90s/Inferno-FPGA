@@ -37,6 +37,7 @@ import socket
 import struct
 import sys
 import time
+from dante_board import BOARD as _BOARD
 
 PORT = 7779
 TAG = 0x544C4D31  # 'TLM1'
@@ -124,7 +125,7 @@ COLS = ["seq", "t_ms", "kind", "flags", "event", "a", "b",
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("board", nargs="?", default="169.254.9.200")
+    ap.add_argument("board", nargs="?", default=_BOARD)
     ap.add_argument("--csv")
     ap.add_argument("--secs", type=float, default=0, help="0 = until Ctrl-C")
     ap.add_argument("--poll", type=float, default=0.5)

@@ -34,8 +34,9 @@ import struct
 import subprocess
 import sys
 import socket
+from dante_board import BOARD as _BOARD
 
-BOARD = "169.254.9.200"
+BOARD = _BOARD
 PORT = 7779
 IFACE = "ens5"
 SCRATCH = "/tmp/ts_offset_cal.pcap"

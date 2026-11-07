@@ -67,9 +67,10 @@ import socket
 import struct
 import sys
 import time
+from dante_board import BOARD as _BOARD
 
 CTRL_PORT = 7779
-BOARD_DEFAULT = "169.254.9.200"
+BOARD_DEFAULT = _BOARD
 TAG_FLW3 = 0x464C5733          # stride 11 + a 7-word why-counter trailer
 TAG_FLW2 = 0x464C5732          # per-flow stride 11 words
 TAG_FLW1 = 0x464C5731          # older firmware: stride 8, no cookie/ka columns

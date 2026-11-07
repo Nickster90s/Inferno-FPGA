@@ -9,6 +9,7 @@ gateware state (and therefore the wedge) intact -- proven twice, 2026-08-12 and
 2026-08-13.
 """
 import socket, struct, sys, time
+from dante_board import BOARD as _BOARD
 
 # "sendreq_busy" heette "overrun" en is BENIGNE (send_req midden in een
 # traversal; pend[] serveert hem alsnog). "write_drops" achteraan is de teller
@@ -30,7 +31,7 @@ def read(board):
 
 
 def main():
-    board = sys.argv[1] if len(sys.argv) > 1 else "169.254.9.200"
+    board = sys.argv[1] if len(sys.argv) > 1 else _BOARD
     a = read(board); t0 = time.time(); time.sleep(5.0); b = read(board)
     dt = time.time() - t0
     for k in FIELDS[1:]:

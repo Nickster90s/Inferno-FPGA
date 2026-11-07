@@ -871,14 +871,23 @@ void dante_info_netinfo_clear(void)
 
 // STATIC ADDRESSING STATE.
 //
-// g_if_static is what we REPORT, not a mode we implement: it says a controller
-// has told us this address is static. g_if_pend* is a REQUESTED address that is
-// not live yet, reported in the reboot records so Controller shows "must be
-// rebooted" -- which is how real Dante hardware behaves and, here, the only
-// honest option: changing g_net_ip under a running stack would strand every
-// bound flow, every ARP cache entry on the segment and our own reply in flight.
-// The address is applied by net_init() out of g_cfg at the next boot.
-static uint8_t g_if_static;
+// THIS DEVICE IS ALWAYS STATICALLY CONFIGURED, so the 0x0002 interface flag is
+// unconditional. net_init() takes its address from g_cfg.osc_ip at every boot
+// (main.c); there is no DHCP client and no link-local negotiation anywhere in
+// this firmware. 169.254.9.200 sitting in the link-local RANGE does not make it
+// link-local ASSIGNED -- the PRODIGY reports 0x0001 on its own 169.254 address
+// because it auto-assigned that address, which is a different thing.
+//
+// This started out as a g_if_static flag set by a controller's write, and that
+// was wrong in a way the reboot exposed: the flag lived in RAM, so the board
+// would come up from a write it had just honoured reporting the address as NOT
+// static. The device's actual behaviour does not depend on being told.
+//
+// g_if_pend* is a REQUESTED address that is not live yet, reported in the
+// reboot records so Controller shows "must be rebooted" -- which is how real
+// Dante hardware behaves and, here, the only honest option: changing g_net_ip
+// under a running stack would strand every bound flow, every ARP cache entry on
+// the segment and our own reply in flight.
 static uint8_t g_if_pend;
 static uint8_t g_if_pend_ip[4];
 static uint8_t g_if_pend_mask[4];
@@ -924,11 +933,9 @@ static void send_network_info(const uint8_t *dst_ip, uint16_t dst_port)
     put_u16(c, o, 1);    o += 2;              // mode, the value the PRODIGY sends
 
     put_u32(c, o, 1000);   o += 4;            // link speed, Mbps -> "1Gbps"
-    // bit 0 = link up, 0x0002 = statically configured. The PRODIGY's live
-    // interface sends 0x0001 on a link-local address; the 0x0002 bit is the one
-    // DC's own setter writes for "static", so we mirror it back once a write
-    // has told us the address is static.
-    put_u16(c, o, (uint16_t)(0x0001u | (g_if_static ? 0x0002u : 0u))); o += 2;
+    // bit 0 = link up, 0x0002 = statically configured -- see the note above
+    // on why the second bit is not conditional on anything.
+    put_u16(c, o, 0x0003); o += 2;
 
     memcpy(c + o, g_dante.mac, 6); o += 6;
     memcpy(c + o, g_net_ip,    4); o += 4;
@@ -1067,6 +1074,29 @@ static void handle_netinfo_write(const uint8_t *req, uint32_t len,
         return;
     }
 
+    // ADDRESSING MODES WE DO NOT HAVE. Flag bits from DC's own setters
+    // (STATIC_ADDRESSING_HANDOFF.md): 0x0002 static, 0x0020 DHCP, 0x0008
+    // link-local, each paired with a "which flags are valid" mask. Asking this
+    // firmware to stop being static, or to start doing DHCP or link-local
+    // assignment, is asking for code that does not exist -- so it is refused
+    // rather than accepted and ignored. Turning OFF something we never had is a
+    // no-op and passes.
+    if ((fvld & 0x0002) && !(fval & 0x0002)) {
+        printf("[info] 0x13 wil niet-statisch; dit apparaat kan alleen static\n");
+        send_network_info(src_ip, src_port);
+        return;
+    }
+    if ((fvld & 0x0020) && (fval & 0x0020)) {
+        printf("[info] 0x13 wil DHCP; geen DHCP-client aanwezig\n");
+        send_network_info(src_ip, src_port);
+        return;
+    }
+    if ((fvld & 0x0008) && (fval & 0x0008)) {
+        printf("[info] 0x13 wil link-local toewijzing; niet geimplementeerd\n");
+        send_network_info(src_ip, src_port);
+        return;
+    }
+
     if ((fmask & 0x04) && (r[12] | r[13] | r[14] | r[15])) {
         printf("[info] 0x13 asks for a DNS server; unsupported\n");
         send_network_info(src_ip, src_port);
@@ -1137,8 +1167,6 @@ static void handle_netinfo_write(const uint8_t *req, uint32_t len,
             }
         }
     }
-
-    if (fvld & 0x0002) g_if_static = (fval & 0x0002) ? 1 : 0;
 
     send_network_info(src_ip, src_port);
 }

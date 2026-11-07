@@ -15,8 +15,9 @@ Sends a request to :7778; the board ships its ring back on :9997.
 import socket
 import struct
 import sys
+from dante_board import BOARD as _BOARD
 
-BOARD = "169.254.9.200"
+BOARD = _BOARD
 REQ_PORT = 7778
 OUT_PORT = 9997
 

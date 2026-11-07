@@ -35,6 +35,7 @@ import struct
 import subprocess
 import sys
 import time
+from dante_board import BOARD as _BOARD
 
 PORT = 7779
 TAG_TAP = 0x54415031          # 'TAP1'
@@ -125,7 +126,7 @@ def speed(port, timeout=5.0):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--board", default="169.254.9.200")
+    ap.add_argument("--board", default=_BOARD)
     ap.add_argument("--phy", default="main", choices=("main", "backup"))
     ap.add_argument("--port", type=int, default=None,
                     help="hub port (default 8 for main, 10 for backup)")

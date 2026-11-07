@@ -26,9 +26,10 @@ import socket
 import struct
 import sys
 import time
+from dante_board import BOARD as _BOARD
 
 PORT = 7779
-BOARD_DEFAULT = "169.254.9.200"
+BOARD_DEFAULT = _BOARD
 TAG_DUAL   = 0x55534232   # 'USB2' - dual-USB build
 TAG_SINGLE = 0x55534231   # 'USB1' - built without USB2=1
 
@@ -148,7 +149,7 @@ def show(board):
 
 
 def main():
-    board = "169.254.9.200"
+    board = _BOARD
     args = sys.argv[1:]
     if args and args[0].count(".") == 3:
         board = args.pop(0)
