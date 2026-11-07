@@ -89,16 +89,39 @@ def print_ring(r):
               "is not occupancy yet (rd is parked, the level is modular). "
               "ring_level_min is meaningless until enables >= 1.")
         return
+    # AN INVERSION IS AN EPISODE, AND ONLY THE EPISODE COUNTERS SEE ONE.
+    #
+    # ring_underflow counts the RISING EDGE of a negative level and ring_unprime
+    # counts the hysteresis dropping out. ring_level_min is a sticky minimum
+    # with no edge behind it, so it also records the one sample taken as `en`
+    # goes high -- at that instant `rd` is still parked at its reset value while
+    # `wr` has been climbing with USB samples, and the difference is modulo
+    # 4*SRING_DEPTH. That sample can be deeply negative on a ring that then runs
+    # for hours without a single underflow episode.
+    #
+    # Measured 2026-11-07, right after a reload: level_min -2856 with
+    # ring_underflow 0 AND ring_unprime 0, level_raw a healthy 1072, audio
+    # flowing and the peak meter correct. Judging that on level_min alone said
+    # "ring inverted" about a ring that never inverted -- the same wolf this
+    # project has now cried twice (the other was -4096 before `en` gated the
+    # sampling at all). So: the episode counters decide, and a negative minimum
+    # without an episode is reported as what it is.
     bad = []
-    if r.get("ring_underflow"):   bad.append("ring_underflow is NOT 0")
-    if r.get("ring_level_min", 0) < 0: bad.append("ring_level_min went negative")
-    # Stated as the fault it means, not as a number to interpret later.
-    print("  VERDICT: " + ("ring inverted at least once -- " + ", ".join(bad) +
-                           ". The hysteresis recovers in ~11 ms, so this is a"
-                           " glitch, but the route is supposed to be impossible"
-                           " with 48-bit pointers."
-                           if bad else
-                           "the ring has never inverted since boot."))
+    if r.get("ring_underflow"): bad.append("ring_underflow is NOT 0")
+    if r.get("ring_unprime"):   bad.append("ring_unprime is NOT 0")
+    if bad:
+        print("  VERDICT: ring inverted at least once -- " + ", ".join(bad) +
+              ". The hysteresis recovers in ~11 ms, so this is a glitch, but"
+              " the route is supposed to be impossible with 48-bit pointers.")
+    elif r.get("ring_level_min", 0) < 0:
+        print("  VERDICT: no inversion episode (ring_underflow 0, ring_unprime"
+              f" 0), but ring_level_min is {r['ring_level_min']}. That is"
+              " consistent with the single sample taken as the talker was"
+              " enabled, when rd was still parked. NOT an inversion during"
+              " operation. If level_min keeps dropping while both episode"
+              " counters stay 0, the edge detector is what is wrong.")
+    else:
+        print("  VERDICT: the ring has never inverted since boot.")
 
 if __name__ == "__main__":
     board = sys.argv[1] if len(sys.argv) > 1 else "169.254.9.200"

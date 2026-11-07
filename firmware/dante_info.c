@@ -437,9 +437,20 @@ static void send_device_info(const uint8_t *dst_ip, uint16_t dst_port)
     // projectregel, tegenover een bit verzinnen die plausibel lijkt. Stuurt DC
     // zo'n commando, dan komt het in de unhandled-query log van info_rx() --
     // daar zie je het, in plaats van dat het stil verdwijnt.
+    // BIT 14 OF THIS u32 IS WHAT UNGREYS DANTE CONTROLLER'S NETWORK CONFIG.
+    // Decompiled from DanteController.jar: StaticAddressesPane prints "This
+    // device does not support static addressing" unless IVersions.hasStaticIp(),
+    // which is `inferredCapabilities & 0x4000` of the capabilities u32 at
+    // content[0x14] of THIS message -- so 0x40 in c[0x16]. The PRODIGY1-32
+    // reference sends 0x0e7cd65b (bit set); we sent 0x000010db (clear). Every
+    // earlier attempt -- four extra 0x1100 keys, a unicast mDNS reply,
+    // arcp_vers, the dbc and chan services, a second interface in 0x11 -- was
+    // looking in the wrong message. The same bit in the READ-ONLY capabilities
+    // means hasReadOnlyStaticIp(), which draws the form but keeps it locked, so
+    // it belongs here and nowhere else.
     c[0x14] = 0;
     c[0x15] = 0;
-    c[0x16] = 0x10;
+    c[0x16] = 0x10 | 0x40;
     c[0x17] = 0xdb;
     c[0xbb] = 0x1f;
 
@@ -867,27 +878,63 @@ static void send_network_info(const uint8_t *dst_ip, uint16_t dst_port)
     uint8_t *c = p + n;
     uint32_t o = 0;
 
-    static const uint8_t lead[6] = {0x00, 0x01, 0x00, 0x00, 0x00, 0x00};
-    memcpy(c + o, lead, 6); o += 6;
+    // Layout from the conmon_audinate_interface_* accessors in
+    // libDanteController.dylib, checked byte for byte against a PRODIGY1-32's
+    // reply (STATIC_ADDRESSING_HANDOFF.md):
+    //
+    //   +0   u16 interface count n
+    //   +2   u16 mode
+    //   +4   n records of 28 bytes:
+    //          u32 link speed Mbps, u16 flags, mac[6], ip, netmask, dns, gateway
+    //   then u16 0x0018  reboot record size
+    //        u16 offset  of the reboot records, 28*n + 0x14, counted from the
+    //                    OPCODE, which is 8 bytes before this content
+    //        u16 message flags
+    //        u16 0
+    //   then n reboot records of 0x18 bytes
+    //
+    // This was already the right shape -- the bytes used to be a `lead[6]` and
+    // a `tail[32]` blob with the fields unnamed, which is why patching it at
+    // runtime produced a message that no longer parsed (the handoff's "FPGA
+    // interface 2 shifted by 2 bytes" is one of those probes, not this code).
+    //
+    // ONE interface, because the gateware instantiates one RGMII PHY
+    // (avb_soc.py: platform.request("eth", 1)). The PRODIGY reports two because
+    // it has a redundant port; claiming a second one here would be advertising
+    // hardware that does not exist. It is also not what unlocks the form:
+    // patching this message to n=2 made Controller draw primary AND secondary,
+    // both still grey. The capability bit in 0x60 is what does it.
+    const uint32_t n_if = 1;
 
-    put_u16(c, o, 1000); o += 2;              // link speed, Mbps -> "1Gbps"
-    put_u16(c, o, 1);    o += 2;
+    put_u16(c, o, n_if); o += 2;
+    put_u16(c, o, 1);    o += 2;              // mode, the value the PRODIGY sends
+
+    put_u32(c, o, 1000);   o += 4;            // link speed, Mbps -> "1Gbps"
+    put_u16(c, o, 0x0001); o += 2;            // flags, bit 0 = link up
 
     memcpy(c + o, g_dante.mac, 6); o += 6;
     memcpy(c + o, g_net_ip,    4); o += 4;
 
-    // Netmask from the prefix, then gateway (none) and DNS (same).
+    // Netmask from the prefix, then DNS and gateway -- we have neither. The
+    // order is the decompiled one; it used to be commented the other way round,
+    // which was invisible because both are zero.
     uint8_t mask[4] = {255, 255, 0, 0};
     if (g_net_prefix == 24) { mask[2] = 255; }
     memcpy(c + o, mask, 4); o += 4;
-    memset(c + o, 0, 4);    o += 4;           // gateway
     memset(c + o, 0, 4);    o += 4;           // DNS
+    memset(c + o, 0, 4);    o += 4;           // gateway
 
-    static const uint8_t tail[32] = {
-        0x00, 0x18, 0x00, 0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-    };
-    memcpy(c + o, tail, 32); o += 32;
+    put_u16(c, o, 0x0018);           o += 2;  // reboot record size
+    put_u16(c, o, 28 * n_if + 0x14); o += 2;  // reboot record offset
+    put_u16(c, o, 0x0003);           o += 2;  // message flags, as the PRODIGY
+    put_u16(c, o, 0x0000);           o += 2;
+
+    // Reboot config. The PRODIGY sends these ALL ZERO -- no pending change --
+    // and Controller still offers the form, so nothing is guessed here. Once a
+    // write arrives this is where the address-after-reboot goes, and a value
+    // that differs from the live config is what makes Controller say the device
+    // must be rebooted.
+    memset(c + o, 0, 0x18 * n_if); o += 0x18 * n_if;
 
     // Overrides last, so a probe can reach any byte including the ones computed
     // above. `o` is 64 here; the arrays are sized to match.

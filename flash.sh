@@ -7,6 +7,8 @@
 #   ./flash.sh --fw-only       firmware only, over Ethernet (no bitstream)
 #
 #   --bit PATH                 use a specific bitstream
+#   --build-dir PATH           gateware tree whose csr.h the firmware compiles
+#                              against (default build/colorlight_i9plus)
 #
 # DEFAULT IS VOLATILE, DELIBERATELY. `pld load` writes SRAM configuration, so a
 # power cycle falls back to whatever is in SPI flash -- the cheapest possible
@@ -82,6 +84,7 @@ while [[ $# -gt 0 ]]; do
         --unlock)       MODE=unlock ;;
         --fw-only)      MODE=fwonly ;;
         --bit)          BIT="$2"; shift ;;
+        --build-dir)    BUILD_DIR="$2"; shift ;;
         -h|--help)      sed -n '2,14p' "$0"; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 1 ;;
     esac
@@ -142,11 +145,50 @@ if [[ -n "$_busy" ]] && [[ "$FLASH_ALLOW_STREAMING" != "1" ]]; then
     exit 1
 fi
 
+# ---- THE FIRMWARE MUST COMPILE AGAINST THE FLASHED BITSTREAM'S HEADERS ----
+#
+# Not just for the CSR ADDRESSES the block comment above is about. Optional
+# features are guarded by #ifdef on generated CSR NAMES, and a header that
+# lacks one takes the #else BRANCH WITHOUT A WORD. On 2026-11-07 the board ran
+# 18 hours reporting all 48 channels silent and refusing the 'r' ring-health
+# opcode, because this script's `make -C firmware` compiled against
+# build/colorlight_i9plus, whose csr.h was three days old. The only symptom was
+# a grey meter in Dante Controller, which is indistinguishable from a working
+# meter on a silent input.
+#
+# So: every archived bitstream has its csr.h stored NEXT TO IT as <name>.csr.h
+# (that is the bitstreams/ convention). When that sibling exists, compare it
+# with the headers we are about to compile against and REFUSE on a mismatch,
+# rather than producing a binary that is subtly wrong.
+BUILD_DIR=${BUILD_DIR:-build/colorlight_i9plus}
+GEN_CSR="$BUILD_DIR/software/include/generated/csr.h"
+
+if [[ "$MODE" != "unlock" ]]; then
+    REF_CSR="${BIT%.bit}.csr.h"
+    if [[ -n "$BIT" && -f "$REF_CSR" && -f "$GEN_CSR" ]]; then
+        if ! diff -q <(grep '^#define' "$REF_CSR") <(grep '^#define' "$GEN_CSR") >/dev/null; then
+            echo "*** CSR HEADER MISMATCH" >&2
+            echo "***   bitstream : $BIT" >&2
+            echo "***   its csr.h : $REF_CSR" >&2
+            echo "***   compiling against: $GEN_CSR" >&2
+            echo "*** Differing defines (< bitstream, > build tree):" >&2
+            diff <(grep '^#define' "$REF_CSR") <(grep '^#define' "$GEN_CSR") \
+                 | grep '^[<>]' | head -20 >&2
+            echo "*** Pass --build-dir with the tree this bitstream came from" >&2
+            echo "*** (see the 'bron:' line in ${BIT%.bit}.info)." >&2
+            exit 1
+        fi
+        echo "csr.h matches the bitstream ($REF_CSR)"
+    elif [[ -n "$BIT" && ! -f "$REF_CSR" ]]; then
+        echo "NOTE: no $REF_CSR next to the bitstream -- cannot verify the CSR map."
+    fi
+fi
+
 # Always build the firmware: "flash the latest version" must not ship a stale
 # binary just because someone forgot to run make.
 if [[ "$MODE" != "unlock" ]]; then
-    echo "=== building firmware ==="
-    make -C firmware 2>&1 | tail -3
+    echo "=== building firmware (BUILD_DIR=$BUILD_DIR) ==="
+    BUILD_DIR="$(cd "$BUILD_DIR" && pwd)" make -C firmware 2>&1 | tail -12
 fi
 
 case "$MODE" in
