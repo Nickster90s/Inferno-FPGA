@@ -222,7 +222,7 @@ Both PHYs streaming 48 ch / 96 kHz simultaneously with random data: leak +0.00%
 on each, `write_drops` 0, `underrun` 0.0/s, ring at 66 against a servo target of
 64, 24016 packets/s, `rx_crc_err` 0, PTP locked.
 
-> **Three measurement rules this cost us a day to learn.**
+> **Four measurement rules, each one paid for.**
 >
 > 1. **Test a clocked bus with RANDOM data, never `/dev/zero`.** The same
 >    bitstream and the same tap measured 0.0000% with zeros and +1.28% with
@@ -241,6 +241,17 @@ on each, `write_drops` 0, `underrun` 0.0/s, ring at 66 against a servo target of
 >    including the CH347 you would reflash with. `flash.sh` now refuses. Recovery
 >    without a reboot: unbind then bind `0000:00:14.0` on
 >    `/sys/bus/pci/drivers/xhci_hcd`.
+> 4. **Clear the host's ARP entry before concluding the board is dead.** Added
+>    2026-11-07, after it produced a confident and completely wrong diagnosis
+>    ("the board is sitting in the loader") while the firmware had been running
+>    the whole time. `jtagspi_program` loads a proxy bitstream to reach the
+>    flash, so the design stops and restarts; on the way back the cached entry
+>    goes stale while still printing `REACHABLE`, and ping returns 100% loss
+>    with `pipe 2`. The loader and the application firmware share one MAC
+>    (`02:00:00:00:00:42`), so nothing about the entry looks wrong. One command
+>    settles it: `sudo ip neigh del 169.254.9.200 dev ens5`. Check USB too — a
+>    board whose USB devices are freshly enumerated has booted, whatever the
+>    network says.
 
 Build that produced this (reproducible — see the seed entry below):
 
@@ -249,6 +260,23 @@ BOARD=breakout USB2=1 USB_DUAL_RATE=1 NEXTPNR_USB_FP_LIGHT=1 \
 USB_PERIOD_NS=14 USB_PHASE_DEG=333 STALL_SECS=900 \
 ./build.sh --seed 1 --output-dir build_phase333_s1
 ```
+
+**That recipe is now `build.sh`'s default, and it stopped being optional on
+2026-11-07.** Two consecutive eight-seed sweeps were lost to assembling it from
+memory — three hours. The first set none of it and built the single-USB 48 kHz
+chip (every log healthy, zero `ulpi2` lines in the XDC). The second set three of
+the four `NEXTPNR_*`/`USB*` switches and hung all eight seeds, because without
+`NEXTPNR_USB_FP_LIGHT=1` the full USB floorplan box is infeasible by
+construction: the build that places has 1429 cells in `usb_fp`, the eight that
+hung had 3109 in the same region, and nothing else differed.
+
+So `./build.sh` with no arguments now builds this configuration; any variable
+set explicitly is kept, and `DANTE_PROFILE=none` opts out entirely. Every build
+writes **all 23** switches the design reads to `$OUT_DIR/build_config.txt`,
+derived from `avb_soc.py` and `floorplan_usb.py` rather than hand-listed, so a
+new switch cannot quietly fall out of the record and a build directory can
+always be asked what it is. Reporting a mistake in a log that is read after the
+build is weaker than making the mistake impossible.
 
 Timing: sys 55.52, usb 69.98, usb2 61.18, eth_rx 140.96, eth_tx 142.63 MHz —
 all five past their real requirements. The `FAIL` lines in that log are against
@@ -662,6 +690,39 @@ own. Seed 1 once had the highest clean sys Fmax (63.54) and the LOWEST USB
 margin (79.62), and flashed, the MacBook enumerated the audio device and showed
 **no outputs at all**. Prefer the higher `USB_MHz` when seeds tie, then confirm
 on hardware -- see the header of `tools/seed_sweep.sh`.
+
+**Current build: seed 5, 2026-11-07, with ICAP in the netlist.** Six of eight
+seeds passed all five clock floors on the corrected recipe (seed 6 failed on
+both USB domains, seed 1 was a genuine HeAP stall after two iterations and
+912 s of silence).
+
+| seed | sys | usb | usb2 | weakest USB | eth_tx | eth_rx |
+|---|---|---|---|---|---|---|
+| 2 | 65.09 | 67.15 | 67.91 | 67.15 | 152.16 | 135.26 |
+| 3 | 63.69 | 68.64 | 66.77 | 66.77 | 145.48 | 177.02 |
+| 4 | 58.95 | 68.94 | 66.16 | 66.16 | 139.86 | 134.44 |
+| **5** | **61.90** | **67.71** | **70.73** | **67.71** | **167.59** | **132.64** |
+| 7 | 55.97 | 61.83 | 67.27 | 61.83 | 154.92 | 147.71 |
+| 8 | 55.44 | 64.52 | 67.41 | 64.52 | 151.75 | 151.13 |
+
+Picked on the **weakest USB domain**, which is how "prefer the higher `USB_MHz`"
+generalises once there are two PHYs: both carry a 60 MHz ULPI bus and the
+failure mode (ingress leak) is per-PHY, so the worst of the two is what decides.
+Seed 4 has the highest Main and the lowest Backup — the wrong trade. Confirmed
+on hardware, both PHYs streaming 48 ch at 96 kHz simultaneously **with random
+data**: leak `+0.0000%` on each, `ep_out` 18,432,197 and 18,432,190 B/s against
+an expected 18,432,000 (**+0.001%**), `sample_overflow` 0, and unchanged across
+an OSC handover. Written to SPI with `--permanent`; `build_seed5/` is the
+validated artifact, not the number 5.
+
+One trap on the way, worth the line: `STALL_SECS` defaulted to 240 in the sweep
+while the recipe uses 900, and that killed seeds 1 and 3 mid-HeAP. Seed 3 then
+passed cleanly on the retry with `HeAP Placer Time: 79.99s`. HeAP takes 49-80 s
+here and the log does not grow while it solves, so a short quiet window throws
+away good seeds. And the sweep reported those kills as `NOBUILD` rather than
+`HEAP-STALL`, because the marker was written into the same file the dying build
+still held an open fd on and got overwritten -- the tell being that all eight
+logs came out byte-identical in size. The marker now lives in its own file.
 
 **Settings and the RX patch do not survive a reboot.** `cfgflash.c` / `config.c`
 already persist a versioned, CRC'd blob in SPI flash — static IP, media-clock
@@ -1363,8 +1424,8 @@ action `0x0001` is honoured here; the capability byte at `content[0x17]` of
 bits never isolated, so `0x90` may be a family of system commands with the u16
 selecting which. Anything else is counted and logged, not obeyed.
 
-**But the reboot is REFUSED, because `ctrl_reset` does not come back on this
-design — and that was measured before today.** `firmware/dstats.c`, at the `'R'`
+**A reboot is not what this ends up doing, and the first reason is that
+`ctrl_reset` does not come back on this design — measured before today.** `firmware/dstats.c`, at the `'R'`
 rate opcode: *"Een reset landt in de loader omdat de firmware in coderam staat
 en niet in flash — gemeten: het bord kwam niet terug, **ook niet met
 netload**."* That note is why the sample rate is applied live rather than by
@@ -1380,17 +1441,103 @@ passes its own CRC after `--permanent`. The reset itself does not come back,
 presumably because a warm CPU reset leaves the clocking or the PHY in a state
 `phy_init()` does not restore.
 
-**The right mechanism on a 7-series part is ICAPE2 with IPROG**, which makes the
-FPGA reconfigure itself out of SPI flash — a full clean boot, the same thing a
-power cycle does, which is what a Dante device does for a static-address change.
-LiteX has the core (`litex.soc.cores.icap`); this gateware does not instantiate
-it, so there is no CSR for it and the handler refuses, countably
-(`reboot_unsupported`), rather than bricking. It compiles into the working path
-the moment ICAP is added.
+#### ICAPE2 with IPROG looked like the answer. It cannot work on this flow.
 
-So the remaining work for a self-service address change is **one gateware
-change**: instantiate ICAP. Everything else is in place — the `0x13` write, the
-persistence, a matching image in SPI, the interlock and the command itself.
+The textbook mechanism on a 7-series part is ICAPE2 with IPROG: write `0x0f` to
+the CMD register (`0b00100`) and the FPGA reconfigures itself out of SPI flash,
+a full clean boot. LiteX has the core, it was instantiated (`icap`, pinned at
+`csr_id=13`), and the firmware did everything the references ask for — WBSTAR
+then CMD=IPROG, through a core that sends the full sync sequence and
+bit-reverses every byte as ICAPE2 requires.
+
+**It does not reconfigure. Measured 2026-11-07 on the first real press of the
+button:**
+
+- The FPGA did **not** reset. USB stayed enumerated on the same device numbers,
+  so the fabric was untouched; only the CPU stopped, in the infinite loop that
+  used to follow the ICAP write.
+- The SPI read path was not at fault: the interlock immediately before had
+  streamed the whole image out of flash and verified its CRC.
+- `tools/icap.py` then read **every** ICAP register as `0x00000000` — IDCODE and
+  STAT included — **while `icap_done` arrived every single time**. So the
+  divided ICAP clock runs, LiteX's FSM completes, and ICAPE2's `O` bus returns
+  nothing.
+
+The reason is in prjxray, and it is structural. The whole `CFG_CENTER_MID` tile
+has **nine** documented features where a CLB tile has 680:
+
+```
+CFG_CENTER_MID.BSCAN.JTAG_CHAIN_1..4
+CFG_CENTER_MID.DCIRESET.ENABLED              <- activation bit for DCIRESET
+CFG_CENTER_MID.ICAP.ICAP_WIDTH_X16
+CFG_CENTER_MID.ICAP.ICAP_WIDTH_X8            <- width attribute only
+CFG_CENTER_MID.STARTUP.PROG_USR
+CFG_CENTER_MID.STARTUP.USRCCLKO_CONNECTED    <- activation bit for STARTUPE2
+```
+
+DCIRESET has an `ENABLED` bit. STARTUPE2 has `USRCCLKO_CONNECTED` — which is
+exactly the "Vivado-only property" the open-source community hits on flash
+access, and having it characterised is *why* the `S7SPIFlash` core works here.
+**ICAP has no activation or connected bit at all.** The site is routed — the
+FASM wires all 32 `I` and 32 `O` pins plus `CLK`, `CSIB` and `RDWRB` — and never
+switched on, and no openXC7 bitstream can switch it on, because nobody ever
+fuzzed the bit. That is an inference from the sibling sites in the same tile
+rather than a proof, and it fits every measurement.
+
+Nor is there a counter-example in the wild: nobody reports a working IPROG on an
+open-source 7-series bitstream, openXC7's own fork confirms ICAPE2 only as far
+as place-and-route, and the one project that documents the warm-boot steps
+[records that the commands were never
+run](https://github.com/fpgas-online/fpgas.online-docs/issues/126).
+
+A smaller lesson came with it. The ICAP write was followed by `for (;;) { }`,
+justified in a comment: a successful IPROG takes the die down mid-sequence, so
+there is nothing to synchronise with and polling `icap_done` could only hang.
+True of a *successful* IPROG — and it ignored the other case entirely, which
+turned one failed ICAP write into a dead board until a power cycle. **An
+unbounded wait on hardware that may not answer is not robustness, it is a
+latch.** The wait is now bounded and the handler survives.
+
+#### So the Reboot button does not reboot: it applies the address live.
+
+Which is the better answer regardless. A reconfiguration drops the USB device
+mid-transfer, and 48 channels of USB audio are the product — xHCI can take the
+whole host controller down when a device vanishes underneath it. A real Dante
+chip reboots for an address change because that is how its firmware is built,
+not because a network stack needs it.
+
+This costs almost nothing, because **nothing in this firmware caches our IP**:
+`mdns.c`, `dante_cmc.c`, `dante_tx.c`, `dante_info.c` and `net.c` all read
+`g_net_ip` at the moment they build a packet. The one cached copy is the AAF
+packetizer's `src_ip` CSR — it emits audio with no CPU in the loop — so that
+write was factored out of `dante_tx_init()` into `dante_tx_set_src_ip()` and is
+re-latched. The mDNS A record goes out with the cache-flush class
+(`DNS_C_IN_FLUSH`), so a single `mdns_announce()` replaces the old address in
+every resolver on the link. PTPv1's group is re-joined because a membership
+report carries the source address.
+
+It is applied from `dante_info_poll()`, not in the packet path: the `0x13` write
+that stored the address was acknowledged long before, `0x90` gets no reply, and
+changing `g_net_ip` underneath a handler still parsing a frame addressed to the
+old IP is the kind of re-entrancy that costs an evening.
+
+**Measured, .200 → .201 → .200, with both PHYs streaming 48 ch at 96 kHz
+throughout:**
+
+| | before | after both changes |
+|---|---|---|
+| USB device numbers | 110 / 111 | **110 / 111 — no re-enumeration** |
+| USB stream status | `Running` 96 kHz | `Running` 96 kHz |
+| `packets` | 1,042,129 | 2,355,767 — **continued, never reset** |
+| `underrun` | 126 | **126 — not one new underrun** |
+| mDNS | `.200` | followed to `.201` and back |
+
+`flows_active` dips 2 → 1 for a few seconds, because a receiver's flow was bound
+to the old source IP; it returns to 2 on its own, `flows_rejected 0`. A reboot
+would do that too, and take the audio with it.
+
+So a self-service address change needs **no** gateware change. `reboot_applied`
+counts it; `reboot_nochange` counts a press with nothing queued.
 
 **The interlock, and why it needed two attempts.** This firmware runs from
 coderam. A reset enters the loader, which waits for netload and falls through to
@@ -1420,7 +1567,9 @@ bitstream and the firmware from one tree and refuses a `csr.h` mismatch.
 tools/stats.py --info      # 'I' -> 'INF1'
 ```
 
-reports `reboot_req` / `reboot_odd` / `reboot_refused`. Without them a board that
+reports `reboot_req` / `reboot_odd` / `reboot_refused` /
+`reboot_unsupported` / `reboot_applied` / `reboot_nochange`, and prints a
+verdict that names which of those cases happened. Without them a board that
 stays up after the button is pressed is indistinguishable between "DC sent
 nothing", "we did not recognise it" and "we refused". It has its own reply
 rather than extra words on the main one: growing that from 200 to 208 bytes once

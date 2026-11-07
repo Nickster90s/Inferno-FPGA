@@ -165,6 +165,60 @@ static void mclk_rx(const uint8_t src_ip[4], uint16_t src_port,
     net_udp_commit(src_ip, src_port, STATS_PORT, n, NET_TOS_BEST_EFFORT);
 }
 
+#ifdef CSR_ICAP_BASE
+// ICAP CONFIGURATION REGISTER READ -- THE TEST THAT SETTLES WHETHER ICAPE2
+// WORKS AT ALL UNDER openXC7, AND IT IS NON-DESTRUCTIVE.
+//
+// Measured 2026-11-07: Dante Controller's Reboot (info 0x90) reached the
+// firmware, the firmware verified the SPI image and wrote IPROG to the CMD
+// register, and the FPGA DID NOT RECONFIGURE. USB stayed enumerated on the same
+// device numbers (103/104), so the fabric never reset; only the CPU stopped,
+// in the deliberate infinite loop that used to sit after the ICAP write. That
+// rules out the flash read path -- the CRC check immediately before it had
+// streamed the whole image out of SPI successfully -- and points at the ICAPE2
+// site itself. The config engine never saw the command.
+//
+// What is already ruled out by inspecting the bitstream:
+//   - routing: the FASM wires the site completely, all 32 I and 32 O pins plus
+//     CLK (from CFG_CENTER_CLK1_6), CSIB and RDWRB.
+//   - width: no ICAP_WIDTH feature is emitted, and that is CORRECT -- prjxray
+//     encodes ICAP_WIDTH_X8 and ICAP_WIDTH_X16 as three set bits each, so "no
+//     bits" is the X32 default that litex.soc.cores.icap asks for.
+//   - the LiteX core: it sends the full sync sequence, bit-reverses every byte
+//     as ICAPE2 requires, and desyncs afterwards.
+//
+// So a READ decides it. IDCODE must come back as 0x0362c093, the same value
+// JTAG reports for this XC7A50T. If it does, then sync, byte and bit order,
+// width and clocking are all correct and the fault is specifically the warm
+// boot. If it reads 0x00000000 or 0xffffffff, ICAPE2 is not functional in an
+// openXC7 bitstream and self-reset through ICAP is a dead end on this flow --
+// which is a thing worth knowing before any more of the Reboot button is built
+// on top of it.
+//
+// Procedure is the one in LiteX's own ICAP test (gist enjoy-digital/
+// 7ec47f1e9f2668cff4e2e3919671e9e1): set addr, raise `read`, wait for `done`,
+// read `data` WHILE done is still high (the core writes read_data back into the
+// same CSR under `If(self.done, ...)`), then lower `read`.
+//
+// BOUNDED. `done` can never arrive if the site is dead, and an unbounded wait
+// here would wedge the board exactly as the old reboot path did.
+#define ICAP_SPIN_LIMIT 200000u
+
+static uint32_t icap_reg_read(uint8_t reg, uint32_t *timed_out)
+{
+    icap_read_write(0);
+    icap_write_write(0);
+    icap_addr_write(reg);
+    icap_read_write(1);
+    uint32_t spins = 0;
+    while (!icap_done_read() && ++spins < ICAP_SPIN_LIMIT) { }
+    uint32_t v = icap_data_read();
+    icap_read_write(0);
+    if (timed_out) *timed_out = (spins >= ICAP_SPIN_LIMIT);
+    return v;
+}
+#endif
+
 static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
                      uint16_t src_port, const uint8_t *req, uint32_t len)
 {
@@ -488,7 +542,42 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         put32(pi, ni, g_info_stats.reboot_odd);     ni += 4;
         put32(pi, ni, g_info_stats.reboot_refused); ni += 4;
         put32(pi, ni, g_info_stats.reboot_unsupported); ni += 4;
+        put32(pi, ni, g_info_stats.reboot_applied);     ni += 4;
+        put32(pi, ni, g_info_stats.reboot_nochange);    ni += 4;
         net_udp_commit(src_ip, src_port, STATS_PORT, ni, NET_TOS_BEST_EFFORT);
+        return;
+    }
+
+    // 'Q' -- read ICAP configuration registers. See icap_reg_read() above for
+    // why this exists and what the answer means. Its own bounded reply, per the
+    // rule at the top of this file: growing the main reply 200 -> 208 bytes
+    // killed that port once.
+    if (len >= 1 && req[0] == 'Q') {
+        uint8_t *pq = net_udp_payload_buf();
+        uint32_t nq = 0;
+        put32(pq, nq, 0x49435031u); nq += 4;            // 'ICP1'
+#ifdef CSR_ICAP_BASE
+        // UG470 register numbers, as carried by litex.soc.cores.icap.
+        static const uint8_t regs[6] = {
+            0x0c,   // IDCODE  -- must read 0x0362c093 on this part
+            0x16,   // BOOTSTS -- boot history; says whether an IPROG happened
+            0x07,   // STAT
+            0x05,   // CTL0
+            0x09,   // COR0
+            0x10,   // WBSTAR  -- warm boot start address
+        };
+        put32(pq, nq, 1); nq += 4;                      // ICAP present
+        for (unsigned i = 0; i < 6; i++) {
+            uint32_t to = 0;
+            uint32_t v  = icap_reg_read(regs[i], &to);
+            put32(pq, nq, regs[i]); nq += 4;
+            put32(pq, nq, v);       nq += 4;
+            put32(pq, nq, to);      nq += 4;
+        }
+#else
+        put32(pq, nq, 0); nq += 4;                      // no ICAP in gateware
+#endif
+        net_udp_commit(src_ip, src_port, STATS_PORT, nq, NET_TOS_BEST_EFFORT);
         return;
     }
 

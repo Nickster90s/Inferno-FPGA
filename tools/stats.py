@@ -72,7 +72,8 @@ def read_ring(board):
 
 # INFO-PORT STATS ('I' -> 'INF1'). Separate reply for the same reason as --ring.
 INFO_NAMES = ["info_rx", "info_rx_unknown", "info_tx", "info_tx_heartbeat",
-              "reboot_req", "reboot_odd", "reboot_refused", "reboot_unsupported"]
+              "reboot_req", "reboot_odd", "reboot_refused", "reboot_unsupported",
+              "reboot_applied", "reboot_nochange"]
 
 def read_info(board):
     """{} of counters, "silent" if nothing answered, "old" if something did but
@@ -128,6 +129,19 @@ def print_info(r):
               " refusing is the correct answer until ICAPE2/IPROG is"
               " instantiated. Nothing is wrong with the firmware or the SPI"
               " image.")
+    elif r.get("reboot_applied"):
+        print(f"  VERDICT: {rq} reboot command(s) arrived and"
+              f" {r['reboot_applied']} APPLIED a stored address live -- no"
+              " reconfiguration, USB and audio untouched. That is the intended"
+              " behaviour, not a fallback: ICAPE2 self-reset cannot work on the"
+              " openXC7 flow (measured; prjxray has no activation bit for the"
+              " ICAP site) and a reconfiguration would drop the USB device"
+              " mid-transfer anyway. Check the address took with"
+              " `tools/stats.py --info` from the NEW address.")
+    elif r.get("reboot_nochange"):
+        print(f"  VERDICT: {rq} reboot command(s) arrived with no address"
+              " change queued, so there was nothing to apply. Expected if the"
+              " button was pressed without editing the network config.")
     elif rr:
         print(f"  VERDICT: {rq} reboot command(s) arrived and {rr} were REFUSED"
               " -- there is no usable firmware image in SPI flash at 0x300000,"

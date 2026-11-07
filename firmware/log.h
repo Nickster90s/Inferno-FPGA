@@ -14,10 +14,17 @@
 //     uart_* driver + printf           676 bytes
 //
 // So the UART costs ~2.4 KB and the STORIES cost 10 KB. The UART stays -- it is
-// wanted for an RP2350 link, firmware/loader/loader.c reads it (that is what
-// tools/netload.py talks to), and the console commands with side effects still
+// wanted for an RP2350 link, and the console commands with side effects still
 // work: 'r' reboot, 't'/'T' gateware talker, 'x' rx_gate, 'd' mcr_dante,
 // 'z' cap_reset. What goes is the prose.
+//
+// CORRECTED 2026-11-07: this used to add "firmware/loader/loader.c reads it
+// (that is what tools/netload.py talks to)" as a reason. It does not.
+// loader.c contains exactly one UART reference, uart_rxtx_write() -- a write --
+// and no reads at all; netload.py speaks raw Ethernet, not serial. The UART's
+// read side is used only by check_uart_cmd() in the application firmware. The
+// conclusion stands, the reason was wrong, and it was wrong in a comment that
+// exists to be trusted.
 //
 // HOW. Each .c that only tells stories does, AFTER its includes:
 //

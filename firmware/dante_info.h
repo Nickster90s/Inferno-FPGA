@@ -31,7 +31,13 @@ typedef struct {
     uint32_t reboot_req;        /* 0x90 arrived with action 0x0001          */
     uint32_t reboot_odd;        /* 0x90 arrived with some other action      */
     uint32_t reboot_refused;    /* refused: no usable image in SPI flash    */
-    uint32_t reboot_unsupported;/* refused: no ICAP, so no way to reboot    */
+    uint32_t reboot_unsupported;
+    /* Controller's Reboot applied a stored address LIVE -- no reconfiguration,
+       USB untouched. See handle_sys_reset() for why a reboot is neither
+       possible nor wanted here. */
+    uint32_t reboot_applied;
+    /* Reboot arrived with no address change queued: nothing to do. */
+    uint32_t reboot_nochange;/* refused: no ICAP, so no way to reboot    */
 } dante_info_stats_t;
 extern dante_info_stats_t g_info_stats;
 

@@ -196,6 +196,10 @@ int  dante_tx_flow_desc(unsigned f, uint8_t ip[4], uint16_t *port,
                         uint16_t *id);
 int  dante_tx_bind_multicast(uint16_t ext_id, const uint16_t *chans, uint8_t n);
 int  dante_tx_ctx_for_id(uint16_t ext_id);
+/* Re-latch the AAF packetizer's source IP from g_net_ip. Call after changing
+   the address live; dante_tx_init() calls it too. */
+void dante_tx_set_src_ip(void);
+
 void dante_tx_flow_mac(unsigned f, uint8_t mac[6]);
 
 // Read the last EMITTED media timestamp atomically.

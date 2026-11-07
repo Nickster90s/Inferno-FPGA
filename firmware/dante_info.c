@@ -27,6 +27,11 @@
 #include "gptp.h"
 #include "ptpv1.h"
 #include "net.h"
+#include "mdns.h"      // mdns_announce() na een live adreswijziging
+#include "dante_tx.h"  // dante_tx_set_src_ip(): de enige hardware-kopie van ons IP
+#include "mcr_dante.h" // mcr_dante_init() in dante_info_rate_apply() -- stond hier
+                       // niet, dus die call compileerde met een IMPLICIETE declaratie:
+                       // int-return aangenomen en de argumenten ongecontroleerd.
 #include "config.h"   // g_fs, cfg_save(): de rate wordt hier gezet
 #include "cfgflash.h" // de SPI-interlock onder handle_sys_reset()
 #include <generated/csr.h>   // ts_subsec_max / usb_rate_48k bij een rate-wijziging
@@ -892,6 +897,41 @@ void dante_info_netinfo_clear(void)
 static uint8_t g_if_pend;
 static uint8_t g_if_pend_ip[4];
 static uint8_t g_if_pend_mask[4];
+/* Set by handle_sys_reset(), acted on in dante_info_poll() -- never in the
+   packet path. See the comment in handle_sys_reset(). */
+static uint8_t g_ip_apply;
+
+/* Apply a requested address WITHOUT rebooting and WITHOUT touching USB. */
+static void apply_pending_ip(void)
+{
+    const uint8_t prefix = (g_if_pend_mask[2] == 255) ? 24 : 16;
+    uint8_t old[4];
+    for (int i = 0; i < 4; i++) old[i] = g_net_ip[i];
+    /* Only read by the log line below, and printf is LOGF by default -- it does
+       not evaluate its arguments, so the default build genuinely does not use
+       this. Kept because the message is the record; see log.h. */
+    (void)old;
+
+    net_set_ip(g_if_pend_ip, prefix);
+    /* The packetizer's own copy, used for audio the CPU never sees. */
+    dante_tx_set_src_ip();
+    /* Re-join PTPv1's group: the membership report carries our source address,
+       and a snooping switch has just been told about the old one. */
+    {
+        static const uint8_t ptp_group[4] = {224, 0, 1, 129};
+        net_igmp_join(ptp_group);
+    }
+    /* A records carry the cache-flush class, so this replaces the old address
+       rather than adding to it. */
+    mdns_announce();
+
+    g_if_pend = 0;
+    g_info_stats.reboot_applied++;
+    printf("[info] adres live gewijzigd: %u.%u.%u.%u -> %u.%u.%u.%u/%u "
+           "(geen reboot, USB ongemoeid)\n",
+           old[0], old[1], old[2], old[3],
+           g_net_ip[0], g_net_ip[1], g_net_ip[2], g_net_ip[3], prefix);
+}
 
 static void send_network_info(const uint8_t *dst_ip, uint16_t dst_port)
 {
@@ -1458,36 +1498,61 @@ static void handle_sys_reset(const uint8_t *req, uint32_t len,
     // So this refuses, loudly and countably, instead of bricking. The moment
     // ICAP is in the gateware this compiles into the working path and the SPI
     // precondition below is already the right one to check first.
-#ifdef CSR_ICAP_BASE
-    if (!spi_image_present()) {
-        g_info_stats.reboot_refused++;
+// ICAPE2 SELF-RESET CANNOT WORK ON THE openXC7 FLOW. MEASURED 2026-11-07 ON
+// THE FIRST REAL PRESS OF CONTROLLER'S REBOOT BUTTON -- DO NOT REINSTATE IT.
+//
+// The firmware did everything right: the SPI image passed its CRC, WBSTAR and
+// then CMD=IPROG went out through litex.soc.cores.icap (which sends the full
+// sync sequence and bit-reverses every byte as ICAPE2 requires). The FPGA did
+// not reconfigure. USB stayed enumerated on the same device numbers, so the
+// fabric never reset; only the CPU stopped, in the infinite loop that used to
+// sit here.
+//
+// tools/icap.py then read EVERY ICAP register as 0x00000000 -- IDCODE and STAT
+// included -- while icap_done arrived every single time. So the divided clock
+// runs, the FSM completes, and ICAPE2's O bus simply gives nothing back. The
+// reason is in prjxray: the whole CFG_CENTER_MID tile has NINE documented
+// features where a CLB has 680, and although DCIRESET.ENABLED and
+// STARTUP.USRCCLKO_CONNECTED are among them, THERE IS NO ACTIVATION BIT FOR
+// ICAP AT ALL -- only ICAP_WIDTH_X8 and X16. The site is routed (the FASM wires
+// all 32 I and O pins, CLK, CSIB and RDWRB) and never switched on, and no
+// openXC7 bitstream can switch it on. That STARTUP.USRCCLKO_CONNECTED *is*
+// characterised is why the S7SPIFlash core works here.
+//
+// AND WE DO NOT WANT A REBOOT ANYWAY. A reconfiguration takes the USB device
+// down with it, mid-transfer, which is the one thing this box must never do:
+// 48 channels of USB audio are the product, and xHCI can take the whole host
+// controller down when a device vanishes under it. A real Dante chip reboots
+// for an address change because that is how its firmware is built, not because
+// the network stack needs it.
+//
+// SO THE ADDRESS IS APPLIED LIVE. This costs nothing, because nothing in this
+// firmware caches our IP: mdns.c, dante_cmc.c, dante_tx.c, dante_info.c and
+// net.c all read g_net_ip at the moment they build a packet. The only cached
+// copy is the AAF packetizer's CSR, which emits audio without the CPU, and
+// dante_tx_set_src_ip() re-latches it. The mDNS A record goes out with the
+// cache-flush class (DNS_C_IN_FLUSH), so one announcement replaces the old
+// address in every resolver on the link.
+//
+// Not applied here, in the packet path, but from dante_info_poll(): the write
+// that stored this address has already been acknowledged, 0x90 gets no reply,
+// and changing g_net_ip underneath a handler that is still parsing a frame
+// addressed to the old IP is the kind of re-entrancy that costs an evening.
+(void)spi_image_present;
+
+    if (!g_if_pend) {
+        g_info_stats.reboot_nochange++;
+        printf("[info] reboot van %u.%u.%u.%u: geen adreswijziging in de "
+               "wachtrij, dus niets te doen\n",
+               src_ip[0], src_ip[1], src_ip[2], src_ip[3]);
         return;
     }
-    printf("[info] reboot op verzoek van %u.%u.%u.%u (ICAP IPROG)\n",
-           src_ip[0], src_ip[1], src_ip[2], src_ip[3]);
 
-    // IPROG: write command 0x0f to the CMD register (0b00100) through ICAPE2
-    // and the FPGA reloads its bitstream from SPI flash -- a full clean boot,
-    // the same thing a power cycle does. Register and command numbers are
-    // UG470's, as carried by litex.soc.cores.icap (ICAPRegisters.CMD = 0b00100,
-    // ICAPCMDs.IPROG = 0b01111).
-    //
-    // No handshake and no wait: the ICAP core's FSM runs on its own divided
-    // clock and the configuration engine takes the die down in the middle of
-    // it. There is nothing left to synchronise with, which is why this does not
-    // poll icap_done -- waiting for a "done" that can never arrive would just
-    // hang here instead of rebooting.
-    icap_addr_write(0x04);              /* CMD register  */
-    icap_data_write(0x0f);              /* IPROG         */
-    icap_write_write(1);
-    for (;;) { }
-#else
-    (void)spi_image_present;
-    g_info_stats.reboot_unsupported++;
-    printf("[info] reboot van %u.%u.%u.%u GEWEIGERD: deze gateware heeft geen "
-           "ICAP, en ctrl_reset komt op dit ontwerp niet terug (gemeten)\n",
-           src_ip[0], src_ip[1], src_ip[2], src_ip[3]);
-#endif
+    g_ip_apply = 1;
+    printf("[info] reboot van %u.%u.%u.%u -> adres wordt LIVE toegepast "
+           "(%u.%u.%u.%u), USB en audio blijven lopen\n",
+           src_ip[0], src_ip[1], src_ip[2], src_ip[3],
+           g_if_pend_ip[0], g_if_pend_ip[1], g_if_pend_ip[2], g_if_pend_ip[3]);
 }
 
 static void info_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
@@ -1547,6 +1612,11 @@ static void info_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
 void dante_info_poll(void)
 {
     uint32_t now = gptp_uptime_ms();
+
+    if (g_ip_apply) {
+        g_ip_apply = 0;
+        apply_pending_ip();
+    }
 
 
     // Periodic device-info announcement, forever. Stopping makes us disappear

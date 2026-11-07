@@ -214,6 +214,23 @@ static void bind_flow(unsigned f)
 static void media_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
                      uint16_t src_port, const uint8_t *p, uint32_t len);
 
+// THE ONLY PLACE OUR IP IS LATCHED INTO HARDWARE.
+//
+// Everything else in this firmware reads g_net_ip at the moment it builds a
+// packet -- mdns.c, dante_cmc.c, dante_info.c, net.c and the headers further
+// down this file all do -- so an address change needs no bookkeeping anywhere
+// except here: the AAF packetizer keeps its own copy in a CSR because it emits
+// audio without the CPU in the loop.
+//
+// Factored out of dante_tx_init() so a LIVE address change can re-latch it
+// without re-initialising the transmitter. See handle_sys_reset() in
+// dante_info.c for why the address is applied live instead of by rebooting.
+void dante_tx_set_src_ip(void)
+{
+    aaf_pkt_src_ip_write((uint32_t)g_net_ip[0] << 24 | (uint32_t)g_net_ip[1] << 16 |
+                              (uint32_t)g_net_ip[2] << 8  | g_net_ip[3]);
+}
+
 void dante_tx_init(void)
 {
     // One group per bundle, keyed off our MAC so two boards do not collide.
@@ -225,8 +242,7 @@ void dante_tx_init(void)
     }
 
     // Shared (non-indirect) fields.
-    aaf_pkt_src_ip_write((uint32_t)g_net_ip[0] << 24 | (uint32_t)g_net_ip[1] << 16 |
-                              (uint32_t)g_net_ip[2] << 8  | g_net_ip[3]);
+    dante_tx_set_src_ip();
     aaf_pkt_src_mac_hi_write(((uint32_t)g_dante.mac[0] << 8) | g_dante.mac[1]);
     aaf_pkt_src_mac_lo_write(((uint32_t)g_dante.mac[2] << 24) | ((uint32_t)g_dante.mac[3] << 16) |
                                   ((uint32_t)g_dante.mac[4] << 8)  |  g_dante.mac[5]);
