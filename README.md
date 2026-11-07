@@ -1337,6 +1337,80 @@ place: `tools/dante_board.py`, overridable per invocation.
 DANTE_BOARD=169.254.9.77 tools/stats.py      # flash.sh honours it too
 ```
 
+### Secondary network: why there is only a primary
+
+**Decision 2026-11-07: primary only.** Not because the protocol is unknown — we
+have the `0x11`/`0x13` layout and the addressing convention — but because of
+BRAM and timing closure. Written down so it can be revisited with numbers
+instead of re-argued.
+
+**A Dante chip has one MAC.** The Dante Pro S1 datasheet's block diagram is
+explicit: the die holds a single `Ethernet MAC` behind a 100 Mbps RMII
+interface *with MDIO*, feeding an **external** `PHY / Switch`, out of which come
+`Primary` and — the label is exact — **`Secondary (Switch only)`**. Brooklyn 3
+says the same thing in prose: "Standard RGMII/MII interface for Ethernet PHY
+**or switch chip**". Neither datasheet contains the word "redundant" anywhere.
+So the second port is not in the chip; it appears when the host board is built
+with a switch IC instead of a plain PHY.
+
+**Which means a single MAC behind a plain switch can only do switched mode** —
+daisy-chain, both ports bridged, one MAC address, one IP. That is what
+"Secondary (Switch only)" describes.
+
+**True redundancy is a different animal.** The two networks must *never* be
+bridged, and the device presents two MACs and two IPs. Measured on a
+PRODIGY1-32 (Brooklyn 3) over `0x11`:
+
+| | MAC | IP | speed | flags |
+|---|---|---|---|---|
+| primary | `00:1d:c1:2d:9c:60` | 169.254.143.65 | 1000 | `0x0001` |
+| secondary | `00:1d:c1:2d:9c:61` | 172.31.143.66 | 0 | `0x0000` |
+
+MAC + 1, the secondary on 172.31/16, and the secondary reporting **link down
+separately from the primary** — a plain unmanaged switch cannot report per-port
+state to one MAC, a managed one over MDIO can. That points at a managed switch
+on a single MAC, but no datasheet says so and it is inference, not measurement.
+
+**Our board is better placed than the chip.** The i9plus carries **two
+independent RGMII PHYs** wired straight to the FPGA (`eth 0` and `eth 1`); we
+use `eth 1`, and `eth 0`'s twelve pins are **entirely unclaimed** — `mdio`,
+`mdc` and `rst_n` are shared between the two, as the platform intends. No switch
+chip needed: two real MACs are possible, which is the clean way to do
+redundancy.
+
+**What stops it, with the numbers:**
+
+| | seed 8, the running bitstream |
+|---|---|
+| RAMB36E1 | **63 / 75 — 84%** |
+| RAMB18E1 | 11 / 150 — 7% |
+| SLICE_LUTX | 16632 / 65200 — 25% |
+| SLICE_FFX | 9434 / 65200 — 14% |
+
+BRAM is the wall, and LiteEth MACs live in BRAM. Worse, this design closes
+`usb` timing at 60.64 MHz on **exactly one seed out of eight**, and a second PHY
+brings two more 125 MHz clock domains (`eth_clocks 0` tx/rx) into that
+floorplan — the seed lottery restarts with no guarantee that any seed closes.
+And redundancy duplicates **every audio flow on both networks continuously**,
+which doubles packetiser egress and needs a second header-generation path. That
+is the part expected to break the design, not the protocol work.
+
+**The `mode` field at `0x11` +2 is still not understood**, and it was briefly
+got wrong here: it was set to 1, copied from the PRODIGY because the PRODIGY's
+Network Config panel works — and the PRODIGY has two interfaces. Querying every
+device on the bench on 2026-11-07:
+
+| device | interfaces | `mode` |
+|---|---|---|
+| DAC8 (inferno on ESP32-P4) | 1 | **0** |
+| PRODIGY1-32 | 2 | **1** |
+
+and inferno's own `send_network_info` hardcodes the same lead bytes
+`00 01 00 00 00 00`, i.e. `n=1` with `mode` 0
+(`info_mcast_server.rs:355`). It does not name the field either, so what the
+value *means* is still unknown — only that both one-interface references send 0
+and the only two-interface reference sends 1. We send 0.
+
 ### Decoded on this bench — not in inferno
 
 inferno is the best reference available, but it is not complete. These were

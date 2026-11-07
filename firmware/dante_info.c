@@ -930,7 +930,22 @@ static void send_network_info(const uint8_t *dst_ip, uint16_t dst_port)
     const uint32_t n_if = 1;
 
     put_u16(c, o, n_if); o += 2;
-    put_u16(c, o, 1);    o += 2;              // mode, the value the PRODIGY sends
+
+    // `mode` AT +2: STILL UNKNOWN, BUT 0 IS THE VALUE A ONE-INTERFACE DEVICE
+    // SENDS. This was briefly 1, copied from the PRODIGY because the PRODIGY's
+    // panel works -- and the PRODIGY has TWO interfaces. Measured 2026-11-07 by
+    // querying every Dante device on the bench:
+    //
+    //   DAC8 (inferno on an ESP32-P4), 1 interface : mode 0
+    //   PRODIGY1-32,                   2 interfaces: mode 1
+    //
+    // and inferno's own send_network_info hardcodes the same six lead bytes
+    // 00 01 00 00 00 00, i.e. n=1 with mode 0 (info_mcast_server.rs:355). It
+    // does not name the field either, so what the value MEANS is still not
+    // known -- only that both one-interface references say 0 and the only
+    // two-interface reference says 1. Sending 1 from a single-PHY device was
+    // advertising something we cannot back.
+    put_u16(c, o, 0);    o += 2;
 
     put_u32(c, o, 1000);   o += 4;            // link speed, Mbps -> "1Gbps"
     // bit 0 = link up, 0x0002 = statically configured -- see the note above
