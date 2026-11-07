@@ -22,6 +22,15 @@ void dante_info_poll(void);
 typedef struct {
     uint32_t rx, rx_unknown;
     uint32_t tx_heartbeat, tx_info;
+    /* Dante Controller's reboot button (info opcode 0x90). Counted because
+     * printf is compiled out of the shipping build, so without these the
+     * difference between "DC never asked", "we ignored it" and "we refused
+     * because there is no SPI image to come back to" is invisible -- and a
+     * board that simply stays up looks identical in all three cases. Read with
+     * `tools/stats.py --info` ('I' over UDP 7779). */
+    uint32_t reboot_req;        /* 0x90 arrived with action 0x0001          */
+    uint32_t reboot_odd;        /* 0x90 arrived with some other action      */
+    uint32_t reboot_refused;    /* refused: no usable image in SPI flash    */
 } dante_info_stats_t;
 extern dante_info_stats_t g_info_stats;
 

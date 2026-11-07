@@ -28,6 +28,7 @@
 #include "ptpv1.h"
 #include "net.h"
 #include "config.h"   // g_fs, cfg_save(): de rate wordt hier gezet
+#include "cfgflash.h" // de SPI-interlock onder handle_sys_reset()
 #include <generated/csr.h>   // ts_subsec_max / usb_rate_48k bij een rate-wijziging
 #include <string.h>
 #include <stdio.h>
@@ -1295,6 +1296,153 @@ static void handle_rate_set(const uint8_t *req, uint32_t len,
     }
 }
 
+// DANTE CONTROLLER'S REBOOT BUTTON IS INFO OPCODE 0x90.
+//
+// Captured off the wire on 2026-11-07, which is the only way this was ever
+// going to be found: the command is UNICAST to our info port, and it was
+// invisible for one round of looking because the capture ring dropped all
+// multicast and so could not prove the difference between "DC sent nothing" and
+// "we cannot see it" (see firmware/cap.c).
+//
+//   RX INFO 169.254.228.170:8700 -> :8700  len 78
+//   ffff 0024 6a5d 0000 c8a362ebd51a0000 "Audinate" 07 3d 00 90 00 00 00 64
+//   00 01 00 00
+//
+// So: 36 bytes, four of content, version 0x073d (a CONTROLLER asking for
+// something, as against 0x072a which is a device talking about itself),
+// preceded by a CMC 0x1001 device-advertisement request -- the same two-step DC
+// uses before the 0x13 interface write.
+//
+// MEASURED, AND WORTH RELYING ON: DC sent it EXACTLY ONCE and did not retry,
+// unlike the 0x13 write which it repeated every ~2 s until the answer reflected
+// it. A reboot command needs no acknowledgement, because the device going away
+// IS the acknowledgement. So this sends no reply.
+//
+// NOT KNOWN: what the content means. `00 01` is honoured here and ANYTHING ELSE
+// IS REFUSED AND LOGGED, rather than assumed to also mean reboot. The
+// capability byte at content[0x17] of 0x60 is annotated "identify / rate config
+// / reboot / factory reset" with the bits never isolated, so 0x90 may well be a
+// family of system commands with the u16 selecting which. Resetting the board
+// because a command we cannot read arrived on the same opcode is not a risk
+// worth taking for a guess. inferno does not handle 0x90 at all, so there is no
+// reference to check against.
+//
+// THE INTERLOCK IS THE POINT OF THIS FUNCTION.
+//
+// This firmware runs from coderam, not flash. A reset enters the loader, which
+// waits for netload and then falls through to the SPI image at 0x300000 -- and
+// if there is no image there it HALTS rather than jump into junk
+// (firmware/loader/loader.c). So honouring a reboot on a board that has only
+// ever had `./flash.sh` (volatile) run against it turns one click in Controller
+// into a board that needs JTAG to come back. The image header is checked first
+// and the reboot is refused if it is not there.
+//
+// THE CHECK VERIFIES THE CRC, AND IT HAS TO.
+//
+// This first checked only the magic and a sane length, with a comment admitting
+// it did not cover "flashed but since corrupted" and arguing that case was
+// far-fetched. It was not: replaying DC's reboot bytes on 2026-11-07 passed the
+// magic check, reset the board, and the loader then REFUSED the image and
+// halted -- exactly the brick the interlock exists to prevent, on the very
+// first test. Something at 0x300000 carries valid "INFN" magic and a plausible
+// length and does not pass its own CRC. An interlock that does not check what
+// the loader checks is not an interlock.
+//
+// COST: the image is streamed out of SPI in 256-byte chunks and CRC'd
+// bitwise -- for a 75 KB image that is ~600k iterations plus the SPI reads,
+// which stalls the main loop for on the order of 100 ms and will glitch the
+// audio flows. That is the right trade: it only runs when a reboot command
+// arrives, and on the accept path the board is about to reset anyway. On the
+// refuse path it costs one glitch instead of a trip to the JTAG cable.
+#define IMG_ADDR   0x00300000u
+#define IMG_MAGIC  0x494E464Eu          /* "INFN" */
+
+// IEEE CRC-32, reflected, bitwise -- the same function the loader applies to
+// the image it reads (firmware/loader/loader.c), in seedable form so the image
+// can be streamed instead of buffered. It must stay byte-for-byte equivalent to
+// that one or the interlock would be checking a different question.
+static uint32_t crc32_upd(uint32_t crc, const uint8_t *p, uint32_t n)
+{
+    while (n--) {
+        crc ^= *p++;
+        for (int k = 0; k < 8; k++)
+            crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(crc & 1)));
+    }
+    return crc;
+}
+
+static int spi_image_present(void)
+{
+#ifdef CSR_CFGFLASH_BASE
+    uint8_t hdr[12];
+    cfgflash_warmup();
+    cfgflash_read(IMG_ADDR, hdr, sizeof(hdr));
+    uint32_t magic = ((uint32_t)hdr[0] << 24) | ((uint32_t)hdr[1] << 16) |
+                     ((uint32_t)hdr[2] << 8)  |  (uint32_t)hdr[3];
+    uint32_t len   = ((uint32_t)hdr[4] << 24) | ((uint32_t)hdr[5] << 16) |
+                     ((uint32_t)hdr[6] << 8)  |  (uint32_t)hdr[7];
+    uint32_t want  = ((uint32_t)hdr[8] << 24) | ((uint32_t)hdr[9] << 16) |
+                     ((uint32_t)hdr[10] << 8) |  (uint32_t)hdr[11];
+    if (magic != IMG_MAGIC) {
+        printf("[info] reboot geweigerd: geen SPI-image (magic %08lx)\n",
+               (unsigned long)magic);
+        return 0;
+    }
+    if (len == 0 || len > 0x40000u) {
+        printf("[info] reboot geweigerd: SPI-image lengte %lu\n",
+               (unsigned long)len);
+        return 0;
+    }
+
+    uint8_t  buf[256];
+    uint32_t crc = 0xFFFFFFFFu;
+    for (uint32_t off = 0; off < len; ) {
+        uint32_t n = len - off;
+        if (n > sizeof(buf)) n = sizeof(buf);
+        cfgflash_read(IMG_ADDR + 12u + off, buf, n);
+        crc = crc32_upd(crc, buf, n);
+        off += n;
+    }
+    crc = ~crc;
+    if (crc != want) {
+        printf("[info] reboot geweigerd: SPI-image CRC %08lx, wil %08lx\n",
+               (unsigned long)crc, (unsigned long)want);
+        return 0;
+    }
+    return 1;
+#else
+    printf("[info] reboot geweigerd: geen config-flash in deze SoC\n");
+    return 0;
+#endif
+}
+
+static void handle_sys_reset(const uint8_t *req, uint32_t len,
+                             const uint8_t src_ip[4])
+{
+    if (len < MCAST_HDR_LEN + 4) {
+        printf("[info] 0x90 te kort (%lu)\n", (unsigned long)len);
+        return;
+    }
+    uint16_t what = (uint16_t)((req[32] << 8) | req[33]);
+    if (what != 0x0001) {
+        g_info_stats.reboot_odd++;
+        printf("[info] 0x90 met onbekende actie 0x%04x van %u.%u.%u.%u; "
+               "genegeerd\n", what, src_ip[0], src_ip[1], src_ip[2], src_ip[3]);
+        return;
+    }
+    g_info_stats.reboot_req++;
+
+    if (!spi_image_present()) {
+        g_info_stats.reboot_refused++;
+        return;
+    }
+
+    printf("[info] reboot op verzoek van %u.%u.%u.%u\n",
+           src_ip[0], src_ip[1], src_ip[2], src_ip[3]);
+    ctrl_reset_write(1);
+    for (;;) { }                        /* reset is onderweg */
+}
+
 static void info_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
                     uint16_t src_port, const uint8_t *req, uint32_t len)
 {
@@ -1336,6 +1484,7 @@ static void info_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         }
         break;
     case 0x83: case 0x85: send_caps(src_ip, src_port); break;
+    case 0x90:            handle_sys_reset(req, len, src_ip); break;
     default:
         // Log unknowns: DC's requests to us are unicast and therefore invisible
         // to host-side capture, so the console is the only place they show up.

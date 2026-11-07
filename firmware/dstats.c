@@ -467,6 +467,30 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         return;
     }
 
+    // 'I' -- INFO-PORT STATS, its own reply because the main one must not grow
+    // (208 bytes once killed the port outright; see the top of this file).
+    //
+    // reboot_* exist so Dante Controller's reboot button is OBSERVABLE. The
+    // shipping build has no console, so a board that stays up after the button
+    // is pressed is indistinguishable between "DC sent nothing", "we did not
+    // recognise it" and "we refused because there is no SPI image to come back
+    // to". That ambiguity is the same one that made the capture ring's silence
+    // meaningless earlier today, and it is not worth repeating.
+    if (len >= 1 && req[0] == 'I') {
+        uint8_t *pi = net_udp_payload_buf();
+        uint32_t ni = 0;
+        put32(pi, ni, 0x494E4631u); ni += 4;              // 'INF1'
+        put32(pi, ni, g_info_stats.rx);             ni += 4;
+        put32(pi, ni, g_info_stats.rx_unknown);     ni += 4;
+        put32(pi, ni, g_info_stats.tx_info);        ni += 4;
+        put32(pi, ni, g_info_stats.tx_heartbeat);   ni += 4;
+        put32(pi, ni, g_info_stats.reboot_req);     ni += 4;
+        put32(pi, ni, g_info_stats.reboot_odd);     ni += 4;
+        put32(pi, ni, g_info_stats.reboot_refused); ni += 4;
+        net_udp_commit(src_ip, src_port, STATS_PORT, ni, NET_TOS_BEST_EFFORT);
+        return;
+    }
+
     if (len >= 1 && req[0] == 'A') {
         if (len >= 5) {
             for (int i = 0; i < 4; i++) g_arc_mirror_ip[i] = req[1 + i];

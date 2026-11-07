@@ -70,6 +70,71 @@ def read_ring(board):
         out[n] = v
     return out
 
+# INFO-PORT STATS ('I' -> 'INF1'). Separate reply for the same reason as --ring.
+INFO_NAMES = ["info_rx", "info_rx_unknown", "info_tx", "info_tx_heartbeat",
+              "reboot_req", "reboot_odd", "reboot_refused"]
+
+def read_info(board):
+    """{} of counters, "silent" if nothing answered, "old" if something did but
+    not with INF1.
+
+    THOSE TWO ARE DIFFERENT and this function used to return None for both, so
+    `--info` printed "firmware predates the 'I' opcode" at a board that had
+    reset and was sitting dead in the loader. That misread cost a round of
+    looking on 2026-11-07, in a tool written the same hour to fix exactly this
+    class of ambiguity elsewhere. A timeout is not a version.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(2)
+    s.sendto(b"I", (board, 7779))
+    try:
+        d, _ = s.recvfrom(512)
+    except socket.timeout:
+        return "silent"
+    if len(d) < 4 or d[:4] != b"INF1":
+        return "old"
+    out = {}
+    for i, n in enumerate(INFO_NAMES):
+        off = 4 + i * 4
+        if off + 4 > len(d): break
+        out[n] = struct.unpack(">I", d[off:off+4])[0]
+    return out
+
+def print_info(r):
+    if r == "silent":
+        print(f"  NOTHING ANSWERED on {_BOARD}:7779. The board is off, on another"
+              " address, or sitting in the loader after a reset with no image to"
+              " load. This is NOT a statement about its firmware version.")
+        return
+    if r == "old":
+        print("  answered, but not with INF1 -- that firmware predates the 'I'"
+              " opcode.")
+        return
+    for k, v in r.items(): print(f"  {k:20s} {v}")
+    # Dante Controller's reboot button, made legible. The shipping build has no
+    # console, so these counters are the only way to tell three very different
+    # situations apart -- and a board that stays up looks the same in all of
+    # them.
+    rq, ro, rr = r.get("reboot_req", 0), r.get("reboot_odd", 0), r.get("reboot_refused", 0)
+    if rq == 0 and ro == 0:
+        print("  VERDICT: no reboot command has reached this board since boot."
+              " If Controller's button was pressed, either it sent nothing or"
+              " the frame never arrived -- check the capture ring for an"
+              " inbound 0x90 on the info port before blaming the firmware.")
+    elif rr:
+        print(f"  VERDICT: {rq} reboot command(s) arrived and {rr} were REFUSED"
+              " -- there is no usable firmware image in SPI flash at 0x300000,"
+              " so a reset would land in the loader and halt. Run"
+              " ./flash.sh --permanent, then try again.")
+    elif ro:
+        print(f"  VERDICT: {ro} command(s) on opcode 0x90 carried an action"
+              " other than 0x0001 and were ignored on purpose. Read the bytes"
+              " out of the capture ring: 0x90 may be a family of system"
+              " commands and only reboot is implemented.")
+    else:
+        print(f"  VERDICT: {rq} reboot command(s) accepted. The board reset, so"
+              " every counter here is from AFTER that -- which is why this one"
+              " reads 0 again on a board that did reboot.")
+
 def print_ring(r):
     if r is None:
         print("  (no RNG1 reply -- firmware predates the 'r' opcode)")
@@ -146,6 +211,10 @@ if __name__ == "__main__":
     if board == "--ring" or (len(sys.argv) > 2 and sys.argv[2] == "--ring"):
         if board == "--ring": board = _BOARD
         print_ring(read_ring(board))
+        sys.exit(0)
+    if board == "--info" or (len(sys.argv) > 2 and sys.argv[2] == "--info"):
+        if board == "--info": board = _BOARD
+        print_info(read_info(board))
         sys.exit(0)
     a = read(board)
     if not secs:
