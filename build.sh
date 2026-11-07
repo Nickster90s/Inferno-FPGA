@@ -21,6 +21,24 @@ export CHIPDB=/home/lisp/FPGA/demo-projects/chipdb
 export PRJXRAY_DB_DIR=/home/lisp/openxc7/openxc7/opt/nextpnr-xilinx/external/prjxray-db
 export PYTHONHASHSEED=0
 
+# THE DESIGN'S CONFIGURATION LIVES IN ENVIRONMENT VARIABLES, SO SAY WHICH ONE
+# THIS BUILD IS. BOARD, USB2 and USB_DUAL_RATE are read by avb_soc.py and
+# nothing enforces them: a script that forgets to export USB2=1 builds the
+# SINGLE-USB chip and says so nowhere.
+#
+# Measured 2026-11-07: a seed sweep was started without them and all eight
+# builds were the single-USB, 48 kHz design -- zero `ulpi2` lines in the XDC --
+# while the question being asked was about the dual-USB 96 kHz build. The logs
+# looked perfectly healthy. Nothing was wrong except that it was the wrong chip.
+#
+# So every build now prints its configuration and leaves it in the output
+# directory, which means a build dir can be asked afterwards what it is.
+echo "=== build config: BOARD=${BOARD:-<unset>} USB2=${USB2:-<unset>} USB_DUAL_RATE=${USB_DUAL_RATE:-<unset>} ==="
+if [[ -z "${USB2:-}" || -z "${USB_DUAL_RATE:-}" ]]; then
+    echo "    NOTE: this is NOT the validated dual-USB 96 kHz configuration."
+    echo "    That one is: BOARD=breakout USB2=1 USB_DUAL_RATE=1"
+fi
+
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 # Welke build-directory deze run gebruikt. Stond eerst BINNEN het loader-blok,
@@ -108,6 +126,10 @@ fi
 
 BUILD_LOG="$(mktemp -t infernobuild.XXXXXX.log)"
 echo "build log: $BUILD_LOG  (stall watchdog ${STALL_SECS}s)"
+mkdir -p "$OUT_DIR"
+{ echo "BOARD=${BOARD:-}"; echo "USB2=${USB2:-}"; echo "USB_DUAL_RATE=${USB_DUAL_RATE:-}"
+  echo "built=$(date -Is)"; } > "$OUT_DIR/build_config.txt"
+
 setarch -R python3 "$HERE/avb_soc.py" --build "${ROM_IMAGE_ARGS[@]}" "$@" \
     2>&1 | tee "$BUILD_LOG" &
 BPID=$!

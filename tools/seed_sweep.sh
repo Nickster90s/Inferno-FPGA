@@ -69,6 +69,21 @@
 set -u
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
+
+# SWEEP THE VALIDATED CONFIGURATION BY DEFAULT.
+#
+# avb_soc.py reads BOARD, USB2 and USB_DUAL_RATE from the environment and
+# build.sh does not set them, so a sweep launched from a plain shell builds the
+# SINGLE-USB 48 kHz chip. That happened on 2026-11-07: eight seeds, every log
+# healthy, zero `ulpi2` lines in any XDC, and the question being asked was about
+# the dual-USB 96 kHz design. A whole sweep answered about the wrong chip.
+#
+# These are defaults, not overrides -- export them yourself to sweep something
+# else, and build.sh prints and records whatever it ends up with.
+export BOARD="${BOARD:-breakout}"
+export USB2="${USB2:-1}"
+export USB_DUAL_RATE="${USB_DUAL_RATE:-1}"
+echo "config: BOARD=$BOARD USB2=$USB2 USB_DUAL_RATE=$USB_DUAL_RATE"
 FIRST="${1:-1}"
 LAST="${2:-8}"
 JOBS="${JOBS:-3}"
