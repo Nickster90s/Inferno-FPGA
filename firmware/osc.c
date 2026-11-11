@@ -30,6 +30,7 @@
 
 #include "net.h"
 #include "config.h"
+#include "kvm.h"   // /kvm/main, /kvm/backup: which PHY gets the HID reports
 #include "dante_info.h"
 #include "osc.h"
 
@@ -169,6 +170,14 @@ static void osc_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
             printf("[osc] rate -> %ld Hz (live; replug USB so the host "
                    "re-reads it)\n", (long)argv);
         }
+    } else if (strcmp(addr, "/kvm/main") == 0) {
+        kvm_select(KVM_DEST_MAIN);
+    } else if (strcmp(addr, "/kvm/backup") == 0) {
+        kvm_select(KVM_DEST_BACKUP);
+    } else if (strcmp(addr, "/kvm/target") == 0) {
+        // Symmetric with /usb/source: 0 = Main, anything else = Backup.
+        if (!have) { printf("[osc] /kvm/target needs 0 or 1\n"); return; }
+        kvm_select(argv ? KVM_DEST_BACKUP : KVM_DEST_MAIN);
     } else if (strcmp(addr, "/ping") == 0) {
         osc_reply(src_ip, src_port, "/pong");
     } else {

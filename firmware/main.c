@@ -31,6 +31,7 @@
 #include "dante_tx.h"
 #include "dante_flows.h"
 #include "rx_gate.h"
+#include "kvm.h"
 #include "mcr_dante.h"
 #include "telem.h"
 
@@ -839,7 +840,8 @@ static void aaf_gw_push_binding(void)
     dante_tx_init();
     dante_flows_init();
     dante_stats_init();
-    osc_init();          // UDP 9000: /usb/source, /usb/main, /usb/backup, /usb/rate
+    kvm_init();          // both HID report registers parked released, target Main
+    osc_init();          // UDP 9000: /usb/*, /kvm/main, /kvm/backup, /kvm/target
 }
 
 static void aaf_gw_set(uint8_t on)
@@ -1176,6 +1178,7 @@ int main(void)
         mdns_poll();
         dante_info_poll();
         ptpv1_poll();
+        kvm_poll();         // RP2350 link -> the selected PHY's HID report
 
         // Media clock servo. mcr_pump_hw() drained the gateware CRF timestamp
         // FIFO under AVB; with the CRF extractor gone it is a no-op, and the

@@ -107,6 +107,200 @@ hangs HeAP — it removes the gradient the analytic solve needs. `_P_SYS` is
 `HEAP-STALL` means the configuration is unplaceable. They are different facts
 and the second one is the useful one.
 
+**Third thing, and it is free: count the HeAP iterations.** A stall is not one
+thing. `grep -c "type ALL: wirelen solved" <log>`:
+
+| iterations before the watchdog | meaning |
+|---|---|
+| 0 | HeAP never completed a solve — **no legal placement** |
+| 1–4 then silence | it started and got stuck — same conclusion in practice |
+| ~10 within 4 s, then `HeAP Placer Time` | **this is what success looks like** (38–59 s total) |
+
+Measured 2026-11-11 on the 0-of-8 KVM sweep: seeds 1 and 6 had **zero**, seeds
+2/4/5/7/8 had 1–4, seed 3 reached #10 at t=3.3 s and finished at 48 s. Reading
+this would have cost one grep and saved most of a day of floorplan knobs.
+
+**A P&R-only probe is five times cheaper than a build and it is a valid
+predictor.** `ident_version=False` makes the netlist reproducible — verified
+2026-11-11 by diffing the eight sweep `.json` files byte for byte: they differ
+in 15,388 bytes and **every one is inside a `"src"` path string**
+(`build_seed1` vs `build_seed3`, equal length, hence equal file size).
+So run nextpnr directly on one fixed `.json` with `--no-route` and vary only the
+seed or the floorplan env: a placeable config answers in ~2 minutes (json load
+~60 s + HeAP), anything past ~4 minutes is a stall. Harness:
+`$SCRATCH/pnr/probe.sh <tag> <seed> [--route]`, `PLACER=sa` honoured.
+It reproduced the real build (seed 3: 1502 cells, HeAP 59 s probe vs 48 s build).
+**Pass `NEXTPNR_USB_FP_LIGHT=1` yourself** — nextpnr does not get it from
+`build.sh`, and without it the floorplan silently builds the FULL 3326-cell box.
+That mistake cost three probes on 2026-11-11, the same configuration trap as the
+two wasted sweeps above.
+
+## Widening the USB box does not work, and the box is not the KVM problem
+
+Two separate results from 2026-11-11, both measured, so neither needs repeating.
+
+**X cannot grow.** `NEXTPNR_USB_REGION=0,0,55,156` with `NEXTPNR_CFG_X0=58`
+(cfgflash moved out of the way — that is what `NEXTPNR_CFG_X0` was added for)
+gave **zero** HeAP iterations on seeds 1 and 5. That matches attempt 7 in
+`floorplan_usb.py`'s own log (`0,0..58,156`, no overlap, still stalls). Y is
+already the full column. So the box's AREA is not a lever in either direction.
+
+**And the cell count is not the cause.** `NEXTPNR_USB_FP_CTRL_NOT=rom_read_port`
+drops the descriptor-ROM read port out of the box (the measured critical path is
+`get_descriptor`'s byte counter and its CARRY4, not the ROM data), which took
+the box from 1502 to **1429** — the exact size this file records as placing on
+2026-11-07. It stalled on seeds 1, 5 and 7.
+
+**What the numbers actually say**, all at `--seed 5` or better:
+
+| netlist | total cells | LUTs | FFs | PADs | box | result |
+|---|---|---|---|---|---|---|
+| 7 Nov known-good | 17,234 | 16,787 | 9,549 | 49 | 1385 | **places, HeAP 38.17 s** |
+| today without HID | 17,764 | 17,239 | 9,931 | 51 | 1390 | stalls |
+| today with HID | 18,255 | — | — | — | 1463 | stalls (1 of 8 seeds) |
+
+The 7 November netlist **still places on this machine today**, so the toolchain,
+the floorplan and the box are all fine and the delta is entirely ours.
+
+**Retraction.** `KVM_HANDOFF.md` claimed "roughly half the growth predates HID
+and is accumulated upstream drift". It does not: regenerating from the current
+source **without** HID gives 1390 cells against the old 1385, so HID accounts
+for essentially all of the box growth (+73) — and HID is still not what breaks
+placement, because the no-HID netlist stalls too. The two extra PADs in that row
+are `kvm_serial`: the second UART was in that build.
+
+**Bisect switches**, so the three additions can be built apart (all default 1,
+so the shipping build is unchanged):
+
+| env | what it removes |
+|---|---|
+| `KVM_HID=0` | the HID interface **and** its 72-bit endpoint. It used to drop only the descriptor bytes while `usb_avb_subsystem.py` instantiated the endpoint unconditionally, which made the A/B meaningless |
+| `KVM_HID_CSR=0` | the two `CSRStorage(72)` report registers and the `i_hid_report` connections |
+| `KVM_UART=0` | the second UART (`RS232PHY` + 64-deep RX FIFO + CSR bank 14) |
+| `KVM_UART_PINS="<tx>,<rx>"` | moves `kvm_serial` (default `AB22,W20`) |
+| `KVM_UART_FIFO="<tx>,<rx>"` | the UART FIFO depths (default `16,64`) |
+
+### The bisect, and what it found
+
+All four at `--seed 5`, same `rtl/*.v` (md5 checked identical), only the env
+differing:
+
+| build | total cells | box | result |
+|---|---|---|---|
+| no UART, no report CSRs | 17,230 | 1399 | **places, HeAP 30.5 s** |
+| report CSRs only | 17,568 | 1431 | **places, HeAP 58.4 s** |
+| UART only | 17,493 | 1429 | **stalls, 0 iterations** |
+| UART only, pads moved to F13/F14 | 1429 | | **stalls, 0 iterations** |
+
+So: the regenerated `.v` is innocent (`requesthandlers.py` and the generator fix
+place fine), the two 72-bit report CSRs are innocent — and note the CSR build has
+MORE cells than the UART build and places, so **it is not the cell count** — and
+the second UART is what breaks it.
+
+**It is NOT the pin position, though that was the obvious answer and it was
+wrong.** `AB22`/`W20` are `IOB_X0Y29`/`IOB_X0Y25`, which in nextpnr's grid is
+Y25-29, straight through the ULPI pad band (Main X1 Y23-49, Backup X1 Y1-32) and
+inside the USB box — and an IOB is already located, so `floorplan_usb.py` cannot
+constrain it away. Moving the pads to `F13`/`F14` (`IOB_X0Y148`/`Y147`, bank 16,
+far above both the ULPI band and the eth pads at X1 Y51-72) stalls **identically**.
+The ethernet pads sit inside the same box and are fine, so a pinned IOB in the
+box is not the mechanism.
+
+> **nextpnr's grid XY for an IOB is the prjxray IOB SITE XY, not the tile XY.**
+> `T4` (Main's ULPI clock) is `IOB_X1Y23` in `package_pins.csv` and the floorplan
+> measured Main's pads at X1 Y23-49 from a routed design. The tile column
+> (`LIOB33_X0` vs `RIOB33_X43`) is a different coordinate system — do not mix
+> them. Look pins up with:
+> `grep -E "^(PIN|...)," <prjxray-db>/artix7/xc7a50tfgg484-1/package_pins.csv`
+
+**But the UART does not make it infeasible, only tight.** A P&R-only seed sweep
+on the UART-only netlist: seeds 1, 2, 3, 5 stall with zero iterations, **seed 7
+places** (HeAP 83.6 s). So this is the seed lottery at a worse ratio, not a wall.
+Remaining suspect for the tightness, not yet measured: LiteX's `RS232ClkPhaseAccum`
+is a **33-bit adder per direction** (nine CARRY4 each) where a divide-by-50
+counter would do at 50 MHz / 1 Mbaud; the UART build carries +47 CARRY4 over the
+CSR build. `KVM_UART_FIFO=1,1` is in place to split the FIFOs from the PHY.
+
+**And the seed does not transfer between netlists.** Seed 3 placed the HID
+netlist with the 16-bit comparator and stalled on the 3-bit one; seed 7 places
+the UART-only netlist. After any gateware change, sweep — but sweep with
+P&R-only probes on one synthesised netlist, not with eight full builds.
+
+### Result: the KVM build closes on seed 4 (2026-11-11)
+
+The second UART was **deleted**, not fixed. The operator had already decided
+this question -- the one UART was kept, when the rest of the console was
+stripped, *for* this link -- and it is already 1 Mbaud with a 64-deep FIFO, so
+the second one was a duplicate. The whole UART now sits on the SODIMM at the
+RP2350: **`AB22` = SODIMM 159 = FPGA TX**, **`W20` = SODIMM 161 = FPGA RX**,
+bank 14 (already LVCMOS33 in the shipping build, so no level shifter), with
+`KVM_UART_PINS="R3,M3"` to put the console back on the CH347. Nothing read the
+console RX -- `loader.c` has one `uart_rxtx_write()` and zero reads, `log.h`
+only writes -- so firmware reads reports with `uart_read_nonblock()` /
+`uart_read()`, **never the FIFO**: `uart_init()` attaches `uart_isr()`, which
+drains the hardware FIFO into a 128-byte software ring, and polling the FIFO
+would race it.
+
+Final sweep on that netlist (HID + both report CSRs + the one UART), box 1460:
+**seeds 4 and 8 place, the other six stall.** Routed:
+
+| clock | required | seed 4 | seed 8 |
+|---|---|---|---|
+| sys | 50 | **54.79** | 53.16 |
+| usb (Main) | 60 | **71.68** | 59.78 ✗ |
+| usb2 (Backup) | 60 | **67.65** | 64.60 |
+| eth_rx | 125 | **156.30** | 124.84 ✗ |
+| eth_tx | 125 | **159.01** | 129.65 |
+
+**Seed 4 passes all five with margin**, and its 71.68 MHz on Main is the widest
+USB margin this project has measured (previous best 69.98). Note seed 4 was the
+SLOWER placement of the two -- HeAP 119.75 s against seed 8's 69.51 s -- so
+placement time predicts timing no better than `sys` Fmax does.
+
+**The box cell count is not a lever, measured twice more.** 1429 cells stalled
+on three seeds and 1393 on two, while 1399 placed in 30 s on the netlist without
+HID. Same rectangle, same occupancy, different outcome: it is the structure of
+the netlist, not how many cells fit. `NEXTPNR_USB_FP_CTRL_NOT=rom_read_port`
+does shrink the box exactly as predicted (1460 -> 1393) and does **not** rescue
+a stalling seed. Stop pulling that knob.
+
+### Hardware result, seed 4 bitstream (2026-11-11)
+
+Flashed volatile, taps left at 31/31. **Both HID devices enumerate on both
+PHYs** and the kernel binds `usbhid` and builds four input devices:
+
+```
+1-10 1209:eab1 Main    if00/if01 class=01 snd-usb-audio   if02 class=03 usbhid
+1-8  1209:eab2 Backup  if00/if01 class=01 snd-usb-audio   if02 class=03 usbhid
+Main Keyboard/Mouse, Backup Keyboard/Mouse -- report descriptor 107 B, identical
+```
+
+Audio untouched: 48 ch / S32_LE / 96000 on both cards. **Four OSC switches left
+the USB device numbers unchanged (115/116)** with all four input devices still
+present, and the `'W'` opcode counted them (`switches 4`, `dest` following) --
+so switching costs no disconnect, which was the requirement.
+
+**Tap sweep, leak criterion, RANDOM data, 10 s per tap** — and it says nothing
+needs re-pinning:
+
+| tap | 0 | 8 | 16 | 24 | 28 | 31 |
+|---|---|---|---|---|---|---|
+| Main | +0.0000% | −0.0004% | −0.0000% | +0.0004% | −0.0004% | +0.0000% |
+| Backup | +0.0000% | −0.0004% | −0.0004% | −0.0004% | +0.0005% | +0.0000% |
+
+Every tap at the measurement noise floor on both buses, `overflow` 0, ingress
+exactly nominal (18.432 MB/s). The eye is again wider than the whole delay
+line, so **31/31 is an arbitrary point inside an open eye, not a cliff edge** —
+31 taps of margin against the ~8 the acceptance bar asks for. Dual stream, both
+PHYs at 48 ch / 96 kHz with random data, three 15 s windows: both exactly
+18.432 MB/s, leak −0.0003%..+0.0000%, `overflow` 0, `write_drops` 0.
+
+**`tools/stats.py` falls over on one lost datagram**; `usbsrc.query()` retries
+four times. Measured here: every opcode answers ~6/6 under a live stream, with
+ordinary link-local loss around 1 in 12 hitting all of them equally. So
+"stats.py times out while the other tools work" is the tool's retry policy, not
+the board and not the reply size (`'f'` is 316 bytes and fine).
+
 ## Generated files are what the tools consumed
 
 - **`csr.h` must belong to the `.bit` you are flashing.** Optional features are

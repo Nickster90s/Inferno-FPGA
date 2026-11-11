@@ -58,6 +58,7 @@ from litex.soc.integration.builder import *
 from litex.soc.cores.led import LedChaser
 from litex.soc.cores.spi_flash import S7SPIFlash   # config-flash NV via STARTUPE2 (cs=/CRF persist)
 from litex.soc.cores.icap import ICAP              # zelf-herconfiguratie uit SPI: de enige reset die terugkomt
+# (geen import van UART/RS232PHY: er is er maar EEN, door SoCCore aangemaakt)
 from litex.soc.interconnect.csr import CSR, CSRStatus, CSRStorage, AutoCSR
 
 from liteeth.phy.s7rgmii import LiteEthPHYRGMII
@@ -547,12 +548,72 @@ class AVBSoC(SoCCore):
         platform = colorlight_i9plus.Platform(toolchain="openxc7")
 
         # UART via CH347 on Ext-Board (TXD1/RXD1 routed to FPGA).
+        _ser_tx, _ser_rx = (os.environ.get("KVM_UART_PINS", "AB22,W20")
+                            .split(","))
         platform.add_extension([
             ("serial", 0,
-                Subsignal("tx", Pins("R3")),   # FPGA TX → CH347 RXD1
-                Subsignal("rx", Pins("M3")),   # FPGA RX ← CH347 TXD1
+                # DE HELE UART ZIT OP DE SODIMM, BIJ DE RP2350 -- niet meer op
+                # de CH347 (besluit 2026-11-11, en het was al zo afgesproken:
+                # "pak 159 (AB22) en 161 (W20)", met GND op 157/158 pal ernaast
+                # zodat het retourpad een halve centimeter is).
+                # KVM_UART_PINS="<tx>,<rx>" zet ze ergens anders; "R3,M3" zet de
+                # console terug op de CH347.
+                #
+                #   AB22 = SODIMM 159 = FPGA TX -> RP2350 pad 2 = GPIO1 = RX
+                #   W20  = SODIMM 161 = FPGA RX <- RP2350 pad 1 = GPIO0 = TX
+                #
+                # Bank 14, en de werkende build gebruikt bank 14 al op
+                # LVCMOS33, dus de bank staat op 3,3 V en er hoeft geen
+                # levelshifter tussen.
+                Subsignal("tx", Pins(_ser_tx)),
+                # DE HID-REPORTS KOMEN BINNEN OP DEZE UART. Er is er maar een,
+                # en die is bewust gehouden toen de rest van de console werd
+                # gestript, precies hiervoor. Er stond hier een dag lang een
+                # TWEEDE UART (2026-11-11) die een letterlijke kopie was --
+                # zelfde 1 Mbaud, zelfde 64-diepe FIFO -- en die kostte de
+                # plaatsing: met hem plaatste de netlist op 1 van 8 seeds, nul
+                # HeAP-iteraties op de andere zeven; zonder hem 6 van 8.
+                #
+                # De ontvangstkant was altijd vrij: loader.c heeft een
+                # uart_rxtx_write() en nul reads, log.h schrijft alleen. Wat
+                # hiermee WEL verdwijnt is de console via de CH347 -- zowel in
+                # als uit. De FPGA's logtekst gaat nu naar de RP2350's RX, die
+                # er doorheen moet kijken; daarom heeft kvm.c zijn A5 5A +
+                # XOR-framing, en daarom resynchroniseert de parser per byte.
+                # JTAG op de CH347 blijft ongemoeid, dus flashen verandert niet.
+                #
+                # LET OP voor de volgende plaatsingsjacht: M3 was IOB_X1Y68, in
+                # de ETH-padband (X1 Y51-72), en W20 is IOB_X0Y25, in de
+                # ULPI-band (Main X1 Y23-49, Backup X1 Y1-32). Pinpositie bleek
+                # een stall niet op te heffen (F13/F14 op Y147/148 stalde
+                # identiek), maar dat bewijst niet dat het niets kost.
+                Subsignal("rx", Pins(_ser_rx)),
                 IOStandard("LVCMOS33"))
         ])
+
+        # ---- KVM link to the RP2350 (HID reports in) -----------------------
+        # SODIMM 159 and 161, with GND right next to them on 157/158.
+        #
+        # THE PIN NAME, NOT dimm:N. The litex-boards connector string for this
+        # board is missing a space between its rows 11-20 and 21-30, so "NC" and
+        # "ETH1_2N" merge into one token: the list has 200 entries where 201
+        # belong, and every dimm:N from 20 upward returns the pin the comments
+        # call N+1. Measured 2026-11-07, not assumed. Naming the package pin
+        # makes that bug irrelevant here, which is also why the console above
+        # names R3/M3 directly.
+        #
+        # Verified free against build_seed5's XDC: neither AB22 nor W20 is
+        # claimed by anything in this design.
+        # NO SECOND UART, AND NO kvm_serial PADS. Removed 2026-11-11 after a day
+        # spent chasing the placement stall they caused: this design's ONE UART
+        # was deliberately kept for exactly this link ("hou de uart" /
+        # "laat de uart dan zo, berichten naar de RP zal niet groot worden"),
+        # and it is ALREADY 1 Mbaud with a 64-deep FIFO -- the second one was a
+        # literal duplicate of it. Measured cost of that duplicate: the netlist
+        # went from placing on 6 of 8 seeds to 1 of 8, with zero HeAP iterations
+        # on the other seven. Nothing reads the console UART's RX (loader.c
+        # writes, log.h writes, zero readers), so the RP2350's reports go there.
+        # See CLAUDE.md, "The bisect, and what it found".
 
         # USB UAC2 ULPI (P2 header) — must be added before the CRG, which
         # requests ulpi_clock for the cd_usb PLL.
@@ -1014,6 +1075,45 @@ class AVBSoC(SoCCore):
         # host's response without a gateware rebuild.
         self.usb_fb_ovr = CSRStorage(32, description="USB async-feedback override (0=auto).")
 
+        # ---- KVM: one HID report register per PHY ---------------------------
+        # 9 bytes, little-endian: byte 0 is the HID report ID (1 = keyboard,
+        # 2 = mouse) and bytes 1..8 are that report's payload. Both reports are
+        # the same length by design -- the mouse is padded in the report
+        # descriptor -- because the endpoint is a USBSignalInEndpoint that
+        # relays a FIXED width on every poll.
+        #
+        # DELIBERATELY NO ROUTING LOGIC IN GATEWARE. Two independent registers,
+        # one per PHY, and the firmware decides what goes in each; OSC
+        # (kvm_main / kvm_backup) just changes which one the incoming RP2350
+        # report is written to. The reason is the classic KVM stuck-key: at the
+        # moment you switch away, whatever was held stays held on the host you
+        # left unless something sends it a release. A gateware mux cannot do
+        # that -- it can only pass or zero -- whereas firmware can write an
+        # all-released keyboard report (ID 1, zero payload) to the PHY it is
+        # leaving and then start feeding the other one.
+        #
+        # The endpoint relays STATE, so the register content IS what the host
+        # sees, repeated every 1 ms until the firmware changes it.
+        # ATOMIC_WRITE IS NOT OPTIONAL HERE. 72 bits is three CSR words, and
+        # without it each word lands in `storage` on its own: the endpoint can
+        # sample between two writes and send the host a half-updated report --
+        # a key from the new report next to a key from the old one, which is a
+        # phantom keypress, not a glitch you would ever reproduce. With it, the
+        # upper words go to a backstore and the LOWEST word commits all three
+        # at once (litex/soc/interconnect/csr.py, CSRStorage.do_finalize). The
+        # lowest word is the HIGHEST address, so writing the three in ascending
+        # address order -- which is what csr_write_simple does -- commits last
+        # by construction.
+        # KVM_HID_CSR=0 LAAT DE TWEE REPORT-REGISTERS WEG (bisect, 2026-11-11).
+        # 72 bits is drie CSR-woorden plus een backstore per register, en ze
+        # voeden een poort van de USB-instantie -- dus ze kunnen cellen IN de
+        # USB-doos trekken via de netconnectiviteit van floorplan_usb.py. Dat
+        # moet los te meten zijn van de UART en van de descriptors.
+        _kvm_csr = os.environ.get("KVM_HID_CSR", "1") == "1"
+        if _kvm_csr:
+            self.kvm_main_report = CSRStorage(72, reset=1, atomic_write=True,
+                description="Main PHY HID report: byte0 = report ID, bytes 1-8 = payload.")
+
         # RATE-FOLLOW. De clock source in het subsysteem meldt precies EEN rate,
         # read-only, en de host volgt -- hem host-programmeerbaar maken brak het
         # streamen (zie de waarschuwing bij current_rate_48k in
@@ -1103,6 +1203,7 @@ class AVBSoC(SoCCore):
             i_sample_strobe         = self.mcr.sample_strobe,
             i_block_level           = usb_block_level_usb,   # cd_usb-synchronised
             i_fb_ovr                = self.usb_fb_ovr.storage,
+            **({"i_hid_report": self.kvm_main_report.storage} if _kvm_csr else {}),
             **_rate_port,
         )
 
@@ -1187,6 +1288,11 @@ class AVBSoC(SoCCore):
             sample_rdy2_w = Signal();   sample_pop2_w = Signal()
             sample_ovf2_w = Signal(32); dbg2_a = Signal(32); dbg2_b = Signal(32)
             self.usb2_fb_ovr = CSRStorage(32, description="Backup USB async-feedback override (0=auto).")
+            # Backup's own HID report -- see kvm_main_report for why these are
+            # two independent registers and not one with a mux.
+            if _kvm_csr:
+                self.kvm_backup_report = CSRStorage(72, reset=1, atomic_write=True,
+                    description="Backup PHY HID report: byte0 = report ID, bytes 1-8 = payload.")
             usb2_block_level_usb2 = Signal(8)
             self.specials += _MultiReg(usb_block_level, usb2_block_level_usb2, odomain="usb2")
             _ulpi2_rst_w = Signal()
@@ -1207,6 +1313,7 @@ class AVBSoC(SoCCore):
                 o_dbg_rx_beats=dbg2_a, o_dbg_ep_out=dbg2_b,
                 i_sample_strobe=self.mcr.sample_strobe,
                 i_block_level=usb2_block_level_usb2, i_fb_ovr=self.usb2_fb_ovr.storage,
+                **({"i_hid_report": self.kvm_backup_report.storage} if _kvm_csr else {}),
                 # DEZELFDE CSR als Main, maar via een EIGEN synchroniser naar
                 # cd_usb2 -- zie de toelichting bij Main. Beide clock sources
                 # moeten dezelfde rate melden: twee hosts die verschillende
@@ -1561,6 +1668,30 @@ class AVBSoC(SoCCore):
         # warm-boot address set up first.
         self.icap = ICAP()
         self.add_csr("icap", csr_id=13)
+
+        # ---- The RP2350 link uses THE EXISTING UART -------------------------
+        # There is one UART, on R3/M3 through the CH347, at 1 Mbaud with a
+        # 64-deep FIFO, and the RP2350's HID reports come in on it. There was a
+        # second one here until 2026-11-11, with this justification:
+        #
+        #   "The KVM link needs its own, because the RP2350 feeds HID reports
+        #    continuously and sharing the console would mean framing them
+        #    around log output."
+        #
+        # Both halves of that were wrong. The framing already exists -- kvm.c
+        # has had A5 5A + XOR since it was written, precisely so the link can
+        # resynchronise -- and the operator had already decided this question
+        # ("hou de uart", "laat de uart dan zo, berichten naar de RP zal niet
+        # groot worden"), keeping the peripheral FOR this link when the rest of
+        # the console was stripped. The duplicate cost a day: with it the
+        # netlist placed on 1 of 8 seeds (zero HeAP iterations on the other
+        # seven), without it 6 of 8. Nothing reads the console RX -- loader.c
+        # and log.h only write -- so the receive side was free all along.
+        #
+        # LiteX's uart_init() enables UART_EV_RX and attaches uart_isr(), which
+        # drains the hardware FIFO into a 128-byte software ring, so firmware
+        # reads reports with readchar_nonblock()/readchar() and must NOT poke
+        # the FIFO itself.
 
 # Build ------------------------------------------------------------------------------------------------
 

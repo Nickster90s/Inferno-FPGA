@@ -422,6 +422,21 @@ _ctrl_match = os.environ.get("NEXTPNR_USB_FP_CTRL", "get_descriptor").lower()
 # pad-only-modus heeft dus nooit gedaan wat erboven staat. Gevonden 2026-11-03
 # bij het zoeken naar een doos waarin BEIDE PHY's bij hun pads passen.
 _ctrl_on = _ctrl_match != ""
+# UITSLUITINGEN BINNEN _ctrl_match, komma-lijst. Toegevoegd 2026-11-11.
+# WAAROM: de lichte doos groeide van 1385 naar 1502 cellen toen HID erbij kwam,
+# en op 1502 plaatst nog maar 1 van de 8 seeds (op 1385 waren het 6 van de 8).
+# De doos BREDER maken is geen uitweg -- X 0..55 is met zero wirelen-iteraties
+# onhaalbaar op seeds 1 en 5, net als de 0,0..58,156 uit poging 7 hierboven.
+# Dus moet het cellenaantal omlaag, en de netnamen zeggen precies waar het
+# zit: van de 174 get_descriptor-namen in de netlist zijn 58 het READ PORT van
+# de descriptor-ROM (rom_read_port$rdreg$d), en de 638 gematchte nets zijn
+# exact 72 meer dan de 566 van voor HID -- dezelfde 72 waarmee de ROM van 67
+# naar 139 woorden ging. De ROM-mux schaalt dus 1:1 met de descriptors mee,
+# terwijl het GEMETEN kritieke pad de byte-teller en zijn CARRY4 is, niet de
+# ROM-data. Die teller blijft in de doos, de ROM-mux gaat eruit.
+_ctrl_not = [x for x in
+             os.environ.get("NEXTPNR_USB_FP_CTRL_NOT", "").lower().split(",")
+             if x]
 
 # ---- IN DE LICHTE MODUS IS DE DOOS OOK IN Y BEGRENSD ------------------------
 # Y 0..156 (de volle kolom) bedekt ook de ETH-pad-rijen -- zie de kop van dit
@@ -472,6 +487,11 @@ for nname, net in ctx.nets:
         # dus trek dat, en niet zijn hele ouder.
         if ("ulpi" not in _n) and not (_ctrl_on and _ctrl_match in _n):
             continue
+        # Uitsluiting geldt ALLEEN voor de control-kant: een ulpi-net dat
+        # per ongeluk een uitgesloten substring bevat moet in de doos
+        # blijven, want daarvoor is deze floorplan in mei gemaakt.
+        if ("ulpi" not in _n) and any(x in _n for x in _ctrl_not):
+            continue
     elif USB_PREFIX not in nname or USB2_PREFIX in nname:  # USB1 only (excl USB2)
         continue
     nnets += 1
@@ -512,6 +532,13 @@ CFG_PREFIX = "cfgflash"
 # USB1 blijft nu op X<=48 (we boxen Backup niet meer), dus cfgflash kan terug
 # naar avb-aes3's 50 -- de 60 was er alleen om een 58 brede USB-kolom te ontwijken.
 _cf_x0 = 50
+# NEXTPNR_CFG_X0 schuift deze doos naar rechts zodat de USB-kolom BREDER kan
+# dan 48 zonder het eigen invariant ("rechts van de USB-doos") te breken.
+# Toegevoegd 2026-11-11: met HID erbij houdt de lichte doos 1502 cellen en
+# stalt HeAP op 7 van 8 seeds; X verbreden is de maatregel die
+# DUAL_USB_96K_HANDOFF.md section 6(a) als eerste aanbeveelt, en die kan
+# alleen als cfgflash meeschuift.
+_cf_x0 = int(os.environ.get("NEXTPNR_CFG_X0", _cf_x0))
 ctx.createRectangularRegion(CFG_REGION, _cf_x0, 0, 114, 156)
 ncf = 0
 for cname, cell in ctx.cells:

@@ -28,6 +28,7 @@ extern uint8_t  usb_fb_sweep_hold;
 #include "dante_tx.h"
 #include "gptp.h"
 #include "rx_gate.h"
+#include "kvm.h"
 #include "mcr_dante.h"
 #include "telem.h"
 #include <generated/csr.h>
@@ -545,6 +546,32 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         put32(pi, ni, g_info_stats.reboot_applied);     ni += 4;
         put32(pi, ni, g_info_stats.reboot_nochange);    ni += 4;
         net_udp_commit(src_ip, src_port, STATS_PORT, ni, NET_TOS_BEST_EFFORT);
+        return;
+    }
+
+    // 'W' -- KVM link health. ('K' was taken; the opcode letters are a flat
+    // namespace in this file and a duplicate silently shadows the earlier one,
+    // because the first matching `if` wins and the second is dead code.)
+    // The RP2350 feeds HID reports over the ONE UART this design has (moved to
+    // the SODIMM, AB22/W20) and nothing else can see whether they arrive: the
+    // shipping build has no console narrative, and a host that shows no
+    // keypresses looks identical whether the link is silent, the frames are
+    // corrupt, or the reports are going to the OTHER PHY. These counters
+    // separate those: bytes_rx 0 means nothing is wired, frames_bad with
+    // bytes_rx > 0 means the link is noisy, and dest says which PHY is being
+    // written at all.
+    if (len >= 1 && req[0] == 'W') {
+        uint8_t *pk = net_udp_payload_buf();
+        uint32_t nk = 0;
+        put32(pk, nk, 0x4B564D31u); nk += 4;            // 'KVM1'
+        put32(pk, nk, kvm_dest());             nk += 4;  // 0 = Main, 1 = Backup
+        put32(pk, nk, g_kvm_stats.bytes_rx);   nk += 4;
+        put32(pk, nk, g_kvm_stats.frames_ok);  nk += 4;
+        put32(pk, nk, g_kvm_stats.frames_bad); nk += 4;
+        put32(pk, nk, g_kvm_stats.resyncs);    nk += 4;
+        put32(pk, nk, g_kvm_stats.switches);   nk += 4;
+        put32(pk, nk, g_kvm_stats.overrun);    nk += 4;
+        net_udp_commit(src_ip, src_port, STATS_PORT, nk, NET_TOS_BEST_EFFORT);
         return;
     }
 
