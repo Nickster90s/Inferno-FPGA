@@ -415,6 +415,9 @@ the board and not the reply size (`'f'` is 316 bytes and fine).
   wired into `build.sh`. Re-emitting the descriptors **moves both ULPI eye
   centres**: regenerate → rebuild → `tools/tapsweep.py --phy main` and
   `--phy backup` → pin the winners → rebuild.
+- **The RP2350's firmware is in `rp2350/`, with its own `CLAUDE.md`** (own
+  toolchain in `~/pico`, never run on hardware as of 2026-11-11). It is the
+  other end of `firmware/kvm.c`'s UART frames.
 - There is **one** UART, on R3/M3 via the CH347 ext board (`avb_soc.py:549`),
   *not* the unused `pmod_uart()` helper. The platform's pin list has a missing
   space between two string literals, so every `dimm:N` above 20 is one position
