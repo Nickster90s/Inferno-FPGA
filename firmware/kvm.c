@@ -153,7 +153,10 @@ void kvm_init(void)
 // from the ring the ISR fills.
 //
 // Nothing else reads this UART: loader.c has one uart_rxtx_write() and log.h
-// only writes, so the receive side belongs entirely to this file. TX still
+// only writes, so the receive side belongs entirely to this file.
+// CORRECTED 2026-11-11: that was false when written. main.c's check_uart_cmd()
+// read the same ring once per main-loop pass, took the A5 off isolated frames
+// and ran it as a console command. Its call is removed; see main.c's loop. TX still
 // carries the log, which is why the frames below are self-synchronising --
 // whatever the FPGA prints cannot be mistaken for a report.
 

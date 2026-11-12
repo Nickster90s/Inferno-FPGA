@@ -1365,7 +1365,21 @@ int main(void)
         if (!aaf_gw_enabled)
             usb_fifo_drain();
 
-        check_uart_cmd();
+        // check_uart_cmd() IS NOT CALLED ANY MORE, AND MUST NOT BE (2026-11-11).
+        // The UART's RX is the RP2350's HID link now, and this handler read
+        // from the same libbase ring as kvm_poll(): one byte per pass of this
+        // loop, whichever of the two got there first. Measured with the RP2350
+        // connected: resyncs climbed in exact multiples of 11 with frames_bad
+        // at 0 -- a 12-byte frame whose A5 had been taken here, so the other
+        // eleven could never start one. An isolated frame arrives while the
+        // loop is somewhere between kvm_poll() and this line, so it lost its
+        // first byte almost every time (4 of 5 in a quiet 10 s window).
+        //
+        // It was worse than lost reports: the stolen byte was EXECUTED as a
+        // console command. A payload byte of 0x72 is 'r' (reboot), 0x75 is 'u'
+        // (step the ULPI IDELAY tap). kvm.c's "nothing else reads this UART"
+        // was written from loader.c and log.h and never looked here.
+        (void)check_uart_cmd;
     }
 
     return 0;
