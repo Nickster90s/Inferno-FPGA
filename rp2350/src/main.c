@@ -41,6 +41,7 @@
 
 #include "hid_parse.h"
 #include "kvm_sched.h"
+#include "kvm_down.h"
 
 #define LINK_UART       uart0
 #define LINK_TX_PIN     0           /* pad 1 -> SODIMM 161 -> FPGA W20  (its RX) */
@@ -430,13 +431,46 @@ static void protocol_task(void)
 // ---------------------------------------------------------------------------
 // What the FPGA prints (log.h, DANTE_VERBOSE builds) comes in on GPIO1. Since
 // the UART left the CH347 this is the only place that text can be read.
-static void fpga_log_task(void)
+//
+// It also carries the FPGA's STATUS frames (kvm_down.h): which host the reports
+// are being routed to. kvm_down_feed() keeps those and hands back the rest.
+static kvm_down_t g_down;
+
+// WHICH HOST THE FPGA IS FEEDING: KVM_TARGET_MAIN, KVM_TARGET_BACKUP, or
+// KVM_TARGET_UNKNOWN when the FPGA has been silent for KVM_DOWN_STALE_MS.
+// Nothing acts on it yet -- it is here for what comes next (an indicator, a
+// per-host key map, ...). Core 0 only.
+uint8_t kvm_target(void)
 {
-    uint8_t b[64];
-    uint32_t n = 0;
-    while (n < sizeof b && uart_is_readable(LINK_UART))
-        b[n++] = (uint8_t)uart_getc(LINK_UART);
-    if (n) con_write(b, n);
+    return kvm_down_target(&g_down, to_ms_since_boot(get_absolute_time()));
+}
+
+static const char *target_name(uint8_t t)
+{
+    return t == KVM_TARGET_MAIN ? "Main" : t == KVM_TARGET_BACKUP ? "Backup" : "unknown";
+}
+
+static void fpga_rx_task(void)
+{
+    static uint8_t shown = KVM_TARGET_UNKNOWN;
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+
+    for (int budget = 128; budget > 0 && uart_is_readable(LINK_UART); budget--) {
+        uint8_t text[12];
+        bool    status;
+        int     n = kvm_down_feed(&g_down, (uint8_t)uart_getc(LINK_UART), now,
+                                  text, &status);
+        if (n) con_write(text, (uint32_t)n);
+    }
+
+    // Report the target when it CHANGES, including to and from "unknown":
+    // losing the FPGA is as much news as a switch.
+    uint8_t t = kvm_down_target(&g_down, now);
+    if (t != shown) {
+        shown = t;
+        con_printf("[rp] target %s (fpga switches %lu)\r\n", target_name(t),
+                   (unsigned long)g_down.switches);
+    }
 }
 
 static void status_task(void)
@@ -465,9 +499,12 @@ static void status_task(void)
     uint32_t sum = c.frames_kbd + c.frames_mouse + c.frames_neutral + c.kbd_coalesced;
     if (sum == last) return;
     last = sum;
-    con_printf("[rp] frames kbd %lu mouse %lu neutral %lu, kbd coalesced %lu\r\n",
+    con_printf("[rp] frames kbd %lu mouse %lu neutral %lu, kbd coalesced %lu"
+               " | target %s, status ok %lu bad %lu\r\n",
                (unsigned long)c.frames_kbd, (unsigned long)c.frames_mouse,
-               (unsigned long)c.frames_neutral, (unsigned long)c.kbd_coalesced);
+               (unsigned long)c.frames_neutral, (unsigned long)c.kbd_coalesced,
+               target_name(kvm_target()), (unsigned long)g_down.frames_ok,
+               (unsigned long)g_down.frames_bad);
 }
 
 // TinyUSB's host stack times its enumeration delays with this. The examples
@@ -499,6 +536,7 @@ int main(void)
     watchdog_enable(2000, true);
 
     kvm_sched_init(&g_sched);
+    kvm_down_init(&g_down);
     critical_section_init(&g_lock);
 
 #if KVM_NATIVE_HOST
@@ -535,7 +573,7 @@ int main(void)
 #endif
         tuh_task();
         protocol_task();
-        fpga_log_task();
+        fpga_rx_task();
         status_task();
         con_task();
 #if KVM_USB_DEBUG

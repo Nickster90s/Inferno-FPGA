@@ -28,6 +28,7 @@
 #include "gptp.h"            // gptp_uptime_ms()
 #include <generated/csr.h>
 #include <stdio.h>
+#include <libbase/uart.h>    // uart_read*/uart_write: the ring, never the FIFO
 
 #include "log.h"
 #define printf(...) LOGF(__VA_ARGS__)
@@ -104,6 +105,45 @@ static void kvm_write_release(uint8_t phy, uint8_t report_id)
 // then the keyboard, with a settle gap between them because ONE register cannot
 // hold both at once and the host must actually poll each. The keyboard one is
 // written last and stays, because a held key is the failure people notice.
+// ---------------------------------------------------------------------------
+// Telling the RP2350 which host it is typing into
+// ---------------------------------------------------------------------------
+// The same 12-byte frame, the other way: A5 5A | 0x80 | 8 payload | xor.
+//
+//     p0     target, KVM_DEST_MAIN / KVM_DEST_BACKUP
+//     p1     format version, 1
+//     p2..5  g_kvm_stats.switches, little-endian
+//     p6,7   0
+//
+// IDs 0x80 and up are FPGA -> RP2350; 1 and 2 are the HID reports coming up.
+// rp2350/src/kvm_down.h is the other end and must change with this.
+//
+// SENT ON EVERY SWITCH AND ONCE A SECOND. Once a second because either end can
+// restart alone: an RP2350 that has just booted learns the target within a
+// second without asking, and one that hears nothing knows we are gone. 12
+// bytes a second on a 1 Mbaud line.
+//
+// THIS UART'S TX ALSO CARRIES THE LOG (log.h), which is why the frame is
+// self-synchronising in this direction too. The two cannot interleave: both
+// are written from the main loop, and uart_write() only queues into libbase's
+// TX ring, which the ISR drains in order.
+#define KVM_STATUS_ID        0x80
+#define KVM_STATUS_PERIOD_MS 1000
+
+static uint32_t g_status_at_ms;
+
+static void kvm_send_status(void)
+{
+    uint32_t sw = g_kvm_stats.switches;
+    uint8_t f[12] = { 0xA5, 0x5A, KVM_STATUS_ID, g_dest, 1,
+                      (uint8_t)sw, (uint8_t)(sw >> 8), (uint8_t)(sw >> 16),
+                      (uint8_t)(sw >> 24), 0, 0, 0 };
+    for (int i = 2; i < 11; i++) f[11] ^= f[i];
+    for (int i = 0; i < 12; i++) uart_write((char)f[i]);
+    g_status_at_ms = gptp_uptime_ms();
+    g_kvm_stats.status_tx++;
+}
+
 void kvm_select(uint8_t dest)
 {
     dest = (dest == KVM_DEST_BACKUP) ? KVM_DEST_BACKUP : KVM_DEST_MAIN;
@@ -117,6 +157,7 @@ void kvm_select(uint8_t dest)
 
     g_dest = dest;
     g_kvm_stats.switches++;
+    kvm_send_status();                     /* now, not at the next second */
     printf("[kvm] -> %s\n", dest == KVM_DEST_BACKUP ? "Backup" : "Main");
 }
 
@@ -160,7 +201,6 @@ void kvm_init(void)
 // carries the log, which is why the frames below are self-synchronising --
 // whatever the FPGA prints cannot be mistaken for a report.
 
-#include <libbase/uart.h>
 
 static uint8_t  g_buf[12];
 static uint8_t  g_len;
@@ -183,6 +223,9 @@ void kvm_poll(void)
         kvm_write_release(g_rel_phy, 1);   /* keyboard: all keys up */
         g_rel_stage = 0;
     }
+
+    if ((uint32_t)(gptp_uptime_ms() - g_status_at_ms) >= KVM_STATUS_PERIOD_MS)
+        kvm_send_status();
 
     // BOUNDED. The software ring is 128 bytes and this runs in the main loop
     // next to the PTP servo and the Dante stacks; draining "until empty" would

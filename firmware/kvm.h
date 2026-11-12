@@ -28,6 +28,7 @@ typedef struct {
     uint32_t resyncs;       /* times the parser dropped a byte to re-find sync*/
     uint32_t switches;      /* kvm_select() calls that changed the target    */
     uint32_t overrun;       /* UART RX FIFO was full when polled             */
+    uint32_t status_tx;     /* STATUS frames sent to the RP2350              */
 } kvm_stats_t;
 
 extern kvm_stats_t g_kvm_stats;

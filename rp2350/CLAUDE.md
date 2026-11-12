@@ -7,8 +7,9 @@ its placement history are in `../CLAUDE.md`. `README.md` here has the long form.
 
 **Status 2026-11-12: runs on the board.** Keyboard and mouse reach both hosts,
 `/kvm/main` and `/kvm/backup` route them, hot-plug works. Wired low-speed
-keyboard + mouse behind a hub work **on the Type-C build with the right hub** --
-see "Hubs" below before touching anything USB.
+keyboard + mouse behind a hub work **on both builds with the right hub** -- see
+"Hubs" below before touching anything USB. The default (USB-A) build is the one
+in use: it needs no adapter and keeps the console.
 
 ## Two builds, two host ports
 
@@ -36,7 +37,7 @@ Measured 2026-11-12 with a Cherry mouse (`046a:b091`) and a keyboard
 | host | hub `214b:7250` | hub `0a05:7211` |
 |---|---|---|
 | Type-C, native controller | fails: data-sequence errors, RX timeouts, 0 reports | **works at once** |
-| USB-A, Pico-PIO-USB | fails: 15-30% of transfers lost, 1 run in ~13 enumerates | not tried |
+| USB-A, Pico-PIO-USB | fails: 15-30% of transfers lost, 1 run in ~13 enumerates | **works** (mouse, keyboard, 1985 frames) |
 
 The failure is the same on two unrelated host implementations, which is what
 pointed at the hub. On a PC both hubs work, because a PC talks high-speed to
@@ -62,7 +63,8 @@ are currently APPLIED in `~/pico`. A fresh clone needs them re-applied.
   available` twice on the bad hub; the watchdog covers it.
 - `pico-pio-usb-0.7.3-pre-turnaround.patch` -- waits 4 instead of 1.5 low-speed
   bit times before the handshake behind a hub. It moved the bad hub from "never
-  past SET_ADDRESS" to "sometimes"; whether a good hub needs it is not known.
+  past SET_ADDRESS" to "sometimes". The good hub was only ever run WITH it, so
+  whether it is needed there is not known -- do not drop it untested.
 
 ## Power: do not hot-plug a bus-powered hub on pad 18
 
@@ -105,10 +107,11 @@ are deliberately free of SDK includes so they run on the build machine:
 
 ```sh
 cc -Wall -Wextra -fsanitize=address,undefined -Isrc \
-   test/test_host.c src/kvm_sched.c src/hid_parse.c -o /tmp/kvm_test && /tmp/kvm_test
+   test/test_host.c src/kvm_sched.c src/hid_parse.c src/kvm_down.c \
+   -o /tmp/kvm_test && /tmp/kvm_test
 ```
 
-Keep them SDK-free. Glue belongs in `main.c`.
+Keep them (and `kvm_down.c`) SDK-free. Glue belongs in `main.c`.
 
 ## The wire contract is owned by the FPGA
 
@@ -118,6 +121,15 @@ Keep them SDK-free. Glue belongs in `main.c`.
 8-bit X/Y/wheel with minimum −127, key codes 0..0x65). Changing either side
 means changing both, and changing the descriptor re-emits the ROM — see
 `../CLAUDE.md` for what that costs (seed sweep, two tap sweeps).
+
+**And back, FPGA → RP2350, same frame, ids 0x80 and up.** `0x80` STATUS: p0 =
+target (0 Main, 1 Backup), p1 = version 1, p2..5 = the FPGA's switch count.
+Sent on every `/kvm/main` / `/kvm/backup` and once a second, so either end can
+restart alone; `kvm_target()` in `main.c` returns it, or UNKNOWN after 3.5 s of
+silence. Nothing acts on it yet. The same wire carries the FPGA's log text, and
+`kvm_down.c` separates the two -- sender is `kvm_send_status()` in
+`../firmware/kvm.c`. Measured 2026-11-12: four OSC switches, four target lines
+on the console with the switch count following.
 
 Pins: **GPIO0 = TX → FPGA `W20`**, **GPIO1 = RX ← FPGA `AB22`**. USB-A is
 GPIO12 (D+) / GPIO13 (D−).

@@ -7,9 +7,9 @@ business (`/kvm/main`, `/kvm/backup` over OSC) and is invisible from here.
 
 **Status 2026-11-12: runs on the board.** Typing and mouse movement reach the
 host, OSC routes them between Main and Backup, hot-plug works. Wired low-speed
-keyboard and mouse behind a hub work on the **Type-C build** with a hub that
-enumerates full-speed on a PC (`0a05:7211`); hubs with chip `214b:7250` do not
-work. The measurements, the two builds, the library patches and the power
+keyboard and mouse behind a hub work, on either port, with a hub that
+enumerates **full-speed** on a PC (`0a05:7211`); high-speed hubs with chip
+`214b:7250` do not work. Rule: full-speed hubs only. The measurements, the two builds, the library patches and the power
 finding are in `CLAUDE.md` -- read that before changing anything USB.
 
 ```
@@ -31,7 +31,7 @@ export PICO_SDK_PATH=$HOME/pico/pico-sdk        # PICO_PIO_USB_PATH defaults to 
 cmake -S . -B build -G Ninja && ninja -C build  # -> build/kvm_rp2350.uf2
 
 cc -Wall -Wextra -fsanitize=address,undefined -Isrc \
-   test/test_host.c src/kvm_sched.c src/hid_parse.c -o /tmp/kvm_test && /tmp/kvm_test
+   test/test_host.c src/kvm_sched.c src/hid_parse.c src/kvm_down.c -o /tmp/kvm_test && /tmp/kvm_test
 ```
 
 Flash: hold BOOT, plug the Type-C, copy `build/kvm_rp2350.uf2` to the drive.
@@ -78,7 +78,9 @@ regenerate, a seed sweep and two tap sweeps, so it was not started from here.
 
 ## Wired devices behind a hub
 
-Use the Type-C build: `cmake -S . -B build_typec -G Ninja -DKVM_NATIVE_HOST=1`,
+The default build on the USB-A port does this with a full-speed hub and is the
+one in use. The Type-C build is the alternative, kept because it uses the
+RP2350's real USB controller: `cmake -S . -B build_typec -G Ninja -DKVM_NATIVE_HOST=1`,
 flash with `./flash.sh build_typec/kvm_rp2350.uf2`, and connect the hub through
 a USB-C-to-A OTG adapter (either way up). The hub's 5 V then comes from pad 18.
 The USB-A port is unused in that build and there is no console.
@@ -87,12 +89,12 @@ The USB-A port is unused in that build and there is no console.
 
 - **Mouse feel.** Motion is approximate by design (see above); nobody has
   judged yet whether it is good enough in daily use.
-- **The good hub on the USB-A port.** `0a05:7211` was only tried on the Type-C.
 - **R13** (1.5 kOhm pull-up on a USB-A data line): `KVM_HANDOFF.md` says remove
   it for host use. The USB-A host worked on this board; whether R13 was
   removed is not recorded.
 - **Recovery after a supply dip** on the FPGA side (opcode `'H'`).
 
-Not done: the FPGA does not tell the RP which host is selected, so a key held
-*across* a switch is not re-sent to the new host until it changes; and nothing
-is sent from the FPGA to the RP except log text.
+The FPGA tells the RP2350 which host is selected (STATUS frame, see
+`src/kvm_down.h`); the firmware reports it on the console and exposes it as
+`kvm_target()`, and does nothing else with it yet. In particular a key held
+*across* a switch is still not re-sent to the new host until it changes.

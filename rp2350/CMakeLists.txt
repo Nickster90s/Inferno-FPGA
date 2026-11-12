@@ -36,6 +36,7 @@ add_executable(kvm_rp2350
     src/main.c
     src/kvm_sched.c
     src/hid_parse.c
+    src/kvm_down.c
 )
 if (KVM_NATIVE_HOST)
     target_compile_definitions(kvm_rp2350 PRIVATE KVM_NATIVE_HOST=1)

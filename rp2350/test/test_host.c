@@ -10,6 +10,7 @@
 
 #include "hid_parse.h"
 #include "kvm_sched.h"
+#include "kvm_down.h"
 
 // firmware/kvm.c, kvm_frame(): the acceptance test a frame faces on the FPGA.
 static int fpga_accepts(const uint8_t *f)
@@ -190,8 +191,87 @@ static void test_parse(void)
     puts("parse   ok");
 }
 
+// What firmware/kvm.c's kvm_send_status() puts on the wire.
+static void fpga_status(uint8_t f[12], uint8_t dest, uint32_t sw)
+{
+    uint8_t t[12] = { 0xA5, 0x5A, 0x80, dest, 1, (uint8_t)sw, (uint8_t)(sw >> 8),
+                      (uint8_t)(sw >> 16), (uint8_t)(sw >> 24), 0, 0, 0 };
+    for (int i = 2; i < 11; i++) t[11] ^= t[i];
+    memcpy(f, t, 12);
+}
+
+// Feed a byte string; collect what comes back as text and count STATUS frames.
+static int down_run(kvm_down_t *d, const uint8_t *in, int n, uint32_t now,
+                    uint8_t *text, int *ntext)
+{
+    int got = 0;
+    for (int i = 0; i < n; i++) {
+        uint8_t t[12]; bool st;
+        int k = kvm_down_feed(d, in[i], now, t, &st);
+        memcpy(text + *ntext, t, (size_t)k);
+        *ntext += k;
+        got += st;
+    }
+    return got;
+}
+
+static void test_down(void)
+{
+    kvm_down_t d; uint8_t f[12], text[256]; int nt = 0;
+    kvm_down_init(&d);
+    assert(kvm_down_target(&d, 0) == KVM_TARGET_UNKNOWN);
+
+    // A status frame is taken, produces no text, and sets the target.
+    fpga_status(f, 1, 7);
+    assert(down_run(&d, f, 12, 1000, text, &nt) == 1 && nt == 0);
+    assert(kvm_down_target(&d, 1000) == KVM_TARGET_BACKUP && d.switches == 7);
+    assert(kvm_down_target(&d, 1000 + KVM_DOWN_STALE_MS) == KVM_TARGET_BACKUP);
+    assert(kvm_down_target(&d, 1001 + KVM_DOWN_STALE_MS) == KVM_TARGET_UNKNOWN);
+
+    // Log text around and between frames comes back byte for byte, in order.
+    uint8_t mix[80]; int n = 0;
+    const char *a = "[kvm] -> Main\n", *b = "[ptp] locked\n";
+    memcpy(mix + n, a, strlen(a)); n += (int)strlen(a);
+    fpga_status(mix + n, 0, 8); n += 12;
+    memcpy(mix + n, b, strlen(b)); n += (int)strlen(b);
+    nt = 0;
+    assert(down_run(&d, mix, n, 2000, text, &nt) == 1);
+    assert(nt == (int)(strlen(a) + strlen(b)));
+    assert(!memcmp(text, a, strlen(a)) && !memcmp(text + strlen(a), b, strlen(b)));
+    assert(kvm_down_target(&d, 2000) == KVM_TARGET_MAIN && d.switches == 8);
+
+    // A corrupted frame is not believed, and its bytes are not lost.
+    fpga_status(f, 1, 9); f[3] ^= 1;
+    nt = 0;
+    assert(down_run(&d, f, 12, 3000, text, &nt) == 0 && nt == 12 && d.frames_bad == 1);
+    assert(kvm_down_target(&d, 3000) == KVM_TARGET_MAIN);
+
+    // A5 A5 5A ...: the first A5 is text, the second starts the frame.
+    uint8_t dbl[13] = { 0xA5 };
+    fpga_status(dbl + 1, 1, 10);
+    nt = 0;
+    assert(down_run(&d, dbl, 13, 4000, text, &nt) == 1 && nt == 1 && text[0] == 0xA5);
+    assert(kvm_down_target(&d, 4000) == KVM_TARGET_BACKUP);
+
+    // A frame cut short by a restart: the next whole one still gets through
+    // within two frames.
+    fpga_status(f, 0, 11);
+    nt = 0;
+    down_run(&d, f, 5, 5000, text, &nt);
+    int got = down_run(&d, f, 12, 5000, text, &nt) + down_run(&d, f, 12, 5000, text, &nt);
+    assert(got >= 1 && kvm_down_target(&d, 5000) == KVM_TARGET_MAIN);
+
+    // A valid frame with an id from the future is swallowed, not printed.
+    uint8_t fut[12] = { 0xA5, 0x5A, 0x91, 1, 2, 3, 4, 5, 6, 7, 8, 0 };
+    for (int i = 2; i < 11; i++) fut[11] ^= fut[i];
+    nt = 0;
+    assert(down_run(&d, fut, 12, 6000, text, &nt) == 0 && nt == 0 && d.frames_unknown == 1);
+    puts("down    ok");
+}
+
 int main(void)
 {
+    test_down();
     test_sched();
     test_parse();
     return 0;
