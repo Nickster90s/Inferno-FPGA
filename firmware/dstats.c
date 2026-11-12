@@ -575,6 +575,32 @@ static void stats_rx(const uint8_t src_ip[4], const uint8_t dst_ip[4],
         return;
     }
 
+    // 'H' -- pulse the reset of BOTH ULPI PHYs (usb_phy_hold), i.e. make both
+    // USB devices drop off their hosts and enumerate again.
+    //
+    // WHY. Measured 2026-11-12, three times: hot-plugging a bus-powered hub on
+    // the RP2350 -- which takes its 5 V from this board -- makes Main and
+    // Backup disappear from BOTH hosts at the same instant while this CPU
+    // carries on (counters keep counting, ping answers). They did not come
+    // back in 17 minutes; a reconfiguration brought them back at once. So the
+    // PHYs lose their state on the supply dip and nothing re-initialises them.
+    // This opcode is the manual version of that re-initialisation, to find out
+    // whether a PHY reset alone is enough before anything automatic is built.
+    //
+    // It drops BOTH hosts' audio. Never send it to a board that is in use.
+#ifdef CSR_MAIN_USB_PHY_HOLD_ADDR
+    if (len >= 1 && req[0] == 'H') {
+        main_usb_phy_hold_write(1);
+        uint32_t t0 = gptp_uptime_ms();
+        while ((uint32_t)(gptp_uptime_ms() - t0) < 50) { }   /* USB3300 RESET high */
+        main_usb_phy_hold_write(0);
+        uint8_t *pk = net_udp_payload_buf();
+        put32(pk, 0, 0x50485952u);                       // 'PHYR'
+        net_udp_commit(src_ip, src_port, STATS_PORT, 4, NET_TOS_BEST_EFFORT);
+        return;
+    }
+#endif
+
     // 'Q' -- read ICAP configuration registers. See icap_reg_read() above for
     // why this exists and what the answer means. Its own bounded reply, per the
     // rule at the top of this file: growing the main reply 200 -> 208 bytes
