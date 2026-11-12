@@ -27,28 +27,68 @@ if (NOT TARGET tinyusb_pico_pio_usb)
     message(FATAL_ERROR "the SDK's TinyUSB did not create tinyusb_pico_pio_usb")
 endif ()
 
+# -DKVM_NATIVE_HOST=1: keyboard/mouse on the Type-C (the RP2350's real USB
+# controller) instead of the bit-banged USB-A. See README, "Wired devices
+# behind a hub".
+option(KVM_NATIVE_HOST "USB host on the native controller (Type-C)" OFF)
+
 add_executable(kvm_rp2350
     src/main.c
     src/kvm_sched.c
     src/hid_parse.c
-    src/usb_descriptors.c
 )
+if (KVM_NATIVE_HOST)
+    target_compile_definitions(kvm_rp2350 PRIVATE KVM_NATIVE_HOST=1)
+    target_link_libraries(kvm_rp2350 tinyusb_host)
+else ()
+    target_compile_definitions(kvm_rp2350 PRIVATE KVM_NATIVE_HOST=0)
+    target_sources(kvm_rp2350 PRIVATE src/usb_descriptors.c)
+    target_link_libraries(kvm_rp2350 tinyusb_device tinyusb_host tinyusb_pico_pio_usb)
+endif ()
 target_include_directories(kvm_rp2350 PRIVATE src)
 target_compile_options(kvm_rp2350 PRIVATE -Wall -Wextra)
+# panic() -> our log ring, then the watchdog (main.c, kvm_panic).
+target_compile_definitions(kvm_rp2350 PRIVATE PICO_PANIC_FUNCTION=kvm_panic)
+
+# -DKVM_USB_DEBUG=1: TinyUSB's log on the CDC console (see tusb_config.h).
+option(KVM_USB_DEBUG "route TinyUSB's debug log to the CDC console" OFF)
+if (KVM_USB_DEBUG)
+    target_compile_definitions(kvm_rp2350 PRIVATE KVM_USB_DEBUG=1)
+else ()
+    target_compile_definitions(kvm_rp2350 PRIVATE KVM_USB_DEBUG=0)
+endif ()
 
 target_link_libraries(kvm_rp2350
     pico_stdlib
     pico_multicore
     pico_unique_id
     hardware_uart
-    tinyusb_device
-    tinyusb_host
-    tinyusb_pico_pio_usb
+    hardware_watchdog
+    hardware_flash
+    pico_flash
 )
 
 # stdio goes nowhere: UART0 is the FPGA link and must carry frames only, and
 # pico_stdio_usb cannot coexist with a TinyUSB host. The console is the CDC
 # interface in main.c.
+# -DKVM_LINK_BEACON=1: bench only, see beacon() in main.c.
+option(KVM_LINK_BEACON "signal USB progress through the FPGA's resync counter" OFF)
+if (KVM_LINK_BEACON)
+    target_compile_definitions(kvm_rp2350 PRIVATE KVM_LINK_BEACON=1)
+else ()
+    target_compile_definitions(kvm_rp2350 PRIVATE KVM_LINK_BEACON=0)
+endif ()
+
+# Bench knobs for the Pico-PIO-USB patch (patches/), in quarter LS bit times.
+# Empty = the patch's own defaults.
+set(KVM_PRE_ACK_QBITS "" CACHE STRING "EOP -> handshake behind a hub")
+set(KVM_PRE_GAP_QBITS "" CACHE STRING "extra idle before every PRE")
+foreach (knob KVM_PRE_ACK_QBITS KVM_PRE_GAP_QBITS)
+    if (NOT "${${knob}}" STREQUAL "")
+        target_compile_definitions(kvm_rp2350 PRIVATE ${knob}=${${knob}})
+    endif ()
+endforeach ()
+
 pico_enable_stdio_uart(kvm_rp2350 0)
 pico_enable_stdio_usb(kvm_rp2350 0)
 

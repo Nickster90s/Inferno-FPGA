@@ -1,0 +1,45 @@
+diff --git a/src/pio_usb.c b/src/pio_usb.c
+index 226fa42..5caf4e0 100644
+--- a/src/pio_usb.c
++++ b/src/pio_usb.c
+@@ -40,6 +40,14 @@ static uint8_t pre_encoded[5];
+ // Bus functions
+ //--------------------------------------------------------------------+
+ 
++// KVM_PRE_TURNAROUND knobs, in QUARTER low-speed bit times (1 = 167 ns).
++#ifndef KVM_PRE_ACK_QBITS
++#define KVM_PRE_ACK_QBITS 16   /* EOP seen -> our handshake, behind a hub */
++#endif
++#ifndef KVM_PRE_GAP_QBITS
++#define KVM_PRE_GAP_QBITS 0    /* extra idle before every PRE packet */
++#endif
++
+ static void __no_inline_not_in_flash_func(send_pre)(pio_port_t *pp) {
+   // send PRE token in full-speed
+   pp->low_speed = false;
+@@ -87,6 +95,10 @@ static_assert(IRQ_TX_EOP == 0, "slot 0 patch needs IRQ_TX_EOP == 0");
+ static __always_inline void usb_transfer(pio_port_t *pp, uint8_t *data,
+                                          uint16_t len, bool arm_rx) {
+   if (pp->need_pre) {
++    // KVM_PRE_TURNAROUND: idle time in front of EVERY PRE, see below.
++    if (KVM_PRE_GAP_QBITS) {
++      busy_wait_at_least_cycles(KVM_PRE_GAP_QBITS * pp->clk_div_ls_tx.div_int);
++    }
+     send_pre(pp);
+   }
+ 
+@@ -263,6 +275,14 @@ int __no_inline_not_in_flash_func(pio_usb_bus_receive_packet_and_handshake)(
+   uint32_t turnaround_in_cycle = 0;
+   if (pp->low_speed) {
+     turnaround_in_cycle = 6 * pp->clk_div_ls_tx.div_int; // 1.5 bit time
++    // KVM_PRE_TURNAROUND (dante-usb-kvm/rp2350/patches): behind a hub the
++    // handshake starts with a FULL-SPEED PRE packet, 1.3 us long. 1.5 LS bit
++    // times after the EOP was detected the hub is still finishing that EOP
++    // (2 LS bits of SE0 + 1 of J = 2 us), so the PRE collides with it, the hub
++    // never opens its low-speed port and the device never sees our ACK.
++    if (pp->need_pre) {
++      turnaround_in_cycle = KVM_PRE_ACK_QBITS * pp->clk_div_ls_tx.div_int;
++    }
+   }
+ 
+   if (!pio_usb_bus_wait_for_rx_start(pp)) {

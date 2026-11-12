@@ -1,0 +1,41 @@
+diff --git a/src/portable/raspberrypi/rp2040/hcd_rp2040.c b/src/portable/raspberrypi/rp2040/hcd_rp2040.c
+index 2c0a3fd..9eae1c1 100644
+--- a/src/portable/raspberrypi/rp2040/hcd_rp2040.c
++++ b/src/portable/raspberrypi/rp2040/hcd_rp2040.c
+@@ -235,6 +235,18 @@ static void __tusb_irq_path_func(hcd_rp2040_irq)(void)
+   {
+     handled |= USB_INTS_ERROR_RX_TIMEOUT_BITS;
+     usb_hw_clear->sie_status = USB_SIE_STATUS_RX_TIMEOUT_BITS;
++    // KVM_RX_TIMEOUT (dante-usb-kvm/rp2350/patches): 0.18 only clears the flag,
++    // so a control transfer that timed out never completes and enumeration
++    // waits for ever -- measured 2026-11-12, "Get Device Descriptor" for the
++    // keyboard behind the hub and then silence. Do what current TinyUSB does:
++    // stop the transaction and fail the transfer so the stack can retry it.
++    extern volatile uint32_t kvm_rx_timeouts;
++    kvm_rx_timeouts++;
++    usb_hw->sie_ctrl = SIE_CTRL_BASE | USB_SIE_CTRL_STOP_TRANS_BITS;
++    TU_LOG(1, "  RX timeout\r\n");
++    if (epx.active) {
++      hw_xfer_complete(&epx, XFER_RESULT_FAILED);
++    }
+   }
+ 
+   if ( status & USB_INTS_ERROR_DATA_SEQ_BITS )
+@@ -243,7 +255,16 @@ static void __tusb_irq_path_func(hcd_rp2040_irq)(void)
+     TU_LOG(3, "  Seq Error: [0] = 0x%04u  [1] = 0x%04x\r\n",
+            tu_u32_low16(*epx.buffer_control),
+            tu_u32_high16(*epx.buffer_control));
+-    panic("Data Seq Error \n");
++    // KVM_DATA_SEQ (dante-usb-kvm/rp2350/patches): do not panic. A data
++    // sequence error is what a host sees when the device repeats a packet
++    // because it missed our ACK -- routine for a low-speed device behind a
++    // full-speed hub, measured 2026-11-12 on four boots out of four. USB's
++    // answer is to drop the duplicate and carry on; halting the whole
++    // firmware over it is not.
++    extern volatile uint32_t kvm_data_seq_errors;
++    kvm_data_seq_errors++;
++    handled |= USB_INTS_ERROR_DATA_SEQ_BITS;   // or the catch-all below panics instead
++    TU_LOG(1, "  Data Seq Error (ignored)\r\n");
+   }
+ 
+   if ( status ^ handled )

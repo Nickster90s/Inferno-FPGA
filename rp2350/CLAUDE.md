@@ -5,9 +5,85 @@ PIO-USB host), 12-byte frames out over UART0 to the FPGA, which relays them to
 the Main or Backup host. The FPGA side is `../firmware/kvm.c`; the gateware and
 its placement history are in `../CLAUDE.md`. `README.md` here has the long form.
 
-**Status 2026-11-11: compiles and the host-side test passes. It has never run
-on the board.** Do not describe anything USB-, UART- or timing-related as
-working until it has been measured there.
+**Status 2026-11-12: runs on the board.** Keyboard and mouse reach both hosts,
+`/kvm/main` and `/kvm/backup` route them, hot-plug works. Wired low-speed
+keyboard + mouse behind a hub work **on the Type-C build with the right hub** --
+see "Hubs" below before touching anything USB.
+
+## Two builds, two host ports
+
+| build dir | cmake | host port | console |
+|---|---|---|---|
+| `build/` | (default) | USB-A, bit-banged (Pico-PIO-USB) | CDC on the Type-C |
+| `build_typec/` | `-DKVM_NATIVE_HOST=1` | **Type-C**, the RP2350's own controller, through a C-to-A OTG adapter | none |
+
+`./flash.sh [FILE.uf2]` copies a build to the board (this box does not
+auto-mount the boot drive). The default build accepts `B` on its console to
+enter the bootloader; the Type-C build needs BOOT + RESET.
+
+Bench-only switches: `-DKVM_USB_DEBUG=1` (TinyUSB's log; on the Type-C build it
+is saved to flash and read with `./readlog.sh`), `-DKVM_LINK_BEACON=1`
+(progress as counts in the FPGA's `resyncs`), `-DKVM_PRE_ACK_QBITS` /
+`-DKVM_PRE_GAP_QBITS` (PIO-USB timing).
+
+## Hubs: the chip decides, and it cost a day
+
+**A hub with chip `214b:7250` does not pass low-speed devices when the host is
+full-speed -- and the RP2350 can only be full-speed.** Two of them were tried.
+Measured 2026-11-12 with a Cherry mouse (`046a:b091`) and a keyboard
+(`1c4f:0043`), both low-speed:
+
+| host | hub `214b:7250` | hub `0a05:7211` |
+|---|---|---|
+| Type-C, native controller | fails: data-sequence errors, RX timeouts, 0 reports | **works at once** |
+| USB-A, Pico-PIO-USB | fails: 15-30% of transfers lost, 1 run in ~13 enumerates | not tried |
+
+The failure is the same on two unrelated host implementations, which is what
+pointed at the hub. On a PC both hubs work, because a PC talks high-speed to
+`214b:7250` and never uses its full-speed low-speed path. **The tell is in
+`dmesg` on a PC: the working hub enumerates as `new full-speed USB device`, the
+broken one as `new high-speed`.** Full-speed devices (a wireless combo dongle)
+work through either hub.
+
+So when "the hub does not work": identify the hub chip and the device speed
+FIRST. Do not tune timing. A day went into `KVM_PRE_*` sweeps and four library
+versions before a different hub answered it in a minute.
+
+## Patches to the libraries in ~/pico (`patches/`)
+
+The libraries live outside the repo, so the changes are kept as patch files and
+are currently APPLIED in `~/pico`. A fresh clone needs them re-applied.
+
+- `tinyusb-0.18-hcd-rp2040-data-seq.patch` -- the native host driver called
+  `panic()` on a data-sequence error and never completed a transfer that timed
+  out. Both happen routinely with a marginal hub; the first halted the firmware
+  four boots out of four. Now counted and survived. **Needed by the Type-C
+  build.** The stop-and-fail path still hit `panic: ep 80 was already
+  available` twice on the bad hub; the watchdog covers it.
+- `pico-pio-usb-0.7.3-pre-turnaround.patch` -- waits 4 instead of 1.5 low-speed
+  bit times before the handshake behind a hub. It moved the bad hub from "never
+  past SET_ADDRESS" to "sometimes"; whether a good hub needs it is not known.
+
+## Power: do not hot-plug a bus-powered hub on pad 18
+
+Pad 18 (VSYS) is the FPGA board's 5 V. Plugging the bus-powered `214b:7250`
+hub into the RP2350 made **Main and Backup disappear from both hosts at the
+same instant** while the FPGA's CPU carried on (four times, once with the exact
+moment observed). They stayed away 17 minutes, until the FPGA was reloaded.
+With a self-powered hub it did not happen. `tools`-side opcode `'H'` (dstats.c)
+pulses both PHY resets and re-enumerates a healthy board in half a second;
+whether it recovers a board after such a dip is NOT yet tested.
+
+Type-C plus pad 18 at once is fine when both come from the same PC (they did
+here all day); it is two different supplies that must not meet.
+
+## No console on the Type-C build: how to see anything
+
+- It sends one all-released keyboard frame at boot, so `frames_ok` on the FPGA
+  ticks once per (re)start -- a watchdog reset shows up as an extra frame.
+- A watchdog (2 s) restarts it after a panic or hang.
+- RAM does not survive the bootloader (the boot ROM wipes it; measured), so the
+  debug build writes its log to flash 3 s after the log goes quiet.
 
 ## Building
 
@@ -108,7 +184,6 @@ NAKs otherwise.
 
 ## Conventions
 
-- Commit and push only when asked. `rp2350/` is untracked on branch `kvm` as of
-  2026-11-11.
+- Commit and push only when asked.
 - Comments say **why**, with the measurement or the file that decided it, in
   the style of the rest of this repo.

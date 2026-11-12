@@ -5,9 +5,12 @@ its USB-A port; it sends their reports to the FPGA as the 12-byte frames
 `firmware/kvm.c` parses. Which host gets them (Main / Backup) is the FPGA's
 business (`/kvm/main`, `/kvm/backup` over OSC) and is invisible from here.
 
-**Status 2026-11-11: compiles, and the two hardware-free parts pass their test
-on the build machine. It has never run on the board.** Everything under
-"Unverified" below is exactly that.
+**Status 2026-11-12: runs on the board.** Typing and mouse movement reach the
+host, OSC routes them between Main and Backup, hot-plug works. Wired low-speed
+keyboard and mouse behind a hub work on the **Type-C build** with a hub that
+enumerates full-speed on a PC (`0a05:7211`); hubs with chip `214b:7250` do not
+work. The measurements, the two builds, the library patches and the power
+finding are in `CLAUDE.md` -- read that before changing anything USB.
 
 ```
 USB-A  (PIO-USB host, GPIO12/13)   keyboard, mouse, hub or combo dongle
@@ -73,17 +76,22 @@ regenerate, a seed sweep and two tap sweeps, so it was not started from here.
 - **Unplugging** a keyboard or mouse sends a release, for the same reason
   `kvm.c` sends one on a switch.
 
-## Unverified — check these at the bench, in this order
+## Wired devices behind a hub
 
-1. **R13** (1.5 kΩ pull-up on a USB-A data line) — `KVM_HANDOFF.md` says remove
-   it for host use. Not confirmed on a board.
-2. Whether the Ext-Board routes SODIMM 159/161 anywhere reachable.
-3. Enumeration through PIO-USB at all: the console prints one `[rp] d/i: ...`
-   line per HID interface.
-4. Frames arriving: `'W'` opcode on the FPGA (`tools/stats.py`) — `frames_ok`
-   climbing, `frames_bad` and `resyncs` flat.
-5. Mouse feel on the host. If it stutters or overshoots, that is the pacing
-   limit above, not a bug to chase here.
+Use the Type-C build: `cmake -S . -B build_typec -G Ninja -DKVM_NATIVE_HOST=1`,
+flash with `./flash.sh build_typec/kvm_rp2350.uf2`, and connect the hub through
+a USB-C-to-A OTG adapter (either way up). The hub's 5 V then comes from pad 18.
+The USB-A port is unused in that build and there is no console.
+
+## Still unverified
+
+- **Mouse feel.** Motion is approximate by design (see above); nobody has
+  judged yet whether it is good enough in daily use.
+- **The good hub on the USB-A port.** `0a05:7211` was only tried on the Type-C.
+- **R13** (1.5 kOhm pull-up on a USB-A data line): `KVM_HANDOFF.md` says remove
+  it for host use. The USB-A host worked on this board; whether R13 was
+  removed is not recorded.
+- **Recovery after a supply dip** on the FPGA side (opcode `'H'`).
 
 Not done: the FPGA does not tell the RP which host is selected, so a key held
 *across* a switch is not re-sent to the new host until it changes; and nothing

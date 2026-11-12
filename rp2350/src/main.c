@@ -24,10 +24,19 @@
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
 #include "pico/critical_section.h"
+#include "pico/bootrom.h"
+#include "hardware/watchdog.h"
+#if KVM_USB_DEBUG
+#include "hardware/flash.h"
+#include "pico/flash.h"
+#endif
 #include "hardware/clocks.h"
+#include "hardware/sync.h"
 #include "hardware/uart.h"
 
+#if !KVM_NATIVE_HOST
 #include "pio_usb.h"
+#endif
 #include "tusb.h"
 
 #include "hid_parse.h"
@@ -46,15 +55,90 @@ static critical_section_t g_lock;   /* core 0 produces, core 1 consumes */
 // ---------------------------------------------------------------------------
 // Console (CDC on the Type-C)
 // ---------------------------------------------------------------------------
-// Never blocks and never waits for a reader: with nothing plugged into the
-// Type-C -- the normal case -- every write is simply dropped.
+// Never blocks and never waits for a reader. Text goes into a ring and
+// con_task() moves it to the CDC endpoint as room appears; with nothing plugged
+// into the Type-C -- the normal case -- the ring just keeps its newest
+// contents, which is what you want to read the moment you do plug in.
+//
+// The ring is big in a KVM_USB_DEBUG build because TinyUSB's own log is routed
+// here too, and an enumeration prints several kilobytes in a burst.
+#if KVM_USB_DEBUG
+#define CON_RING 32768u
+#else
+#define CON_RING 4096u
+#endif
+// NOT ZEROED AT BOOT, ON PURPOSE: the ring survives a watchdog reset, so the
+// log shows what led up to one. con_init() only clears it when the magic is
+// wrong (a real power-up).
+//
+// It does NOT survive the bootloader. Measured 2026-11-12: after BOOT+RESET
+// with power held, picotool read this whole region back as zeros -- the
+// RP2350's boot ROM wipes RAM. So a debug build also copies the ring to flash
+// (conlog_flash_task) and rp2350/readlog.sh reads it from there.
+#define CON_MAGIC 0x4B564D4Cu                  /* 'KVML' */
+struct conlog {
+    uint32_t magic;
+    uint32_t head, tail;                       /* free-running; index = % CON_RING */
+    uint8_t  buf[CON_RING];
+};
+static struct conlog __uninitialized_ram(g_conlog);
+#define g_con      g_conlog.buf
+#define g_con_head g_conlog.head
+#define g_con_tail g_conlog.tail
+
+static void con_init(void)
+{
+    if (g_conlog.magic != CON_MAGIC || g_con_head - g_con_tail > CON_RING) {
+        g_conlog.magic = CON_MAGIC;
+        g_con_head = g_con_tail = 0;
+    }
+}
+
 static void con_write(const void *p, uint32_t n)
 {
+    const uint8_t *b = p;
+    // TinyUSB may log from the PIO-USB timer interrupt as well as the task.
+    uint32_t irq = save_and_disable_interrupts();
+    for (uint32_t i = 0; i < n; i++) {
+        g_con[g_con_head++ % CON_RING] = b[i];
+        if (g_con_head - g_con_tail > CON_RING) g_con_tail++;   /* drop oldest */
+    }
+    restore_interrupts(irq);
+}
+
+static void con_task(void)
+{
+#if KVM_NATIVE_HOST
+    // The Type-C is the HOST port in this build: there is no CDC to drain to.
+    // The ring still fills, for a debugger.
+    return;
+#else
     if (!tud_cdc_connected()) return;
     uint32_t room = tud_cdc_write_available();
-    if (n > room) n = room;
-    if (n) tud_cdc_write(p, n);
+    uint8_t  chunk[64];
+    uint32_t n = 0;
+    uint32_t irq = save_and_disable_interrupts();
+    while (n < sizeof chunk && n < room && g_con_tail != g_con_head)
+        chunk[n++] = g_con[g_con_tail++ % CON_RING];
+    restore_interrupts(irq);
+    if (n) { tud_cdc_write(chunk, n); tud_cdc_write_flush(); }
+#endif
 }
+
+#if KVM_USB_DEBUG
+// tusb_config.h points CFG_TUSB_DEBUG_PRINTF here.
+int kvm_dbg_printf(const char *fmt, ...)
+{
+    char b[160];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(b, sizeof b, fmt, ap);
+    va_end(ap);
+    if (n > (int)sizeof b - 1) n = sizeof b - 1;
+    if (n > 0) con_write(b, (uint32_t)n);
+    return n;
+}
+#endif
 
 static void con_printf(const char *fmt, ...)
 {
@@ -66,7 +150,69 @@ static void con_printf(const char *fmt, ...)
     if (n < 0) return;
     if (n > (int)sizeof b - 1) n = sizeof b - 1;
     con_write(b, (uint32_t)n);
-    tud_cdc_write_flush();
+}
+
+#if KVM_USB_DEBUG
+// THE LOG, IN FLASH, FOR WHEN THE TYPE-C IS THE HOST PORT AND THERE IS NO
+// CONSOLE. Three seconds after the log last grew, the whole ring is written at
+// CONLOG_FLASH_OFF; rp2350/readlog.sh reads it back with picotool once the
+// board is in the bootloader, by whatever route -- power may drop, unlike RAM.
+// Debug builds only: it stops both cores for about half a second per write.
+#define CONLOG_FLASH_OFF  0x100000u            /* 1 MB into a 2 MB flash */
+#define CONLOG_FLASH_LEN  ((sizeof g_conlog + FLASH_SECTOR_SIZE - 1) & ~(FLASH_SECTOR_SIZE - 1))
+
+static void conlog_flash_write(void *unused)
+{
+    (void)unused;
+    static uint8_t page[CONLOG_FLASH_LEN];     /* a stable, page-padded copy */
+    memset(page, 0xFF, sizeof page);
+    memcpy(page, &g_conlog, sizeof g_conlog);
+    // A sector erase may take 400 ms and there are nine of them; the watchdog
+    // is 2 s. Feed it per sector or the write resets the board half-way.
+    for (uint32_t o = 0; o < CONLOG_FLASH_LEN; o += FLASH_SECTOR_SIZE) {
+        watchdog_update();
+        flash_range_erase(CONLOG_FLASH_OFF + o, FLASH_SECTOR_SIZE);
+    }
+    watchdog_update();
+    flash_range_program(CONLOG_FLASH_OFF, page, CONLOG_FLASH_LEN);
+    watchdog_update();
+}
+
+static void conlog_flash_task(void)
+{
+    static uint32_t        seen, saved;
+    static absolute_time_t quiet_since;
+    if (g_con_head != seen) {
+        seen = g_con_head;
+        quiet_since = get_absolute_time();
+        return;
+    }
+    if (seen == saved || absolute_time_diff_us(quiet_since, get_absolute_time()) < 3000000)
+        return;
+    saved = seen;
+    watchdog_update();
+    flash_safe_execute(conlog_flash_write, NULL, 1000);
+    watchdog_update();
+}
+#endif
+
+// Counted by the patched hcd_rp2040.c (patches/) instead of panicking.
+volatile uint32_t kvm_data_seq_errors, kvm_rx_timeouts;
+
+// PICO_PANIC_FUNCTION (CMakeLists.txt): the SDK's panic() prints through stdio,
+// which this firmware does not have. Keep the message, then wait for the
+// watchdog.
+void kvm_panic(const char *fmt, ...)
+{
+    char b[128];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(b, sizeof b, fmt, ap);
+    va_end(ap);
+    con_write("\r\n*** PANIC: ", 14);
+    if (n > 0) con_write(b, (uint32_t)(n > (int)sizeof b - 1 ? (int)sizeof b - 1 : n));
+    con_write("\r\n", 2);
+    for (;;) tight_loop_contents();
 }
 
 // ---------------------------------------------------------------------------
@@ -74,6 +220,9 @@ static void con_printf(const char *fmt, ...)
 // ---------------------------------------------------------------------------
 static void core1_main(void)
 {
+#if KVM_USB_DEBUG
+    flash_safe_execute_core_init();            /* let core 0 park us for a flash write */
+#endif
     absolute_time_t next = make_timeout_time_ms(1);
     for (;;) {
         busy_wait_until(next);
@@ -93,6 +242,21 @@ static void core1_main(void)
 // ---------------------------------------------------------------------------
 // USB host: HID interfaces
 // ---------------------------------------------------------------------------
+#if KVM_LINK_BEACON
+// BENCH ONLY (-DKVM_LINK_BEACON=1). With no console, progress is signalled by
+// sending n bytes of 0x00 to the FPGA: not a frame, so each one bumps the
+// 'resyncs' counter of opcode 'W' and nothing else. 3 = a device was
+// configured, 20 = a HID interface was mounted, 100 = a device went away.
+static void beacon(unsigned n)
+{
+    static const uint8_t z[100] = { 0 };
+    uart_write_blocking(LINK_UART, z, n > sizeof z ? sizeof z : n);
+}
+void tuh_mount_cb(uint8_t dev)  { (void)dev; beacon(3); }
+void tuh_umount_cb(uint8_t dev) { (void)dev; beacon(100); }
+#else
+#define beacon(n) ((void)0)
+#endif
 enum { ROLE_NONE = 0, ROLE_KEYBOARD, ROLE_MOUSE_BOOT, ROLE_MOUSE_REPORT,
        ROLE_MOUSE_ASK,        /* wants report protocol, not requested yet */
        ROLE_MOUSE_ASKED };    /* requested, waiting for the answer        */
@@ -143,6 +307,7 @@ static void start_rx(uint8_t dev, uint8_t idx)
 void tuh_hid_mount_cb(uint8_t dev, uint8_t idx, uint8_t const *desc, uint16_t len)
 {
     uint8_t     proto = tuh_hid_interface_protocol(dev, idx);
+    beacon(20);
     hid_slot_t *s = slot_find(dev, idx, true);
     if (!s) { con_printf("[rp] %u/%u: no free slot\r\n", dev, idx); return; }
 
@@ -271,7 +436,7 @@ static void fpga_log_task(void)
     uint32_t n = 0;
     while (n < sizeof b && uart_is_readable(LINK_UART))
         b[n++] = (uint8_t)uart_getc(LINK_UART);
-    if (n) { con_write(b, n); tud_cdc_write_flush(); }
+    if (n) con_write(b, n);
 }
 
 static void status_task(void)
@@ -280,13 +445,26 @@ static void status_task(void)
     if (!time_reached(next)) return;
     next = make_timeout_time_ms(2000);
 
-    // Swallow whatever was typed: nothing here takes commands, and the FPGA
-    // reads its RX as HID frames only, so keystrokes must NOT be forwarded.
-    if (tud_cdc_available()) tud_cdc_read_flush();
+    // Typed input is never forwarded: the FPGA reads its RX as HID frames
+    // only. The one command is 'B' = reboot into the UF2 bootloader, so a new
+    // firmware can be copied without reaching for the BOOT button.
+#if !KVM_NATIVE_HOST
+    while (tud_cdc_available()) {
+        if (tud_cdc_read_char() == 'B') rom_reset_usb_boot(0, 0);
+    }
+#endif
 
     critical_section_enter_blocking(&g_lock);
     kvm_sched_t c = g_sched;
     critical_section_exit(&g_lock);
+
+    // ONLY WHEN SOMETHING MOVED. An unconditional line every 2 s meant the log
+    // was never quiet for 3 s, so conlog_flash_task() never wrote it: measured
+    // 2026-11-12, the flash region read back as all FF after a full session.
+    static uint32_t last;
+    uint32_t sum = c.frames_kbd + c.frames_mouse + c.frames_neutral + c.kbd_coalesced;
+    if (sum == last) return;
+    last = sum;
     con_printf("[rp] frames kbd %lu mouse %lu neutral %lu, kbd coalesced %lu\r\n",
                (unsigned long)c.frames_kbd, (unsigned long)c.frames_mouse,
                (unsigned long)c.frames_neutral, (unsigned long)c.kbd_coalesced);
@@ -301,9 +479,11 @@ uint32_t tusb_time_millis_api(void)
 
 int main(void)
 {
+#if !KVM_NATIVE_HOST
     // Pico-PIO-USB bit-bangs 12 Mbit/s and needs a system clock that is a
     // multiple of 12 MHz. The RP2350's default 150 MHz is not.
     set_sys_clock_khz(120000, true);
+#endif
 
     uart_init(LINK_UART, LINK_BAUD);
     uart_set_format(LINK_UART, 8, 1, UART_PARITY_NONE);
@@ -312,9 +492,22 @@ int main(void)
     // An unconfigured FPGA floats its TX; without this the RX reads noise.
     gpio_pull_up(LINK_RX_PIN);
 
+    con_init();
+    con_printf("\r\n[rp] boot%s\r\n", watchdog_caused_reboot() ? " (WATCHDOG)" : "");
+    // A panic or a hang in the USB stack must not leave a dead keyboard until
+    // someone power-cycles the box. panic() ends in a loop; this ends the loop.
+    watchdog_enable(2000, true);
+
     kvm_sched_init(&g_sched);
     critical_section_init(&g_lock);
 
+#if KVM_NATIVE_HOST
+    // HOST ON THE RP2350'S OWN USB CONTROLLER (the Type-C, through a C-to-A
+    // OTG adapter). Unlike the bit-banged port it has the low-speed preamble
+    // in hardware, which is what a wired keyboard behind a hub needs.
+    tusb_rhport_init_t host_init = { .role = TUSB_ROLE_HOST, .speed = TUSB_SPEED_AUTO };
+    tusb_init(BOARD_TUH_RHPORT, &host_init);
+#else
     tusb_rhport_init_t dev_init = { .role = TUSB_ROLE_DEVICE, .speed = TUSB_SPEED_AUTO };
     tusb_init(BOARD_TUD_RHPORT, &dev_init);
 
@@ -323,14 +516,30 @@ int main(void)
     tuh_configure(BOARD_TUH_RHPORT, TUH_CFGID_RPI_PIO_USB_CONFIGURATION, &pio_cfg);
     tusb_rhport_init_t host_init = { .role = TUSB_ROLE_HOST, .speed = TUSB_SPEED_AUTO };
     tusb_init(BOARD_TUH_RHPORT, &host_init);
+#endif
+
+    // SAY SOMETHING AT BOOT. One all-released keyboard report: it is what the
+    // host should hold after we restart anyway (a key that was down when we
+    // went away must not stay down), and it makes frames_ok on the FPGA tick
+    // once -- the only sign of life this board can give when the Type-C is
+    // not a console.
+    static const uint8_t released[8] = { 0 };
+    kvm_sched_keyboard(&g_sched, released);
 
     multicore_launch_core1(core1_main);
 
     for (;;) {
+        watchdog_update();
+#if !KVM_NATIVE_HOST
         tud_task();
+#endif
         tuh_task();
         protocol_task();
         fpga_log_task();
         status_task();
+        con_task();
+#if KVM_USB_DEBUG
+        conlog_flash_task();
+#endif
     }
 }
